@@ -4,11 +4,11 @@ import { Icon } from './ui/Icon';
 import { CloudSyncButton } from './CloudSyncButton'; 
 import { THEME_PRESETS, AVAILABLE_ICONS } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
-import { generateId, exportToJson, exportToCsv, formatCurrency, cn } from '../utils';
+import { generateId, exportToJson, exportToCsv, formatCurrency, cn, readCsvFileWithEncoding } from '../utils';
 import { WebDAVService } from '../services/webdav';
 import { format } from 'date-fns';
 import { SyncLogModal } from './SyncLogModal';
-import { Ledger } from '../types';
+import { Ledger, Category } from '../types';
 
 type SettingsPage = 'main' | 'security' | 'ledgers' | 'theme' | 'history' | 'about' | 'categories' | 'layout';
 
@@ -71,6 +71,7 @@ export const SettingsView: React.FC = () => {
   const [ledgerModal, setLedgerModal] = useState<{isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; color: string;}>({ isOpen: false, mode: 'create', name: '', color: '#007AFF' });
   const [catType, setCatType] = useState<'expense' | 'income'>('expense');
   const [isAddingCat, setIsAddingCat] = useState(false);
+  const [editingCat, setEditingCat] = useState<Category | null>(null);
   const [newCatName, setNewCatName] = useState('');
   const [newCatIcon, setNewCatIcon] = useState('Circle');
   const [isReordering, setIsReordering] = useState(false);
@@ -267,6 +268,24 @@ export const SettingsView: React.FC = () => {
   };
 
   const handleDragEnd = () => setDragIndex(null);
+
+  const openEditCategory = (cat: Category) => {
+      setEditingCat(cat);
+      setNewCatName(cat.name);
+      setNewCatIcon(cat.icon);
+  };
+
+  const saveEditCategory = () => {
+      if (!editingCat) return;
+      if (!newCatName.trim()) {
+          window.alert("请输入分类名称");
+          return;
+      }
+      dispatch({ type: 'UPDATE_CATEGORY', payload: { ...editingCat, name: newCatName.trim(), icon: newCatIcon, updatedAt: Date.now() } });
+      setEditingCat(null);
+      setNewCatName('');
+      setNewCatIcon('Circle');
+  };
 
   const testConnection = async () => {
       const url = (webdavForm.url || '').trim();
@@ -583,7 +602,7 @@ export const SettingsView: React.FC = () => {
                     <input type="file" accept=".csv" className="hidden" onChange={async (e) => {
                         const file = e.target.files?.[0];
                         if (file) {
-                            const text = await file.text();
+                            const text = await readCsvFileWithEncoding(file);
                             smartImportCsv(text, state.currentLedgerId);
                         }
                     }} />
@@ -663,6 +682,7 @@ export const SettingsView: React.FC = () => {
                             isReordering && "cursor-move select-none",
                             dragIndex === index && isReordering ? "ring-2 ring-ios-primary/50" : ""
                         )}
+                        onClick={() => { if (!isReordering) openEditCategory(c); }}
                     >
                         <div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-zinc-800 flex items-center justify-center text-ios-primary">
                             <Icon name={c.icon} className="w-4 h-4" />
@@ -689,13 +709,22 @@ export const SettingsView: React.FC = () => {
                                 </button>
                             </>
                         ) : (
-                            <button 
-                                type="button"
-                                onClick={(e) => handleDeleteCategory(e, c.id)}
-                                className="absolute -top-2 -right-2 w-7 h-7 bg-red-500 text-white rounded-full flex items-center justify-center shadow-md z-20 active:scale-90 transition-transform"
-                            >
-                                <Icon name="X" className="w-3.5 h-3.5 pointer-events-none" />
-                            </button>
+                            <>
+                              <button 
+                                  type="button"
+                                  onClick={(e) => handleDeleteCategory(e, c.id)}
+                                  className="absolute -top-2 -right-2 w-7 h-7 bg-red-500 text-white rounded-full flex items-center justify-center shadow-md z-20 active:scale-90 transition-transform"
+                              >
+                                  <Icon name="X" className="w-3.5 h-3.5 pointer-events-none" />
+                              </button>
+                              <button 
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); openEditCategory(c); }}
+                                  className="absolute -bottom-2 left-1/2 -translate-x-1/2 px-2 py-1 text-[10px] bg-ios-primary text-white rounded-full shadow-md"
+                              >
+                                  编辑
+                              </button>
+                            </>
                         )}
                     </div>
                 ))}
@@ -721,6 +750,46 @@ export const SettingsView: React.FC = () => {
                         <button onClick={handleAddCategory} className="text-ios-primary font-bold">完成</button>
                     </div>
                     
+                    <div className="flex items-center gap-4 mb-6 bg-gray-50 dark:bg-zinc-800 p-4 rounded-2xl">
+                        <div className="w-12 h-12 rounded-full bg-white dark:bg-zinc-700 shadow-sm flex items-center justify-center text-ios-primary">
+                            <Icon name={newCatIcon} className="w-6 h-6" />
+                        </div>
+                        <input 
+                            type="text" 
+                            placeholder="分类名称" 
+                            value={newCatName}
+                            onChange={(e) => setNewCatName(e.target.value)}
+                            className="flex-1 bg-transparent text-lg outline-none placeholder:text-gray-400"
+                            autoFocus
+                        />
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto no-scrollbar">
+                        <div className="grid grid-cols-6 gap-4 pb-10">
+                            {AVAILABLE_ICONS.map(icon => (
+                                <button 
+                                    key={icon}
+                                    onClick={() => setNewCatIcon(icon)}
+                                    className={cn("aspect-square rounded-xl flex items-center justify-center transition-all", newCatIcon === icon ? "bg-ios-primary text-white shadow-lg scale-110" : "bg-gray-50 dark:bg-zinc-800 text-ios-subtext")}
+                                >
+                                    <Icon name={icon} className="w-5 h-5" />
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {editingCat && (
+            <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm">
+                <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-6 animate-slide-up h-[70vh] flex flex-col">
+                    <div className="flex justify-between items-center mb-6">
+                        <button onClick={() => { setEditingCat(null); setNewCatName(''); setNewCatIcon('Circle'); }} className="text-ios-subtext">取消</button>
+                        <h3 className="font-bold text-lg">编辑分类</h3>
+                        <button onClick={saveEditCategory} className="text-ios-primary font-bold">保存</button>
+                    </div>
+
                     <div className="flex items-center gap-4 mb-6 bg-gray-50 dark:bg-zinc-800 p-4 rounded-2xl">
                         <div className="w-12 h-12 rounded-full bg-white dark:bg-zinc-700 shadow-sm flex items-center justify-center text-ios-primary">
                             <Icon name={newCatIcon} className="w-6 h-6" />

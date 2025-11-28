@@ -1,8 +1,8 @@
-import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef, useCallback } from 'react';
+﻿import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef, useCallback } from 'react';
 import { AppState, AppAction, Transaction, Ledger, OperationLog, BackupLog, Category, AppSettings } from '../types';
 import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, INITIAL_LEDGERS } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
-import { generateId, extractCategoriesFromCsv, formatCurrency } from '../utils';
+import { generateId, extractCategoriesFromCsv, formatCurrency, parseCsvToTransactions } from '../utils';
 import { db, initAndMigrateDB, dbAPI } from '../services/db';
 import { SyncService } from '../services/sync';
 
@@ -114,6 +114,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
         return { ...state, settings: { ...state.settings, isFirstRun: false } };
     case 'ADD_CATEGORY':
         return { ...state, categories: [...state.categories, action.payload] };
+    case 'UPDATE_CATEGORY':
+        return { ...state, categories: state.categories.map(c => c.id === action.payload.id ? action.payload : c) };
     case 'DELETE_CATEGORY':
         return { ...state, categories: state.categories.filter(c => c.id !== action.payload) };
     case 'REORDER_CATEGORIES':
@@ -157,7 +159,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const loadedSettings = settings ? { ...DEFAULT_SETTINGS, ...settings } : DEFAULT_SETTINGS;
         if (loadedSettings.enableCloudSync === undefined) loadedSettings.enableCloudSync = false;
 
-        // Seed DB when全新启动，保证分类/账本存在于数据库中便于后续删除/更新
+        // Seed DB when鍏ㄦ柊鍚姩锛屼繚璇佸垎绫?璐︽湰瀛樺湪浜庢暟鎹簱涓究浜庡悗缁垹闄?鏇存柊
         const shouldSeedLedgers = !ledgers || ledgers.length === 0;
         const shouldSeedCategories = !categories || categories.length === 0;
         const shouldSeedSettings = !settings;
@@ -231,7 +233,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // Logs & Notes
     if(t.note) dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: t.categoryId, note: t.note }});
-    logOperation('add', t.id, `添加 ${t.type === 'expense' ? '支出' : '收入'} ${t.amount}`);
+    logOperation('add', t.id, 'Add ' + (t.type === 'expense' ? 'expense ' : 'income ') + t.amount);
   };
 
   const updateTransaction = (t: Transaction) => {
@@ -239,7 +241,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     db.transactions.put({ ...t, updatedAt: Date.now(), isDeleted: false });
     
     if(t.note) dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: t.categoryId, note: t.note }});
-    logOperation('edit', t.id, `更新金额 ${t.amount}`);
+    logOperation('edit', t.id, 'Update amount ' + t.amount);
   };
 
   const deleteTransaction = (id: string) => {
@@ -249,7 +251,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       // Soft Delete in DB
       db.transactions.update(id, { isDeleted: true, updatedAt: Date.now() });
 
-      logOperation('delete', id, `删除 ${target.amount}`);
+      logOperation('delete', id, 'Delete ' + target.amount);
       setUndoStack({ type: 'restore_delete', data: target });
     }
   };
@@ -259,7 +261,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const restored = { ...undoStack.data, isDeleted: false, updatedAt: Date.now() };
       dispatch({ type: 'RESTORE_TRANSACTION', payload: restored });
       db.transactions.put(restored);
-      logOperation('restore', restored.id, '撤销删除');
+      logOperation('restore', restored.id, '鎾ら攢鍒犻櫎');
       setUndoStack(null);
     }
   };
@@ -283,6 +285,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               break;
           case 'ADD_CATEGORY':
               db.categories.put({ ...action.payload, updatedAt: Date.now(), isDeleted: false });
+              break;
+          case 'UPDATE_CATEGORY':
+              db.categories.put({ ...action.payload, updatedAt: Date.now() });
               break;
           case 'UPDATE_SETTINGS': // Note: Settings handled by useEffect, but could be here too
               break;
@@ -315,7 +320,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const batchDeleteTransactions = (ids: string[]) => {
       if (!ids || ids.length === 0) return;
       enhancedDispatch({ type: 'BATCH_DELETE_TRANSACTIONS', payload: ids });
-      logOperation('delete', 'batch', `批量删除 ${ids.length} 条账目`);
+      logOperation('delete', 'batch', 'Batch delete ' + ids.length + ' items');
   };
 
   const batchUpdateTransactions = (ids: string[], updates: Partial<Transaction>) => {
@@ -327,7 +332,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (noteToSave && categoryForNote) {
           dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: categoryForNote, note: noteToSave } });
       }
-      logOperation('edit', 'batch', `批量更新 ${ids.length} 条账目`);
+      logOperation('edit', 'batch', 'Batch update ' + ids.length + ' items');
   };
 
 
@@ -336,7 +341,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const performUpload = useCallback(async (isAuto = false) => {
       const { settings } = stateRef.current;
       if (!settings.webdavUrl || !settings.webdavUrl.trim()) {
-          if (!isAuto) throw new Error("WebDAV 未配置");
+          if (!isAuto) throw new Error("WebDAV not configured");
           return;
       }
 
@@ -348,7 +353,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           await syncer.performSync(); // Smart Sync
 
           dispatch({ type: 'SET_SYNC_STATUS', payload: 'success' });
-          dispatch({ type: 'ADD_BACKUP_LOG', payload: { id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'success', file: 'Sync', message: isAuto ? "自动同步完成" : "手动同步完成" } });
+          dispatch({ type: 'ADD_BACKUP_LOG', payload: { id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'success', file: 'Sync', message: isAuto ? "Auto sync complete" : "Manual sync complete" } });
           
           // Reload data from DB to UI after sync (to reflect merged changes)
           const [ledgers, cats, txs] = await Promise.all([
@@ -400,17 +405,65 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const smartImportCsv = (csvContent: string, targetLedgerId: string = state.currentLedgerId) => {
-       // ... kept similar, but ensure writing to DB ...
-       // (Simplified for brevity, assumes logic similar to before but dispatch handles it or we call db.put directly)
-       try {
-           const extractedCats = extractCategoriesFromCsv(csvContent);
-           // ... logic to add categories ...
-           // db.categories.bulkPut(...)
-           
-           // ... logic to parse txs ...
-           // db.transactions.bulkPut(...)
-           alert('导入功能需适配新数据库，暂略 (请使用同步)');
-       } catch(e) {}
+      try {
+          const parsedTxs = parseCsvToTransactions(csvContent);
+          if (!parsedTxs || parsedTxs.length === 0) {
+              alert("No records found in CSV, please check format");
+              return;
+          }
+
+          const csvCats = extractCategoriesFromCsv(csvContent);
+          const catMap = new Map<string, string>(); // key = type:name -> categoryId
+          const newCats: Category[] = [];
+          const nextOrder: Record<'expense' | 'income', number> = {
+              expense: Math.max(-1, ...state.categories.filter(c => c.type === 'expense').map(c => c.order ?? 0)) + 1,
+              income: Math.max(-1, ...state.categories.filter(c => c.type === 'income').map(c => c.order ?? 0)) + 1,
+          };
+
+          const registerCat = (nameRaw: string, typeRaw: 'expense' | 'income'): string => {
+              const type = typeRaw === 'income' ? 'income' : 'expense';
+              const name = (nameRaw || 'Other').trim();
+              const key = type + ':' + name;
+              if (catMap.has(key)) return catMap.get(key)!;
+              const existing = state.categories.find(c => c.type === type && (c.name === name || c.id === name));
+              if (existing) {
+                  catMap.set(key, existing.id);
+                  return existing.id;
+              }
+              const newCat: Category = { id: generateId(), name, icon: 'Circle', type, order: nextOrder[type]++, isCustom: true, updatedAt: Date.now(), isDeleted: false };
+              newCats.push(newCat);
+              catMap.set(key, newCat.id);
+              return newCat.id;
+          };
+
+          // Register categories first
+          csvCats.forEach(c => registerCat(c.name, c.type));
+
+          // Persist new categories
+          newCats.forEach(c => enhancedDispatch({ type: 'ADD_CATEGORY', payload: c }));
+
+          // Normalize and persist transactions
+          parsedTxs.forEach(tx => {
+              const mappedCatId = registerCat(tx.categoryId || 'Other', tx.type === 'income' ? 'income' : 'expense');
+              const normalized: Transaction = {
+                  ...tx,
+                  id: tx.id || generateId(),
+                  ledgerId: targetLedgerId,
+                  categoryId: mappedCatId,
+                  type: tx.type === 'income' ? 'income' : 'expense',
+                  note: tx.note || '',
+                  createdAt: tx.createdAt || tx.date || Date.now(),
+                  updatedAt: tx.updatedAt || tx.date || Date.now(),
+                  isDeleted: false,
+              };
+              addTransaction(normalized);
+          });
+
+          alert("Import finished, " + parsedTxs.length + " records added");
+      } catch (e: any) {
+          console.error(e);
+          alert("Import failed: " + (e?.message || 'parse error'));
+      }
   };
 
   if (!isDBLoaded) return null; // Or loading spinner
@@ -423,3 +476,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 };
 
 export const useApp = () => useContext(AppContext);
+
+
+
+
+
+
+
+
+
+

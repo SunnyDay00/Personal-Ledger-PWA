@@ -70,27 +70,32 @@ export function transactionsToCsv(transactions: Transaction[], categories: Categ
     return [headers.join(','), ...rows].join('\n');
 }
 
-const parseCsvLine = (text: string) => {
+const parseCsvLine = (text: string, delimiter: ',' | '\t' = ',') => {
     const cols: string[] = [];
     let inQuote = false;
     let buffer = '';
-    for(let char of text) {
-        if(char === '"') { inQuote = !inQuote; }
-        else if(char === ',' && !inQuote) { cols.push(buffer); buffer = ''; }
+    for (let char of text) {
+        if (char === '"') { inQuote = !inQuote; }
+        else if (char === delimiter && !inQuote) { cols.push(buffer); buffer = ''; }
         else { buffer += char; }
     }
     cols.push(buffer);
     return cols;
 }
 
+const detectDelimiter = (headerLine: string): ',' | '\t' => {
+    return headerLine.includes('\t') ? '\t' : ',';
+};
+
 export function extractCategoriesFromCsv(csvContent: string): { id: string, name: string, type: 'expense'|'income' }[] {
     let content = csvContent;
     if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
     
-    const lines = content.split('\n').map(l => l.trim()).filter(l => l);
+    const lines = content.split(/\r?\n/).map(l => l.trim()).filter(l => l);
     if (lines.length < 2) return [];
 
-    const headers = lines[0].split(',').map(h => h.trim());
+    const delimiter = detectDelimiter(lines[0]);
+    const headers = lines[0].split(delimiter).map(h => h.trim());
     const idx = {
         name: headers.indexOf('Category'),
         id: headers.indexOf('categoryId'),
@@ -104,7 +109,7 @@ export function extractCategoriesFromCsv(csvContent: string): { id: string, name
 
     for (let i = 1; i < lines.length; i++) {
         try {
-            const cols = parseCsvLine(lines[i]);
+            const cols = parseCsvLine(lines[i], delimiter);
             const name = cols[idx.name]?.trim();
             const id = cols[idx.id]?.trim();
             let type: 'expense'|'income' = 'expense';
@@ -131,15 +136,16 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
         content = content.slice(1);
     }
 
-    const lines = content.split('\n').map(l => l.trim()).filter(l => l);
+    const lines = content.split(/\r?\n/).map(l => l.trim()).filter(l => l);
     if (lines.length < 2) return [];
 
-    const headers = lines[0].split(',').map(h => h.trim());
+    const delimiter = detectDelimiter(lines[0]);
+    const headers = lines[0].split(delimiter).map(h => h.trim());
     const transactions: Transaction[] = [];
 
     let idx = {
         id: 0, ledgerId: 1, amount: 2, type: 3, categoryId: 4, date: 5, note: 6, createdAt: 7, updatedAt: 8,
-        timeStr: -1, isDeleted: -1
+        timeStr: -1, isDeleted: -1, catName: -1, ledgerName: -1
     };
 
     if (headers.includes('id') && (headers.includes('dateTs') || headers.includes('Time'))) {
@@ -154,13 +160,15 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
             createdAt: headers.indexOf('createdAtTs'),
             updatedAt: headers.indexOf('updatedAtTs'),
             timeStr: headers.indexOf('Time'),
-            isDeleted: headers.indexOf('isDeleted')
+            isDeleted: headers.indexOf('isDeleted'),
+            catName: headers.indexOf('Category'),
+            ledgerName: headers.indexOf('Ledger')
         };
     }
 
     for (let i = 1; i < lines.length; i++) {
         try {
-            const cols = parseCsvLine(lines[i]);
+            const cols = parseCsvLine(lines[i], delimiter);
             if (cols.length < 3) continue; 
 
             let typeVal: any = cols[idx.type];
@@ -169,6 +177,8 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
                if (cnTypeIdx !== -1) typeVal = cols[cnTypeIdx].includes('收入') ? 'income' : 'expense';
                else typeVal = 'expense';
             }
+            if (typeVal === '支出') typeVal = 'expense';
+            if (typeVal === '收入') typeVal = 'income';
             
             let amountVal = parseFloat(cols[idx.amount]);
             if (isNaN(amountVal)) {
@@ -192,13 +202,19 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
             if(note && note.startsWith('"') && note.endsWith('"')) note = note.slice(1, -1).replace(/""/g, '"');
 
             const isDeleted = idx.isDeleted !== -1 && cols[idx.isDeleted] === '1';
+            const catName = idx.catName !== -1 ? cols[idx.catName]?.trim() : '';
+            const ledgerName = idx.ledgerName !== -1 ? cols[idx.ledgerName]?.trim() : '';
+            let categoryId = (idx.categoryId !== -1 && cols[idx.categoryId]) ? cols[idx.categoryId] : '';
+            if (!categoryId && catName) categoryId = catName; // fallback to name for mapping
+            let ledgerId = (idx.ledgerId !== -1 && cols[idx.ledgerId]) ? cols[idx.ledgerId] : '';
+            if (!ledgerId && ledgerName) ledgerId = ledgerName; // fallback to name
 
             transactions.push({
                 id: txId,
-                ledgerId: (idx.ledgerId !== -1 && cols[idx.ledgerId]) ? cols[idx.ledgerId] : '',
+                ledgerId: ledgerId || '',
                 amount: amountVal,
                 type: typeVal || 'expense',
-                categoryId: (idx.categoryId !== -1 && cols[idx.categoryId]) ? cols[idx.categoryId] : 'unknown',
+                categoryId: categoryId || 'unknown',
                 date: dateTs,
                 note: note || '',
                 createdAt: (idx.createdAt !== -1 && parseInt(cols[idx.createdAt])) || Date.now(),
@@ -208,6 +224,20 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
         } catch (e) { continue; }
     }
     return transactions;
+}
+
+export async function readCsvFileWithEncoding(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length >= 2) {
+      if (bytes[0] === 0xFF && bytes[1] === 0xFE) {
+          return new TextDecoder('utf-16le').decode(bytes);
+      }
+      if (bytes[0] === 0xFE && bytes[1] === 0xFF) {
+          return new TextDecoder('utf-16be').decode(bytes);
+      }
+  }
+  return new TextDecoder('utf-8').decode(bytes);
 }
 
 export function exportToCsv(transactions: Transaction[], categories: Category[], ledgers: Ledger[], filename: string) {

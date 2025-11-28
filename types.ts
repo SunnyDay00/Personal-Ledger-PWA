@@ -145,6 +145,7 @@ export type AppAction =
   | { type: 'CLEAR_SEARCH_HISTORY' }
   | { type: 'COMPLETE_ONBOARDING' }
   | { type: 'ADD_CATEGORY'; payload: Category }
+  | { type: 'UPDATE_CATEGORY'; payload: Category }
   | { type: 'DELETE_CATEGORY'; payload: string }
   | { type: 'REORDER_CATEGORIES'; payload: Category[] }
   | { type: 'SAVE_NOTE_HISTORY'; payload: { categoryId: string; note: string } };
