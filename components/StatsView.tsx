@@ -1,4 +1,3 @@
-
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
@@ -139,8 +138,13 @@ export const StatsView: React.FC = () => {
       }
   }, [filteredData, chartType, timeRange, start, end, categories, pieType]);
 
-  // Extreme Values
-  const extremes = useMemo(() => {
+  // Extreme Values - Explicitly typed to prevent "type 'never'" errors during build
+  const extremes = useMemo((): {
+      maxExpTx: Transaction | null;
+      maxIncTx: Transaction | null;
+      maxExpPeriod: { date: string; amount: number } | null;
+      maxIncPeriod: { date: string; amount: number } | null;
+  } | null => {
       if (filteredData.length === 0) return null;
 
       let maxExpTx: Transaction | null = null;
