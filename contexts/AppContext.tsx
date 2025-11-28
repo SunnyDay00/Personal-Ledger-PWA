@@ -25,6 +25,8 @@ interface AppContextType {
   addTransaction: (t: Transaction) => void;
   updateTransaction: (t: Transaction) => void;
   deleteTransaction: (id: string) => void;
+  batchDeleteTransactions: (ids: string[]) => void;
+  batchUpdateTransactions: (ids: string[], updates: Partial<Transaction>) => void;
   undo: () => void;
   canUndo: boolean;
   manualBackup: () => Promise<void>;
@@ -39,6 +41,8 @@ const AppContext = createContext<AppContextType>({
   addTransaction: () => null,
   updateTransaction: () => null,
   deleteTransaction: () => null,
+  batchDeleteTransactions: () => null,
+  batchUpdateTransactions: () => null,
   undo: () => null,
   canUndo: false,
   manualBackup: async () => {},
@@ -153,12 +157,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const loadedSettings = settings ? { ...DEFAULT_SETTINGS, ...settings } : DEFAULT_SETTINGS;
         if (loadedSettings.enableCloudSync === undefined) loadedSettings.enableCloudSync = false;
 
+        // Seed DB when全新启动，保证分类/账本存在于数据库中便于后续删除/更新
+        const shouldSeedLedgers = !ledgers || ledgers.length === 0;
+        const shouldSeedCategories = !categories || categories.length === 0;
+        const shouldSeedSettings = !settings;
+        const ledgerSeed = (shouldSeedLedgers ? INITIAL_LEDGERS : ledgers).map(l => ({ ...l, updatedAt: l.updatedAt || Date.now(), isDeleted: false }));
+        const categorySeed = (shouldSeedCategories ? DEFAULT_CATEGORIES : categories).map((c, idx) => ({ ...c, order: c.order ?? idx, updatedAt: c.updatedAt || Date.now(), isDeleted: false }));
+        if (shouldSeedLedgers) await db.ledgers.bulkPut(ledgerSeed);
+        if (shouldSeedCategories) await db.categories.bulkPut(categorySeed);
+        if (shouldSeedSettings) await db.settings.put({ key: 'main', value: loadedSettings });
+
         const newState: Partial<AppState> = {
             settings: loadedSettings,
-            ledgers: ledgers && ledgers.length > 0 ? ledgers : INITIAL_LEDGERS,
-            categories: categories && categories.length > 0 ? categories : DEFAULT_CATEGORIES,
+            ledgers: ledgerSeed,
+            categories: categorySeed,
             transactions: transactions || [],
-            currentLedgerId: ledgers && ledgers.length > 0 ? ledgers[0].id : INITIAL_LEDGERS[0].id,
+            currentLedgerId: ledgerSeed[0]?.id || INITIAL_LEDGERS[0].id,
             syncStatus: 'idle',
             isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true
         };
@@ -278,7 +292,42 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           case 'REORDER_CATEGORIES':
               db.categories.bulkPut(action.payload.map(c => ({...c, updatedAt: Date.now()})));
               break;
+          case 'BATCH_DELETE_TRANSACTIONS':
+              db.transactions.where('id').anyOf(action.payload).modify({ isDeleted: true, updatedAt: Date.now() });
+              break;
+          case 'BATCH_UPDATE_TRANSACTIONS': {
+              const { ids, updates } = action.payload;
+              const now = Date.now();
+              const persistedUpdates: Partial<Transaction> = {};
+              (Object.entries(updates) as [keyof Transaction, any][]).forEach(([key, value]) => {
+                  if (value !== undefined) (persistedUpdates as any)[key] = value;
+              });
+              db.transactions.where('id').anyOf(ids).modify(t => {
+                  Object.assign(t, persistedUpdates);
+                  t.updatedAt = now;
+                  t.isDeleted = false;
+              });
+              break;
+          }
       }
+  };
+
+  const batchDeleteTransactions = (ids: string[]) => {
+      if (!ids || ids.length === 0) return;
+      enhancedDispatch({ type: 'BATCH_DELETE_TRANSACTIONS', payload: ids });
+      logOperation('delete', 'batch', `批量删除 ${ids.length} 条账目`);
+  };
+
+  const batchUpdateTransactions = (ids: string[], updates: Partial<Transaction>) => {
+      if (!ids || ids.length === 0) return;
+      if (!updates || Object.keys(updates).length === 0) return;
+      enhancedDispatch({ type: 'BATCH_UPDATE_TRANSACTIONS', payload: { ids, updates } });
+      const noteToSave = updates.note;
+      const categoryForNote = updates.categoryId || state.transactions.find(t => ids.includes(t.id))?.categoryId;
+      if (noteToSave && categoryForNote) {
+          dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: categoryForNote, note: noteToSave } });
+      }
+      logOperation('edit', 'batch', `批量更新 ${ids.length} 条账目`);
   };
 
 
@@ -367,7 +416,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   if (!isDBLoaded) return null; // Or loading spinner
 
   return (
-    <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, undo, canUndo: !!undoStack, manualBackup, importData, smartImportCsv, restoreFromCloud }}>
+    <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, batchDeleteTransactions, batchUpdateTransactions, undo, canUndo: !!undoStack, manualBackup, importData, smartImportCsv, restoreFromCloud }}>
       {children}
     </AppContext.Provider>
   );

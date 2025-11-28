@@ -74,6 +74,11 @@ export const SettingsView: React.FC = () => {
   const [newCatName, setNewCatName] = useState('');
   const [newCatIcon, setNewCatIcon] = useState('Circle');
   const [isReordering, setIsReordering] = useState(false);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+      if (!isReordering) setDragIndex(null);
+  }, [isReordering]);
 
   // Export Modal State
   const [exportModal, setExportModal] = useState<{
@@ -237,6 +242,31 @@ export const SettingsView: React.FC = () => {
       
       dispatch({ type: 'REORDER_CATEGORIES', payload: reorderedPayload });
   };
+
+  const handleDragStart = (index: number) => {
+      if (!isReordering) return;
+      setDragIndex(index);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+      if (!isReordering) return;
+      e.preventDefault();
+  };
+
+  const handleDrop = (index: number) => {
+      if (!isReordering || dragIndex === null || dragIndex === index) {
+          setDragIndex(null);
+          return;
+      }
+      const newSorted = [...sortedCategories];
+      const [moved] = newSorted.splice(dragIndex, 1);
+      newSorted.splice(index, 0, moved);
+      const reorderedPayload = newSorted.map((c, i) => ({ ...c, order: i }));
+      dispatch({ type: 'REORDER_CATEGORIES', payload: reorderedPayload });
+      setDragIndex(null);
+  };
+
+  const handleDragEnd = () => setDragIndex(null);
 
   const testConnection = async () => {
       const url = (webdavForm.url || '').trim();
@@ -615,12 +645,25 @@ export const SettingsView: React.FC = () => {
                 {isReordering ? '完成' : '排序'}
             </button>
         </div>
+        {isReordering && <p className="text-[11px] text-ios-subtext px-4 -mt-2 mb-2">拖动分类卡片即可调整顺序，也可用左右箭头微调。</p>}
 
         {/* Categories Grid */}
         <div className="px-4">
             <div className="grid grid-cols-4 gap-3">
                 {sortedCategories.map((c, index) => (
-                    <div key={c.id} className="relative group bg-white dark:bg-zinc-900 rounded-xl p-3 flex flex-col items-center justify-center gap-2 shadow-sm border border-ios-border aspect-square animate-fade-in">
+                    <div 
+                        key={c.id}
+                        draggable={isReordering}
+                        onDragStart={() => handleDragStart(index)}
+                        onDragOver={handleDragOver}
+                        onDrop={() => handleDrop(index)}
+                        onDragEnd={handleDragEnd}
+                        className={cn(
+                            "relative group bg-white dark:bg-zinc-900 rounded-xl p-3 flex flex-col items-center justify-center gap-2 shadow-sm border border-ios-border aspect-square animate-fade-in",
+                            isReordering && "cursor-move select-none",
+                            dragIndex === index && isReordering ? "ring-2 ring-ios-primary/50" : ""
+                        )}
+                    >
                         <div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-zinc-800 flex items-center justify-center text-ios-primary">
                             <Icon name={c.icon} className="w-4 h-4" />
                         </div>

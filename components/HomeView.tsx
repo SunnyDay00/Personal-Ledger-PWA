@@ -16,7 +16,7 @@ interface HomeViewProps {
 }
 
 export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }) => {
-  const { state, deleteTransaction, dispatch } = useApp();
+  const { state, deleteTransaction, dispatch, batchDeleteTransactions, batchUpdateTransactions } = useApp();
   const { currentLedgerId, transactions, categories, ledgers, settings } = state; // Removed unused destructuring
   const currentLedger = ledgers.find(l => l.id === currentLedgerId) || ledgers[0];
 
@@ -108,7 +108,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
 
   const handleBatchDelete = () => {
       if (confirm(`确定要删除选中的 ${selectedIds.size} 条记录吗？`)) {
-          dispatch({ type: 'BATCH_DELETE_TRANSACTIONS', payload: Array.from(selectedIds) });
+          batchDeleteTransactions(Array.from(selectedIds));
           setIsSelectionMode(false);
           setSelectedIds(new Set());
       }
@@ -117,7 +117,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
   const handleBatchUpdate = (updates: Partial<Transaction>) => {
       if (Object.keys(updates).length === 0) return;
       if (confirm(`确定要更新选中的 ${selectedIds.size} 条记录吗？`)) {
-          dispatch({ type: 'BATCH_UPDATE_TRANSACTIONS', payload: { ids: Array.from(selectedIds), updates } });
+          batchUpdateTransactions(Array.from(selectedIds), updates);
           setIsSelectionMode(false);
           setSelectedIds(new Set());
           setShowBatchEdit(false);
