@@ -1,4 +1,3 @@
-
 import { AppSettings } from "../types";
 
 export interface WebDAVFile {
@@ -53,7 +52,7 @@ export class WebDAVService {
     if (!this.auth) throw new Error("WebDAV 账号或密码未配置");
 
     const fullUrl = `${this.url}${path.startsWith('/') ? '' : '/'}${path}`;
-    const MAX_RETRIES = 2; 
+    const MAX_RETRIES = 5; // Increased from 2 to 5 for better stability
     let attempt = 0;
 
     while (true) {
@@ -78,7 +77,10 @@ export class WebDAVService {
             if (res.status === 503 || res.status === 429 || res.status === 502 || res.status === 504) {
                 if (attempt < MAX_RETRIES) {
                     attempt++;
-                    await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+                    // Exponential backoff with jitter: 1s, 2s, 4s, 8s, 16s + random
+                    const delay = 1000 * Math.pow(2, attempt - 1) + (Math.random() * 500);
+                    console.warn(`WebDAV ${method} retry ${attempt}/${MAX_RETRIES} after ${Math.round(delay)}ms due to ${res.status}`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
                     continue;
                 } else {
                     throw new Error(`服务器繁忙 (${res.status})，请稍后重试`);
@@ -101,7 +103,9 @@ export class WebDAVService {
 
             if (isNetworkError && attempt < MAX_RETRIES) {
                 attempt++;
-                await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+                const delay = 1000 * Math.pow(2, attempt - 1) + (Math.random() * 500);
+                console.warn(`Network error retry ${attempt}/${MAX_RETRIES} after ${Math.round(delay)}ms`);
+                await new Promise(resolve => setTimeout(resolve, delay));
                 continue;
             }
 
