@@ -1,0 +1,5 @@
+{
+  "name": "Personal Ledger PWA",
+  "description": "A high-performance, iOS-style personal finance tracker with WebDAV sync and multi-ledger support.",
+  "requestFramePermissions": []
+}

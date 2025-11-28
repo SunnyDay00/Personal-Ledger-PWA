@@ -1,0 +1,17 @@
+{
+  "name": "个人记账本",
+  "short_name": "记账本",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F2F2F7",
+  "theme_color": "#F2F2F7",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/apple-touch-icon.svg?v=2",
+      "sizes": "200x200",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
