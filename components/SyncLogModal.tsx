@@ -1,5 +1,5 @@
-
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { format } from 'date-fns';
@@ -21,8 +21,8 @@ export const SyncLogModal: React.FC<{ onClose: () => void }> = ({ onClose }) => 
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-[100] bg-ios-bg w-screen h-screen flex flex-col animate-slide-up">
+  const modalContent = (
+    <div className="fixed inset-0 z-[100] flex flex-col bg-ios-bg animate-slide-up">
       <div className="pt-[env(safe-area-inset-top)] px-4 bg-white/90 dark:bg-zinc-900/90 backdrop-blur-xl border-b border-ios-border z-10 shrink-0">
         <div className="flex items-center justify-between h-14">
             <button onClick={onClose} className="p-2 -ml-2 text-ios-subtext text-base">关闭</button>
@@ -94,4 +94,6 @@ export const SyncLogModal: React.FC<{ onClose: () => void }> = ({ onClose }) => 
       </div>
     </div>
   );
+
+  return createPortal(modalContent, document.body);
 };

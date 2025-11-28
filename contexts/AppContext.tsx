@@ -1,7 +1,7 @@
-
 import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef, useCallback } from 'react';
 import { AppState, AppAction, Transaction, Ledger, OperationLog, BackupLog, Category, AppSettings } from '../types';
-import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, INITIAL_LEDGERS, UPDATE_LOGS } from '../constants';
+import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, INITIAL_LEDGERS } from '../constants';
+import { UPDATE_LOGS } from '../changelog';
 import { generateId, extractCategoriesFromCsv, formatCurrency } from '../utils';
 import { db, initAndMigrateDB, dbAPI } from '../services/db';
 import { SyncService } from '../services/sync';

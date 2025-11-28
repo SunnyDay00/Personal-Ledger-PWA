@@ -1,6 +1,4 @@
-
-
-import { Category, Ledger, AppSettings, UpdateLog } from './types';
+import { Category, Ledger, AppSettings } from './types';
 
 export const DEFAULT_THEME_COLOR = '#007AFF';
 
@@ -28,83 +26,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   categoryNotes: {}, // Init note history
   searchHistory: [],
   isFirstRun: true,
-  version: '1.2.4',
+  version: '2.0.0',
 };
 
 export const INITIAL_LEDGERS: Ledger[] = [
   { id: 'l1', name: '个人生活', themeColor: '#007AFF', createdAt: Date.now() },
-];
-
-export const UPDATE_LOGS: UpdateLog[] = [
-  {
-      version: '1.2.4',
-      date: new Date().toLocaleDateString(),
-      content: [
-          '新增添加账目时“快速备注”功能，自动记录常用备注',
-          '优化云端备份警告提示',
-          '更新应用图标'
-      ]
-  },
-  {
-    version: '1.2.3',
-    date: '2023/11/20',
-    content: [
-        '新增云端同步安全开关，防止误覆盖数据',
-        '新增本地导入/导出操作反馈与日志记录',
-        '优化数据安全提示'
-    ]
-  },
-  {
-    version: '1.2.2',
-    date: '2023/11/15',
-    content: [
-      '新增云端同步状态图标 (红/绿/蓝三色指示)',
-      '点击同步图标可直接查看详细日志',
-      '优化云端日志显示，区分上传与下载操作',
-      '修复手动全量备份日志记录不完整的问题'
-    ]
-  },
-  {
-    version: '1.2.1',
-    date: '2023/11/08',
-    content: [
-      '修复首次安装时云端恢复失败的问题',
-      '优化云端备份日志，文件用途更清晰',
-      '优化金额显示，支持智能隐藏小数位'
-    ]
-  },
-  {
-    version: '1.2.0',
-    date: '2023/11/01',
-    content: [
-      '优化金额显示策略：整数不显示小数位，小数自动显示两位',
-      '修复添加账目时小数点显示问题',
-      '优化云端备份日志详情显示',
-      '新增收入/支出饼图切换功能'
-    ]
-  },
-  {
-    version: '1.1.0',
-    date: '2023/10/28',
-    content: [
-      'UI 界面优化，视觉更清爽',
-      '记账勋章界面重构，数据展示更直观',
-      '金额默认不显示小数位，界面更整洁'
-    ]
-  },
-  {
-    version: '1.0.0',
-    date: '2023/10/24', 
-    content: [
-      '应用首发',
-      '支持多账本管理',
-      'iOS 风格液态视觉设计',
-      'WebDAV 云端备份',
-      '支持批量操作与分类管理',
-      '多维度预算功能',
-      '详细的记账勋章与统计'
-    ]
-  }
 ];
 
 // Helper to create category list easily

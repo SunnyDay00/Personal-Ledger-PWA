@@ -1,9 +1,9 @@
-
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { CloudSyncButton } from './CloudSyncButton'; // Import
-import { THEME_PRESETS, AVAILABLE_ICONS, UPDATE_LOGS } from '../constants';
+import { THEME_PRESETS, AVAILABLE_ICONS } from '../constants';
+import { UPDATE_LOGS } from '../changelog';
 import { generateId, exportToJson, exportToCsv, formatCurrency, cn } from '../utils';
 import { WebDAVService } from '../services/webdav';
 import { format } from 'date-fns';
