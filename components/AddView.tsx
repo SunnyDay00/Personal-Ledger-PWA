@@ -1,5 +1,3 @@
-
-
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
@@ -31,10 +29,12 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
 
   useEffect(() => {
     const handleResize = () => {
-       if (window.visualViewport) {
+       // Type assertion to bypass TS error if VisualViewport type is missing
+       const vv = (window as any).visualViewport;
+       if (vv) {
            setVisualViewport({
-               height: window.visualViewport.height,
-               offsetTop: window.visualViewport.offsetTop
+               height: vv.height,
+               offsetTop: vv.offsetTop
            });
        } else {
            setVisualViewport({
@@ -44,18 +44,18 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
        }
     };
 
-    if (window.visualViewport) {
-        window.visualViewport.addEventListener('resize', handleResize);
-        window.visualViewport.addEventListener('scroll', handleResize);
+    if ((window as any).visualViewport) {
+        (window as any).visualViewport.addEventListener('resize', handleResize);
+        (window as any).visualViewport.addEventListener('scroll', handleResize);
         handleResize(); // Init
     } else {
         window.addEventListener('resize', handleResize);
     }
     
     return () => {
-        if (window.visualViewport) {
-            window.visualViewport.removeEventListener('resize', handleResize);
-            window.visualViewport.removeEventListener('scroll', handleResize);
+        if ((window as any).visualViewport) {
+            (window as any).visualViewport.removeEventListener('resize', handleResize);
+            (window as any).visualViewport.removeEventListener('scroll', handleResize);
         } else {
             window.removeEventListener('resize', handleResize);
         }
