@@ -455,7 +455,7 @@ export const SettingsView: React.FC = () => {
                         <Icon name={isBackingUp ? "Loader2" : "CloudUpload"} className={cn("w-5 h-5", isBackingUp && "animate-spin")} />
                     </div>
                     <span className="text-sm font-medium">立即备份</span>
-                    <span className="text-[10px] text-ios-subtext">本地 {'->'} 云端</span>
+                    <span className="text-[10px] text-ios-subtext">本地 → 云端</span>
                 </button>
 
                 <button 
@@ -499,7 +499,7 @@ export const SettingsView: React.FC = () => {
                         <Icon name={isRestoring ? "Loader2" : "CloudDownload"} className={cn("w-5 h-5", isRestoring && "animate-spin")} />
                     </div>
                     <span className="text-sm font-medium">从云端恢复</span>
-                    <span className="text-[10px] text-ios-subtext">云端 {'->'} 本地</span>
+                    <span className="text-[10px] text-ios-subtext">云端 → 本地</span>
                 </button>
             </div>
         </div>
