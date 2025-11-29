@@ -483,10 +483,46 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               dbAPI.getAllLedgersIncludingDeleted(),
               dbAPI.getAllCategoriesIncludingDeleted(),
           ]);
+          // 规范化字段（含删除标记），确保后端能写入 is_deleted 等字段
+          const userId = syncUserId || 'default';
+          const mapLedger = (l: any) => ({
+              id: l.id,
+              user_id: userId,
+              name: l.name,
+              theme_color: l.themeColor || l.theme_color,
+              created_at: l.createdAt || l.created_at || Date.now(),
+              updated_at: l.updatedAt || l.updated_at || Date.now(),
+              is_deleted: !!l.isDeleted
+          });
+          const mapCategory = (c: any) => ({
+              id: c.id,
+              user_id: userId,
+              name: c.name,
+              icon: c.icon,
+              type: c.type,
+              order: c.order ?? 0,
+              is_custom: !!(c.isCustom ?? c.is_custom),
+              updated_at: c.updatedAt || c.updated_at || Date.now(),
+              is_deleted: !!c.isDeleted
+          });
+          const mapTx = (t: any) => ({
+              id: t.id,
+              user_id: userId,
+              ledger_id: t.ledgerId || t.ledger_id,
+              amount: t.amount,
+              type: t.type,
+              category_id: t.categoryId || t.category_id,
+              date: t.date,
+              note: t.note || '',
+              created_at: t.createdAt || t.created_at || t.date || Date.now(),
+              updated_at: t.updatedAt || t.updated_at || t.date || Date.now(),
+              is_deleted: !!t.isDeleted
+          });
+
           const payload = {
-              ledgers: ledgersAll,
-              categories: catsAll,
-              transactions: txAll,
+              ledgers: ledgersAll.map(mapLedger),
+              categories: catsAll.map(mapCategory),
+              transactions: txAll.map(mapTx),
               settings: { data: stateRef.current.settings, updated_at: Date.now() }
           };
           await pushToCloud(syncEndpoint, syncToken, syncUserId || 'default', payload);
