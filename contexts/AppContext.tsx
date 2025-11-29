@@ -475,10 +475,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (!syncEndpoint || !syncToken || !isDBLoaded || !stateRef.current.isOnline) return;
       dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
       try {
+          // 使用数据库完整数据（包含已标记删除的记录）以确保删除同步
+          const [txAll, ledgersAll, catsAll] = await Promise.all([
+              dbAPI.getAllTransactionsIncludingDeleted(),
+              dbAPI.getAllLedgersIncludingDeleted(),
+              dbAPI.getAllCategoriesIncludingDeleted(),
+          ]);
           const payload = {
-              ledgers: stateRef.current.ledgers,
-              categories: stateRef.current.categories,
-              transactions: stateRef.current.transactions,
+              ledgers: ledgersAll,
+              categories: catsAll,
+              transactions: txAll,
               settings: { data: stateRef.current.settings, updated_at: Date.now() }
           };
           await pushToCloud(syncEndpoint, syncToken, syncUserId || 'default', payload);

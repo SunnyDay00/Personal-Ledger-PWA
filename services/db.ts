@@ -114,6 +114,12 @@ export const dbAPI = {
     async getAllTransactionsIncludingDeleted() {
         return await db.transactions.toArray();
     },
+    async getAllLedgersIncludingDeleted() {
+        return await db.ledgers.toArray();
+    },
+    async getAllCategoriesIncludingDeleted() {
+        return await db.categories.toArray();
+    },
     async getBackupLogs() {
         return await db.backupLogs.orderBy('timestamp').reverse().toArray();
     }
