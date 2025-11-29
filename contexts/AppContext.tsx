@@ -432,14 +432,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           for (const l of ledgers) {
               const normalized: Ledger = { id: l.id, name: l.name, themeColor: l.theme_color || l.themeColor || '#007AFF', createdAt: l.created_at || Date.now(), updatedAt: l.updated_at || Date.now(), isDeleted: !!l.is_deleted };
               const local = await db.ledgers.get(normalized.id);
-              if (!local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
+              // 删除标记优先同步，避免另一端保留旧数据
+              if (normalized.isDeleted || !local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
                   await db.ledgers.put(normalized);
               }
           }
           for (const c of categories) {
               const normalized: Category = { id: c.id, name: c.name, icon: c.icon, type: c.type, order: c.order ?? 0, isCustom: c.isCustom, updatedAt: c.updated_at || Date.now(), isDeleted: !!c.is_deleted };
               const local = await db.categories.get(normalized.id);
-              if (!local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
+              if (normalized.isDeleted || !local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
                   await db.categories.put(normalized);
               }
           }
@@ -450,7 +451,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                   updatedAt: t.updated_at || t.date || Date.now(), isDeleted: !!t.is_deleted
               };
               const local = await db.transactions.get(normalized.id);
-              if (!local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
+              // 删除标记强制覆盖，保证跨设备删除生效
+              if (normalized.isDeleted || !local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
                   await db.transactions.put(normalized);
               }
           }
