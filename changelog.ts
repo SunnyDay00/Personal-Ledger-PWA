@@ -2,6 +2,18 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '3.0.0',
+      date: '2025/11/29',
+      content: [
+          '重大更新！ ',
+          '数据云端同步架构更改为使用cloudflare的D1+KV的方式。',
+          'WEDDEV云盘作为手动备份，可以设置提醒、定期备份。',
+          '添加退出登录功能，恢复软件初始状态。',
+          '优化界面。',
+          '更新应用图标'
+      ]
+  },
+  {
       version: '2.0.0',
       date: '2025/11/28',
       content: [

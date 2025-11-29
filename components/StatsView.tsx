@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+﻿import React, { useState, useMemo } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { formatCurrency, getWeekRange, getMonthRange, getYearRange } from '../utils';
@@ -49,7 +49,7 @@ export const StatsView: React.FC = () => {
 
   const displayDate = useMemo(() => {
       if (timeRange === 'year') return format(currentDate, 'yyyy年');
-      if (timeRange === 'month') return format(currentDate, 'yyyy年 MM月');
+      if (timeRange === 'month') return format(currentDate, 'yyyy年MM月');
       const { start: s, end: e } = getWeekRange(currentDate);
       return `${format(s, 'MM.dd')} - ${format(e, 'MM.dd')}`;
   }, [timeRange, currentDate]);
@@ -108,7 +108,7 @@ export const StatsView: React.FC = () => {
           if (timeRange === 'year') {
               // Group by Month
               for(let i=0; i<12; i++) {
-                  const label = `${i+1}月`;
+                  const label = `${i + 1}月`;
                   map[i] = { income: 0, expense: 0, label };
               }
               filteredData.forEach(t => {
@@ -191,7 +191,7 @@ export const StatsView: React.FC = () => {
         if(l) createdDate = l.createdAt;
       }
       
-      if (filteredData.length === 0) return { createdDate, topCat: null, avgDaily: 0, avgTx: 0 };
+      if (filteredData.length === 0) return { createdDate, topCat: null, avgDaily: 0, avgIncomeDaily: 0, avgTx: 0 };
 
       // 2. Most Frequent Category
       const catCounts: Record<string, number> = {};
@@ -204,16 +204,18 @@ export const StatsView: React.FC = () => {
 
       // 3. Avg Daily Spending
       const totalExp = filteredData.reduce((acc, t) => t.type === 'expense' ? acc + t.amount : acc, 0);
+      const totalInc = filteredData.reduce((acc, t) => t.type === 'income' ? acc + t.amount : acc, 0);
       const msPerDay = 1000 * 60 * 60 * 24;
       // Calculate active days in range (or just total days in period? Usually total days in period is more meaningful for "Daily Budget")
       const periodDays = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / msPerDay));
       const avgDaily = totalExp / periodDays;
+      const avgIncomeDaily = totalInc / periodDays;
 
       // 4. Avg Transaction Amount (General)
       const totalAmount = filteredData.reduce((acc, t) => acc + t.amount, 0);
       const avgTx = totalAmount / filteredData.length;
 
-      return { createdDate, topCat, avgDaily, avgTx };
+      return { createdDate, topCat, avgDaily, avgIncomeDaily, avgTx };
   }, [filteredData, start, end, selectedLedgerId, ledgers, categories]);
 
   const COLORS = ['#007AFF', '#FF9500', '#34C759', '#AF52DE', '#FF2D55', '#5856D6', '#5AC8FA'];
@@ -307,7 +309,6 @@ export const StatsView: React.FC = () => {
                             <div className="text-sm font-medium">{format(advancedStats.createdDate, 'yyyy-MM-dd')}</div>
                         </div>
                     </div>
-                    
                     <div className="grid grid-cols-3 gap-2 border-t border-gray-100 dark:border-zinc-800 pt-3">
                         <div className="flex flex-col items-center">
                             <span className="text-[10px] text-ios-subtext mb-0.5">总笔数</span>
@@ -344,7 +345,7 @@ export const StatsView: React.FC = () => {
                 <div className="bg-white dark:bg-zinc-900 rounded-3xl p-5 shadow-sm border border-ios-border mb-6">
                     <div className="flex justify-between items-center mb-4">
                         <h3 className="text-xs font-semibold text-ios-subtext uppercase">
-                            {chartType === 'pie' ? (pieType === 'expense' ? '支出分布' : '收入分布') : chartType === 'bar' ? '收支对比' : '收支趋势'}
+                            {chartType === 'pie' ? (pieType === 'expense' ? '支出占比' : '收入占比') : chartType === 'bar' ? '收支对比' : '收支走势'}
                         </h3>
                         <div className="flex bg-gray-100 dark:bg-zinc-800 rounded-lg p-0.5">
                             <button onClick={() => setChartType('pie')} className={clsx("p-1.5 rounded-md", chartType === 'pie' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-primary" : "text-ios-subtext")}>
@@ -426,13 +427,6 @@ export const StatsView: React.FC = () => {
                 {filteredData.length > 0 && (
                     <div className="grid grid-cols-2 gap-3 mb-6">
                         <ExtremeCard 
-                            title="最频分类" 
-                            desc={advancedStats.topCat ? `${advancedStats.topCat.name} (${advancedStats.topCat.count}笔)` : '-'}
-                            icon="Tag"
-                            color="text-purple-500"
-                            bg="bg-purple-50 dark:bg-purple-900/10"
-                        />
-                         <ExtremeCard 
                             title="日均支出" 
                             amount={advancedStats.avgDaily}
                             desc="本周期内平均"
@@ -441,6 +435,21 @@ export const StatsView: React.FC = () => {
                             bg="bg-orange-50 dark:bg-orange-900/10"
                         />
                         <ExtremeCard 
+                            title="日均收入" 
+                            amount={advancedStats.avgIncomeDaily}
+                            desc="本周期内平均"
+                            icon="TrendingUp"
+                            color="text-green-500"
+                            bg="bg-green-50 dark:bg-green-900/10"
+                        />
+                        <ExtremeCard 
+                            title="最频分类" 
+                            desc={advancedStats.topCat ? `${advancedStats.topCat.name} (${advancedStats.topCat.count}次)` : '-'}
+                            icon="Tag"
+                            color="text-purple-500"
+                            bg="bg-purple-50 dark:bg-purple-900/10"
+                        />
+                        <ExtremeCard
                             title="平均交易额" 
                             amount={advancedStats.avgTx}
                             desc="笔均金额"
@@ -450,39 +459,38 @@ export const StatsView: React.FC = () => {
                         />
                     </div>
                 )}
-
                 {/* Extreme Stats */}
                 {extremes && (
                     <div className="space-y-4">
                         <h3 className="text-xs font-semibold text-ios-subtext uppercase px-2">极值统计</h3>
                         <div className="grid grid-cols-2 gap-3">
-                            <ExtremeCard 
-                                title="单笔最高支出" 
-                                amount={extremes.maxExpTx?.amount} 
-                                desc={extremes.maxExpTx ? `${categories.find(c=>c.id === extremes.maxExpTx!.categoryId)?.name} · ${format(extremes.maxExpTx.date, 'MM-dd')}` : '-'}
+                            <ExtremeCard
+                                title="单笔最高支出"
+                                amount={extremes.maxExpTx?.amount}
+                                desc={extremes.maxExpTx ? `${categories.find(c => c.id === extremes.maxExpTx!.categoryId)?.name} · ${format(extremes.maxExpTx.date, 'MM-dd')}` : '-'}
                                 icon="ArrowDownCircle"
                                 color="text-red-500"
                                 bg="bg-red-50 dark:bg-red-900/10"
                             />
-                            <ExtremeCard 
-                                title="单笔最高收入" 
-                                amount={extremes.maxIncTx?.amount} 
-                                desc={extremes.maxIncTx ? `${categories.find(c=>c.id === extremes.maxIncTx!.categoryId)?.name} · ${format(extremes.maxIncTx.date, 'MM-dd')}` : '-'}
+                            <ExtremeCard
+                                title="单笔最高收入"
+                                amount={extremes.maxIncTx?.amount}
+                                desc={extremes.maxIncTx ? `${categories.find(c => c.id === extremes.maxIncTx!.categoryId)?.name} · ${format(extremes.maxIncTx.date, 'MM-dd')}` : '-'}
                                 icon="ArrowUpCircle"
                                 color="text-green-500"
                                 bg="bg-green-50 dark:bg-green-900/10"
                             />
-                            <ExtremeCard 
+                            <ExtremeCard
                                 title={`支出最高${timeRange === 'year' ? '月' : '天'}`}
-                                amount={extremes.maxExpPeriod?.amount} 
+                                amount={extremes.maxExpPeriod?.amount}
                                 desc={extremes.maxExpPeriod ? extremes.maxExpPeriod.date : '-'}
                                 icon="Calendar"
                                 color="text-orange-500"
                                 bg="bg-orange-50 dark:bg-orange-900/10"
                             />
-                            <ExtremeCard 
+                            <ExtremeCard
                                 title={`收入最高${timeRange === 'year' ? '月' : '天'}`}
-                                amount={extremes.maxIncPeriod?.amount} 
+                                amount={extremes.maxIncPeriod?.amount}
                                 desc={extremes.maxIncPeriod ? extremes.maxIncPeriod.date : '-'}
                                 icon="Wallet"
                                 color="text-blue-500"
@@ -509,3 +517,4 @@ const ExtremeCard: React.FC<{ title: string; amount?: number; desc: string; icon
         {amount !== undefined && <div className="text-[10px] text-ios-subtext truncate">{desc}</div>}
     </div>
 );
+

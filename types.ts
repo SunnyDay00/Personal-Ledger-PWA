@@ -89,6 +89,9 @@ export interface AppSettings {
   webdavUser: string;
   webdavPass: string;
   enableCloudSync: boolean; // New safety switch
+  backupReminderDays?: number;
+  backupAutoEnabled?: boolean;
+  backupIntervalDays?: number;
   
   // Budget
   budget: BudgetConfig;
@@ -103,6 +106,10 @@ export interface AppSettings {
   
   // Meta
   lastBackupTime?: number;
+  syncEndpoint?: string;
+  syncToken?: string;
+  lastSyncVersion?: number;
+  syncUserId?: string;
   defaultLedgerId?: string;
   isFirstRun: boolean;
   

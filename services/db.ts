@@ -113,5 +113,8 @@ export const dbAPI = {
     },
     async getAllTransactionsIncludingDeleted() {
         return await db.transactions.toArray();
+    },
+    async getBackupLogs() {
+        return await db.backupLogs.orderBy('timestamp').reverse().toArray();
     }
 };

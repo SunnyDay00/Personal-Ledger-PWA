@@ -4,6 +4,7 @@ import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, INITIAL_LEDGERS } from '../consta
 import { UPDATE_LOGS } from '../changelog';
 import { generateId, extractCategoriesFromCsv, formatCurrency, parseCsvToTransactions } from '../utils';
 import { db, initAndMigrateDB, dbAPI } from '../services/db';
+import { pushToCloud, pullFromCloud } from '../services/d1Sync';
 import { SyncService } from '../services/sync';
 
 const initialState: AppState = {
@@ -30,9 +31,12 @@ interface AppContextType {
   undo: () => void;
   canUndo: boolean;
   manualBackup: () => Promise<void>;
+  manualCloudSync: () => Promise<void>;
   importData: (data: Partial<AppState>) => void;
   smartImportCsv: (csvContent: string, targetLedgerId?: string) => void;
   restoreFromCloud: () => Promise<void>;
+  resetApp: () => Promise<void>;
+  restoreFromD1: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType>({
@@ -46,9 +50,12 @@ const AppContext = createContext<AppContextType>({
   undo: () => null,
   canUndo: false,
   manualBackup: async () => {},
+  manualCloudSync: async () => {},
   importData: () => {},
   smartImportCsv: () => {},
   restoreFromCloud: async () => {},
+  resetApp: async () => {},
+  restoreFromD1: async () => {},
 });
 
 function appReducer(state: AppState, action: AppAction): AppState {
@@ -142,6 +149,11 @@ function appReducer(state: AppState, action: AppAction): AppState {
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [state, dispatch] = useReducer(appReducer, initialState);
   const [isDBLoaded, setIsDBLoaded] = useState(false);
+  const [syncDirty, setSyncDirty] = useState(false);
+  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoBackupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoBackupRunningRef = useRef(false);
+  const autoBackupRef = useRef(false);
 
   // Initialize DB and Load State
   useEffect(() => {
@@ -149,11 +161,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         await initAndMigrateDB();
         
         // Load data from DB to Memory for UI (ViewModel)
-        const [settings, ledgers, categories, transactions] = await Promise.all([
+        const [settings, ledgers, categories, transactions, backupLogs] = await Promise.all([
             dbAPI.getSettings(),
             dbAPI.getLedgers(),
             dbAPI.getCategories(),
-            dbAPI.getTransactions()
+            dbAPI.getTransactions(),
+            dbAPI.getBackupLogs()
         ]);
 
         const loadedSettings = settings ? { ...DEFAULT_SETTINGS, ...settings } : DEFAULT_SETTINGS;
@@ -174,6 +187,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             ledgers: ledgerSeed,
             categories: categorySeed,
             transactions: transactions || [],
+            backupLogs: backupLogs || [],
             currentLedgerId: ledgerSeed[0]?.id || INITIAL_LEDGERS[0].id,
             syncStatus: 'idle',
             isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true
@@ -222,6 +236,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   }, [state.settings.themeMode, state.currentLedgerId, state.ledgers, state.settings.customThemeColor]);
 
+  // Backup reminder（仅提示一次）
+  const hasRemindedRef = useRef(false);
+  useEffect(() => {
+      if (!isDBLoaded || hasRemindedRef.current) return;
+      const { lastBackupTime, webdavUrl, webdavUser, webdavPass, backupReminderDays } = state.settings;
+      const hasWebdav = !!(webdavUrl && webdavUser && webdavPass);
+      const thresholdDays = backupReminderDays ?? 7;
+      // 仅在已配置 WebDAV 且存在有效的上次备份时间且开启提醒时提示
+      if (!hasWebdav || !lastBackupTime || thresholdDays <= 0) return;
+      const days = (Date.now() - lastBackupTime) / (1000 * 60 * 60 * 24);
+      if (days > thresholdDays) {
+          alert(`建议手动备份：距离上次备份已超过 ${thresholdDays} 天`);
+          hasRemindedRef.current = true;
+      }
+  }, [isDBLoaded, state.settings.lastBackupTime, state.settings.webdavUrl, state.settings.webdavUser, state.settings.webdavPass, state.settings.backupReminderDays]);
+
 
   // ================= ACTIONS (DB + State) =================
 
@@ -234,6 +264,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // Logs & Notes
     if(t.note) dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: t.categoryId, note: t.note }});
     logOperation('add', t.id, 'Add ' + (t.type === 'expense' ? 'expense ' : 'income ') + t.amount);
+    setSyncDirty(true);
   };
 
   const updateTransaction = (t: Transaction) => {
@@ -242,6 +273,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     
     if(t.note) dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: t.categoryId, note: t.note }});
     logOperation('edit', t.id, 'Update amount ' + t.amount);
+    setSyncDirty(true);
   };
 
   const deleteTransaction = (id: string) => {
@@ -253,6 +285,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       logOperation('delete', id, 'Delete ' + target.amount);
       setUndoStack({ type: 'restore_delete', data: target });
+      setSyncDirty(true);
     }
   };
 
@@ -270,6 +303,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const originalDispatch = dispatch;
   const enhancedDispatch: React.Dispatch<AppAction> = (action) => {
       originalDispatch(action);
+      const markDirtyTypes: AppAction['type'][] = [
+          'ADD_LEDGER','UPDATE_LEDGER','DELETE_LEDGER',
+          'ADD_CATEGORY','UPDATE_CATEGORY','DELETE_CATEGORY','REORDER_CATEGORIES',
+          'UPDATE_SETTINGS','BATCH_DELETE_TRANSACTIONS','BATCH_UPDATE_TRANSACTIONS'
+      ];
       // Handle DB writes for non-transaction entities
       switch(action.type) {
           case 'ADD_LEDGER':
@@ -314,7 +352,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               });
               break;
           }
+          case 'ADD_BACKUP_LOG':
+              db.backupLogs.put(action.payload);
+              break;
       }
+      if (markDirtyTypes.includes(action.type)) setSyncDirty(true);
   };
 
   const batchDeleteTransactions = (ids: string[]) => {
@@ -353,7 +395,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           await syncer.performSync(); // Smart Sync
 
           dispatch({ type: 'SET_SYNC_STATUS', payload: 'success' });
-          dispatch({ type: 'ADD_BACKUP_LOG', payload: { id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'success', file: 'Sync', message: isAuto ? "Auto sync complete" : "Manual sync complete" } });
+          logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'success', file: 'Sync', message: isAuto ? "Auto sync complete" : "Manual sync complete" });
           
           // Reload data from DB to UI after sync (to reflect merged changes)
           const [ledgers, cats, txs] = await Promise.all([
@@ -368,18 +410,149 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       } catch (e: any) {
           console.error("Sync Failed:", e);
           dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
-          dispatch({ type: 'ADD_BACKUP_LOG', payload: { id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'failure', file: 'Sync', message: e.message } });
+          logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'failure', file: 'Sync', message: e.message });
           if (!isAuto) throw e;
       }
   }, []);
 
-  useEffect(() => {
-      if (!state.settings.enableCloudSync || !state.isOnline || !state.settings.webdavUrl || !isDBLoaded) return;
-      const timer = setTimeout(() => { performUpload(true); }, 5000);
-      return () => clearTimeout(timer);
-  }, [state.transactions, state.ledgers, state.categories, state.settings.enableCloudSync, isDBLoaded]);
+  // ============ D1 Sync ============ //
+  const mergeFromCloud = useCallback(async (payload: {ledgers:any[]; categories:any[]; transactions:any[]; settings:any; version:number}) => {
+      const { ledgers = [], categories = [], transactions = [], settings, version } = payload;
 
-  const manualBackup = async () => { await performUpload(false); };
+      await (db as any).transaction('rw', db.ledgers, db.categories, db.transactions, db.settings, async () => {
+          for (const l of ledgers) {
+              const normalized: Ledger = { id: l.id, name: l.name, themeColor: l.theme_color || l.themeColor || '#007AFF', createdAt: l.created_at || Date.now(), updatedAt: l.updated_at || Date.now(), isDeleted: !!l.is_deleted };
+              const local = await db.ledgers.get(normalized.id);
+              if (!local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
+                  await db.ledgers.put(normalized);
+              }
+          }
+          for (const c of categories) {
+              const normalized: Category = { id: c.id, name: c.name, icon: c.icon, type: c.type, order: c.order ?? 0, isCustom: c.isCustom, updatedAt: c.updated_at || Date.now(), isDeleted: !!c.is_deleted };
+              const local = await db.categories.get(normalized.id);
+              if (!local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
+                  await db.categories.put(normalized);
+              }
+          }
+          for (const t of transactions) {
+              const normalized: Transaction = {
+                  id: t.id, ledgerId: t.ledger_id, amount: t.amount, type: t.type, categoryId: t.category_id,
+                  date: t.date, note: t.note || '', createdAt: t.created_at || t.date || Date.now(),
+                  updatedAt: t.updated_at || t.date || Date.now(), isDeleted: !!t.is_deleted
+              };
+              const local = await db.transactions.get(normalized.id);
+              if (!local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
+                  await db.transactions.put(normalized);
+              }
+          }
+          if (settings) {
+              const dataObj = typeof settings.data === 'string' ? (() => { try { return JSON.parse(settings.data); } catch { return {}; } })() : (settings.data || {});
+              await db.settings.put({ key: 'main', value: { ...DEFAULT_SETTINGS, ...stateRef.current.settings, ...dataObj, lastSyncVersion: settings.updated_at || Date.now() } });
+          }
+      });
+
+      const [ledgersNew, catsNew, txsNew, settingsRow] = await Promise.all([
+          dbAPI.getLedgers(),
+          dbAPI.getCategories(),
+          dbAPI.getTransactions(),
+          db.settings.get('main')
+      ]);
+      dispatch({ type: 'RESTORE_DATA', payload: { ledgers: ledgersNew, categories: catsNew, transactions: txsNew, settings: settingsRow?.value } });
+      dispatch({ type: 'UPDATE_SETTINGS', payload: { lastSyncVersion: version } });
+  }, []);
+
+  const performCloudSync = useCallback(async (reason: 'auto' | 'manual' = 'auto') => {
+      const { syncEndpoint, syncToken, syncUserId, lastSyncVersion } = stateRef.current.settings;
+      if (!syncEndpoint || !syncToken || !isDBLoaded || !stateRef.current.isOnline) return;
+      dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
+      try {
+          const payload = {
+              ledgers: stateRef.current.ledgers,
+              categories: stateRef.current.categories,
+              transactions: stateRef.current.transactions,
+              settings: { data: stateRef.current.settings, updated_at: Date.now() }
+          };
+          await pushToCloud(syncEndpoint, syncToken, syncUserId || 'default', payload);
+          const pulled = await pullFromCloud(syncEndpoint, syncToken, syncUserId || 'default', lastSyncVersion || 0);
+          await mergeFromCloud(pulled);
+          setSyncDirty(false);
+          logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'success', file: 'D1 Sync', message: reason === 'manual' ? '手动同步成功' : '自动同步成功' });
+          dispatch({ type: 'SET_SYNC_STATUS', payload: 'success' });
+          setTimeout(() => dispatch({ type: 'SET_SYNC_STATUS', payload: 'idle' }), 2000);
+      } catch (e: any) {
+          console.error('Cloud sync failed', e);
+          dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
+          logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'failure', file: 'D1 Sync', message: e?.message || '同步失败' });
+          if (reason === 'manual') alert('Sync failed: ' + (e?.message || 'unknown error'));
+          setSyncDirty(true);
+      }
+  }, [isDBLoaded, mergeFromCloud]);
+
+  useEffect(() => {
+      if (!syncDirty) return;
+      const { syncEndpoint, syncToken } = state.settings;
+      if (!syncEndpoint || !syncToken || !state.isOnline) return;
+      if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+      syncTimerRef.current = setTimeout(() => performCloudSync('auto'), 15000);
+      return () => { if (syncTimerRef.current) clearTimeout(syncTimerRef.current); };
+  }, [syncDirty, state.settings, state.isOnline, performCloudSync]);
+
+  // 自动备份：先同步 D1/KV 再执行 WebDAV 备份，并记录日志
+  const runAutoBackup = useCallback(async () => {
+      if (autoBackupRunningRef.current) return;
+      autoBackupRunningRef.current = true;
+      try {
+          const settings = stateRef.current.settings;
+          const hasWebdav = settings.webdavUrl && settings.webdavUser && settings.webdavPass;
+          if (!settings.backupAutoEnabled || !hasWebdav) return;
+          if (!stateRef.current.isOnline) return;
+
+          // 先同步 D1/KV（若已配置）
+          try {
+              await performCloudSync('auto');
+          } catch (e) {
+              // 同步失败也继续备份，但会记录失败日志
+          }
+
+          await performUpload(true);
+          const now = Date.now();
+          dispatch({ type: 'UPDATE_SETTINGS', payload: { lastBackupTime: now } });
+          logBackup({ id: generateId(), timestamp: now, type: 'full', action: 'upload', status: 'success', file: 'Auto Backup', message: '定期自动备份完成' });
+      } catch (e: any) {
+          logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'failure', file: 'Auto Backup', message: e?.message || '自动备份失败' });
+      } finally {
+          autoBackupRunningRef.current = false;
+      }
+  }, [performCloudSync]);
+
+  // 自动备份调度：按间隔触发
+  useEffect(() => {
+      if (autoBackupTimerRef.current) clearTimeout(autoBackupTimerRef.current);
+      const settings = state.settings;
+      const hasWebdav = settings.webdavUrl && settings.webdavUser && settings.webdavPass;
+      const intervalDays = settings.backupIntervalDays ?? 7;
+      if (!isDBLoaded || !settings.backupAutoEnabled || !hasWebdav || intervalDays <= 0) return;
+
+      const last = settings.lastBackupTime || 0;
+      const intervalMs = intervalDays * 24 * 60 * 60 * 1000;
+      const now = Date.now();
+      const elapsed = now - last;
+      let delay = last ? Math.max(60 * 1000, intervalMs - elapsed) : 5 * 60 * 1000; // 未备份过时，5分钟后首次尝试
+      autoBackupTimerRef.current = setTimeout(() => {
+          runAutoBackup().finally(() => {
+              // 再次调度
+              const again = (settings.backupIntervalDays ?? 7) * 24 * 60 * 60 * 1000;
+              autoBackupTimerRef.current = setTimeout(() => runAutoBackup(), Math.max(60 * 1000, again));
+          });
+      }, delay);
+
+      return () => { if (autoBackupTimerRef.current) clearTimeout(autoBackupTimerRef.current); };
+  }, [state.settings, isDBLoaded, runAutoBackup]);
+
+  const manualBackup = async () => { 
+      await performUpload(false); 
+      dispatch({ type: 'UPDATE_SETTINGS', payload: { lastBackupTime: Date.now() } });
+  };
 
   // For "Restore", we might still want the "wipe and replace" behavior or just trigger a sync
   const restoreFromCloud = async () => {
@@ -394,6 +567,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     dispatch({ type: 'ADD_OPERATION_LOG', payload: log });
     db.operationLogs.put(log);
   };
+
+  const logBackup = (log: BackupLog) => {
+    dispatch({ type: 'ADD_BACKUP_LOG', payload: log });
+    db.backupLogs.put(log);
+  };
   
   const importData = (data: Partial<AppState>) => {
       // Legacy import support
@@ -402,6 +580,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (data.transactions) db.transactions.bulkPut(data.transactions.map(t => ({...t, isDeleted: false, updatedAt: Date.now()})));
       if (data.ledgers) db.ledgers.bulkPut(data.ledgers.map(l => ({...l, isDeleted: false, updatedAt: Date.now()})));
       if (data.categories) db.categories.bulkPut(data.categories.map(c => ({...c, isDeleted: false, updatedAt: Date.now()})));
+      setSyncDirty(true);
   };
 
   const smartImportCsv = (csvContent: string, targetLedgerId: string = state.currentLedgerId) => {
@@ -466,10 +645,75 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
   };
 
+  const manualCloudSync = async () => {
+      await performCloudSync('manual');
+  };
+
+  // D1/KV 只拉取恢复（不会推送本地），适合首次“恢复数据”
+  const restoreFromD1 = async () => {
+      const { syncEndpoint, syncToken, syncUserId } = stateRef.current.settings;
+      if (!syncEndpoint || !syncToken) {
+          throw new Error('请先在设置里填写同步地址和 AUTH_TOKEN');
+      }
+      dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
+      try {
+          const pulled = await pullFromCloud(syncEndpoint, syncToken, syncUserId || 'default', 0);
+          await mergeFromCloud(pulled);
+          dispatch({ type: 'UPDATE_SETTINGS', payload: { lastSyncVersion: pulled.version } });
+          logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'download', status: 'success', file: 'D1 Sync', message: '仅拉取恢复成功' });
+          dispatch({ type: 'SET_SYNC_STATUS', payload: 'success' });
+          setTimeout(() => dispatch({ type: 'SET_SYNC_STATUS', payload: 'idle' }), 2000);
+      } catch (e: any) {
+          logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'download', status: 'failure', file: 'D1 Sync', message: e?.message || '恢复失败' });
+          dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
+          setSyncDirty(true);
+          throw e;
+      }
+  };
+
+  // Reset app: clear local DB, wipe sync/webdav config, go back to first-run
+  const resetApp = async () => {
+      if (!window.confirm('确认要退出并清空本地数据吗？这将删除本地账本/分类/流水、清除云同步和 WebDAV 配置，恢复为首次启动状态。')) return;
+      if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+      // 清空本地表
+      await Promise.all([
+          db.ledgers.clear(),
+          db.categories.clear(),
+          db.transactions.clear(),
+          db.settings.clear(),
+          db.operationLogs.clear(),
+          db.backupLogs.clear(),
+      ]);
+      // 重新播种默认数据
+      const ledgerSeed = INITIAL_LEDGERS.map(l => ({ ...l, updatedAt: Date.now(), isDeleted: false }));
+      const categorySeed = DEFAULT_CATEGORIES.map((c, idx) => ({ ...c, order: c.order ?? idx, updatedAt: Date.now(), isDeleted: false }));
+      await db.ledgers.bulkPut(ledgerSeed);
+      await db.categories.bulkPut(categorySeed);
+      await db.settings.put({ key: 'main', value: { ...DEFAULT_SETTINGS, isFirstRun: true, syncEndpoint: '', syncToken: '', syncUserId: 'default', webdavUrl: '', webdavUser: '', webdavPass: '', enableCloudSync: false, lastSyncVersion: 0 } });
+
+      // 重置内存状态
+      dispatch({
+          type: 'RESTORE_DATA',
+          payload: {
+              ledgers: ledgerSeed,
+              categories: categorySeed,
+              transactions: [],
+              settings: { ...DEFAULT_SETTINGS, isFirstRun: true },
+              currentLedgerId: ledgerSeed[0]?.id || INITIAL_LEDGERS[0].id,
+              operationLogs: [],
+              backupLogs: [],
+              syncStatus: 'idle'
+          }
+      });
+      setSyncDirty(false);
+      setUndoStack(null);
+      alert('已退出并清空本地数据，回到初次使用状态。');
+  };
+
   if (!isDBLoaded) return null; // Or loading spinner
 
   return (
-    <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, batchDeleteTransactions, batchUpdateTransactions, undo, canUndo: !!undoStack, manualBackup, importData, smartImportCsv, restoreFromCloud }}>
+    <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, batchDeleteTransactions, batchUpdateTransactions, undo, canUndo: !!undoStack, manualBackup, manualCloudSync, importData, smartImportCsv, restoreFromCloud, resetApp, restoreFromD1 }}>
       {children}
     </AppContext.Provider>
   );

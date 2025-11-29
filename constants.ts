@@ -11,6 +11,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   webdavUser: '',
   webdavPass: '',
   enableCloudSync: false, // Default off for safety
+  backupReminderDays: 7,
+  backupAutoEnabled: false,
+  backupIntervalDays: 7,
   budget: {
     enabled: false,
     displayType: 'month',
@@ -25,6 +28,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   categoryRows: 5,
   categoryNotes: {}, // Init note history
   searchHistory: [],
+  syncEndpoint: '',
+  syncToken: '',
+  syncUserId: 'default',
+  lastSyncVersion: 0,
   isFirstRun: true,
   version: '2.0.0',
 };
