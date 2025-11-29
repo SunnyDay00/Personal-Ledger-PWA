@@ -97,17 +97,31 @@ export class SyncService {
         }
 
         // C. Transactions (Support Split Files & Legacy)
+        // IMPORTANT: re-read ledgers AFTER merge so we have cloud-ledger IDs when local was empty
         const localLedgers = await db.ledgers.toArray();
-        const activeLedgers = localLedgers.filter(l => !l.isDeleted); // Only sync active ledgers? Or all? Let's sync all we know.
 
-        for (const ledger of localLedgers) {
+        // 额外收集云端文件中的 ledgerId，避免本地无账本时漏拉分年文件
+        const ledgerIdsFromFiles = new Set<string>();
+        for (const f of files) {
+            // legacy: ledger_{id}.csv
+            const legacyMatch = /^ledger_(.+)\.csv$/i.exec(f.filename);
+            if (legacyMatch) ledgerIdsFromFiles.add(legacyMatch[1]);
+
+            // split: ledger_{id}_{year}.csv
+            const splitMatch = /^ledger_(.+)_(\d{4})\.csv$/i.exec(f.filename);
+            if (splitMatch) ledgerIdsFromFiles.add(splitMatch[1]);
+        }
+
+        const ledgerIdsToProcess = new Set<string>([...localLedgers.map(l => l.id), ...Array.from(ledgerIdsFromFiles)]);
+
+        for (const ledgerId of ledgerIdsToProcess) {
             // Pattern 1: Legacy "ledger_{id}.csv"
-            const legacyName = `ledger_${ledger.id}.csv`;
+            const legacyName = `ledger_${ledgerId}.csv`;
             const legacyFile = findFile(legacyName);
             
             // Pattern 2: Split "ledger_{id}_{year}.csv"
             // Find all files that start with ledger_{id}_ and end with .csv
-            const splitPrefix = `ledger_${ledger.id}_`;
+            const splitPrefix = `ledger_${ledgerId}_`;
             const splitFiles = files.filter(f => f.filename.startsWith(splitPrefix) && f.filename.endsWith('.csv') && f.filename !== legacyName);
 
             // Process Legacy if exists (Migration)
