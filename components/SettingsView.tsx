@@ -842,15 +842,31 @@ export const SettingsView: React.FC = () => {
       <div className="h-4"></div>
       <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-ios-border overflow-hidden">
         {state.operationLogs.length === 0 && <p className="p-4 text-sm text-ios-subtext">暂无操作记录</p>}
-        {state.operationLogs.map((log) => (
-          <div key={log.id} className="p-4 border-b border-gray-100 dark:border-zinc-800 last:border-0">
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-sm font-medium">{log.type}</span>
-              <span className="text-[10px] text-ios-subtext">{format(log.timestamp, 'yyyy/MM/dd HH:mm')}</span>
+        {state.operationLogs.map((log) => {
+          const map: Record<string, { label: string; icon: string; color: string }> = {
+            add: { label: '新增', icon: 'Plus', color: 'text-green-500' },
+            edit: { label: '编辑', icon: 'Edit3', color: 'text-blue-500' },
+            delete: { label: '删除', icon: 'Trash2', color: 'text-red-500' },
+            restore: { label: '撤回', icon: 'RotateCcw', color: 'text-amber-500' },
+            import: { label: '导入', icon: 'Download', color: 'text-purple-500' },
+            export: { label: '导出', icon: 'Upload', color: 'text-emerald-500' },
+          };
+          const meta = map[log.type] || { label: log.type, icon: 'Info', color: 'text-ios-subtext' };
+          return (
+            <div key={log.id} className="p-4 border-b border-gray-100 dark:border-zinc-800 last:border-0 flex items-start gap-3">
+              <div className={`w-8 h-8 rounded-full bg-gray-100 dark:bg-zinc-800 flex items-center justify-center ${meta.color}`}>
+                <Icon name={meta.icon} className="w-4 h-4" />
+              </div>
+              <div className="flex-1">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-sm font-medium">{meta.label}</span>
+                  <span className="text-[10px] text-ios-subtext">{format(log.timestamp, 'yyyy/MM/dd HH:mm')}</span>
+                </div>
+                <p className="text-xs text-ios-subtext">{log.details || log.targetId}</p>
+              </div>
             </div>
-            <p className="text-xs text-ios-subtext">{log.details || log.targetId}</p>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

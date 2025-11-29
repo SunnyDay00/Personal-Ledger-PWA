@@ -207,7 +207,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
   }, [state.settings, isDBLoaded]);
 
-  const [undoStack, setUndoStack] = useState<{ type: 'restore_delete', data: Transaction } | null>(null);
+  const [undoStack, setUndoStack] = useState<{ type: 'restore_delete'; data: Transaction } | { type: 'restore_batch'; data: Transaction[] } | null>(null);
   
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
@@ -290,13 +290,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const undo = () => {
-    if (undoStack && undoStack.type === 'restore_delete') {
-      const restored = { ...undoStack.data, isDeleted: false, updatedAt: Date.now() };
-      dispatch({ type: 'RESTORE_TRANSACTION', payload: restored });
-      db.transactions.put(restored);
-      logOperation('restore', restored.id, '鎾ら攢鍒犻櫎');
-      setUndoStack(null);
+    if (!undoStack) return;
+    const now = Date.now();
+    if (undoStack.type === 'restore_delete') {
+        const restored = { ...undoStack.data, isDeleted: false, updatedAt: now };
+        dispatch({ type: 'RESTORE_TRANSACTION', payload: restored });
+        db.transactions.put(restored);
+        logOperation('restore', restored.id, '撤回删除');
+    } else if (undoStack.type === 'restore_batch') {
+        const restoredList = undoStack.data.map(t => ({ ...t, isDeleted: false, updatedAt: now }));
+        restoredList.forEach(r => dispatch({ type: 'RESTORE_TRANSACTION', payload: r }));
+        db.transactions.bulkPut(restoredList);
+        logOperation('restore', 'batch', `撤回批量删除 ${restoredList.length} 条`);
     }
+    setUndoStack(null);
   };
 
   // Wrapper for dispatching category/ledger actions to also sync to DB
@@ -361,8 +368,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const batchDeleteTransactions = (ids: string[]) => {
       if (!ids || ids.length === 0) return;
+      const deletedTxs = state.transactions.filter(t => ids.includes(t.id));
       enhancedDispatch({ type: 'BATCH_DELETE_TRANSACTIONS', payload: ids });
-      logOperation('delete', 'batch', 'Batch delete ' + ids.length + ' items');
+      setUndoStack({ type: 'restore_batch', data: deletedTxs });
+      logOperation('delete', 'batch', '批量删除 ' + ids.length + ' 条');
   };
 
   const batchUpdateTransactions = (ids: string[], updates: Partial<Transaction>) => {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import { HomeView } from './HomeView';
 import { StatsView } from './StatsView';
 import { SettingsView } from './SettingsView';
@@ -49,7 +49,7 @@ export const Layout: React.FC = () => {
       {/* Undo Toast */}
       {showToast && canUndo && (
         <Toast 
-            message="操作已完成" 
+            message="已删除，撤回？" 
             onUndo={() => { undo(); setShowToast(false); }} 
             onClose={() => setShowToast(false)} 
         />
