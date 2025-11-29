@@ -488,7 +488,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               settings: { data: stateRef.current.settings, updated_at: Date.now() }
           };
           await pushToCloud(syncEndpoint, syncToken, syncUserId || 'default', payload);
-          const pulled = await pullFromCloud(syncEndpoint, syncToken, syncUserId || 'default', lastSyncVersion || 0);
+          // 手动同步强制全量拉取（since=0），避免版本偏差导致删除未拉取
+          const sinceParam = reason === 'manual' ? 0 : (lastSyncVersion || 0);
+          const pulled = await pullFromCloud(syncEndpoint, syncToken, syncUserId || 'default', sinceParam);
           await mergeFromCloud(pulled);
           setSyncDirty(false);
           logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'success', file: 'D1 Sync', message: reason === 'manual' ? '手动同步成功' : '自动同步成功' });
