@@ -92,6 +92,10 @@ export interface AppSettings {
   backupReminderDays?: number;
   backupAutoEnabled?: boolean;
   backupIntervalDays?: number;
+  // Sync intervals
+  syncDebounceSeconds?: number; // delay before auto sync after local change
+  versionCheckIntervalFg?: number; // foreground version poll interval
+  versionCheckIntervalBg?: number; // background version poll interval
   
   // Budget
   budget: BudgetConfig;
@@ -112,6 +116,8 @@ export interface AppSettings {
   syncUserId?: string;
   defaultLedgerId?: string;
   isFirstRun: boolean;
+  exportStartDate?: string;
+  exportEndDate?: string;
   
   // Version
   version: string;

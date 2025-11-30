@@ -14,6 +14,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   backupReminderDays: 7,
   backupAutoEnabled: false,
   backupIntervalDays: 7,
+  syncDebounceSeconds: 3,
+  versionCheckIntervalFg: 10,
+  versionCheckIntervalBg: 20,
   budget: {
     enabled: false,
     displayType: 'month',
@@ -32,6 +35,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   syncToken: '',
   syncUserId: 'default',
   lastSyncVersion: 0,
+  exportStartDate: '',
+  exportEndDate: '',
   isFirstRun: true,
   version: '2.0.0',
 };

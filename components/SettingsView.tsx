@@ -1,4 +1,4 @@
-﻿
+
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
@@ -63,11 +63,16 @@ export const SettingsView: React.FC = () => {
     endpoint: state.settings.syncEndpoint || '',
     token: state.settings.syncToken || '',
     userId: state.settings.syncUserId || 'default',
+    syncDebounceSeconds: state.settings.syncDebounceSeconds ?? 3,
+    versionCheckIntervalFg: state.settings.versionCheckIntervalFg ?? 10,
+    versionCheckIntervalBg: state.settings.versionCheckIntervalBg ?? 20,
   });
   const [isManualSyncing, setIsManualSyncing] = useState(false);
   const [reminderDays, setReminderDays] = useState<number>(state.settings.backupReminderDays ?? 7);
   const [autoBackupEnabled, setAutoBackupEnabled] = useState<boolean>(state.settings.backupAutoEnabled ?? false);
   const [autoBackupDays, setAutoBackupDays] = useState<number>(state.settings.backupIntervalDays ?? 7);
+  const [exportStart, setExportStart] = useState(state.settings.exportStartDate || '');
+  const [exportEnd, setExportEnd] = useState(state.settings.exportEndDate || '');
 
   const [showSyncLog, setShowSyncLog] = useState(false);
   const [ledgerModal, setLedgerModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; color: string }>(
@@ -97,10 +102,15 @@ export const SettingsView: React.FC = () => {
       endpoint: state.settings.syncEndpoint || '',
       token: state.settings.syncToken || '',
       userId: state.settings.syncUserId || 'default',
+      syncDebounceSeconds: state.settings.syncDebounceSeconds ?? 3,
+      versionCheckIntervalFg: state.settings.versionCheckIntervalFg ?? 10,
+      versionCheckIntervalBg: state.settings.versionCheckIntervalBg ?? 20,
     });
     setReminderDays(state.settings.backupReminderDays ?? 7);
     setAutoBackupEnabled(state.settings.backupAutoEnabled ?? false);
     setAutoBackupDays(state.settings.backupIntervalDays ?? 7);
+    setExportStart(state.settings.exportStartDate || '');
+    setExportEnd(state.settings.exportEndDate || '');
   }, [state.settings, isWebDavEditing]);
 
   const sortedCategories = useMemo(() => {
@@ -119,6 +129,9 @@ export const SettingsView: React.FC = () => {
         syncEndpoint: d1Form.endpoint.trim(),
         syncToken: d1Form.token.trim(),
         syncUserId: d1Form.userId.trim() || 'default',
+        syncDebounceSeconds: Math.max(1, Number(d1Form.syncDebounceSeconds) || 3),
+        versionCheckIntervalFg: Math.max(2, Number(d1Form.versionCheckIntervalFg) || 10),
+        versionCheckIntervalBg: Math.max(2, Number(d1Form.versionCheckIntervalBg) || 20),
       },
     });
     window.alert('已保存 D1/KV 同步配置');
@@ -199,13 +212,16 @@ export const SettingsView: React.FC = () => {
 
   const openExportDialog = (l?: Ledger) => {
     const targetIds = l ? [l.id] : state.ledgers.map((x) => x.id);
-    const targetTxs = state.transactions.filter((t) => targetIds.includes(t.ledgerId));
+    const startMs = exportStart ? new Date(exportStart).setHours(0, 0, 0, 0) : Number.NEGATIVE_INFINITY;
+    const endMs = exportEnd ? new Date(exportEnd).setHours(23, 59, 59, 999) : Number.POSITIVE_INFINITY;
+    const targetTxs = state.transactions.filter((t) => targetIds.includes(t.ledgerId) && t.date >= startMs && t.date <= endMs);
     if (targetTxs.length === 0) {
       window.alert('暂无可导出的记录');
       return;
     }
     const filename = l ? `${l.name}_${format(new Date(), 'yyyyMMdd_HHmm')}.csv` : `export_${format(new Date(), 'yyyyMMdd_HHmm')}.csv`;
     exportToCsv(targetTxs, state.categories, state.ledgers, filename);
+    dispatch({ type: 'UPDATE_SETTINGS', payload: { exportStartDate: exportStart, exportEndDate: exportEnd } });
   };
 
   const handleAddCategory = () => {
@@ -353,6 +369,38 @@ export const SettingsView: React.FC = () => {
               value={d1Form.userId}
               onChange={(e) => setD1Form({ ...d1Form, userId: e.target.value })}
             />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">自动同步延时（秒）</label>
+              <input
+                type="number"
+                min={1}
+                className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
+                value={d1Form.syncDebounceSeconds}
+                onChange={(e) => setD1Form({ ...d1Form, syncDebounceSeconds: Number(e.target.value) || 0 })}
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">前台版本探测（秒）</label>
+              <input
+                type="number"
+                min={2}
+                className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
+                value={d1Form.versionCheckIntervalFg}
+                onChange={(e) => setD1Form({ ...d1Form, versionCheckIntervalFg: Number(e.target.value) || 0 })}
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">后台版本探测（秒）</label>
+              <input
+                type="number"
+                min={2}
+                className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
+                value={d1Form.versionCheckIntervalBg}
+                onChange={(e) => setD1Form({ ...d1Form, versionCheckIntervalBg: Number(e.target.value) || 0 })}
+              />
+            </div>
           </div>
         </div>
 
@@ -540,6 +588,41 @@ export const SettingsView: React.FC = () => {
   const renderLedgers = () => (
     <>
       <div className="h-4"></div>
+      <div className="bg-white dark:bg-zinc-900 rounded-2xl mx-4 shadow-sm border border-ios-border p-4 space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">导出开始日期（可选）</label>
+            <input
+              type="date"
+              className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
+              value={exportStart}
+              onChange={(e) => setExportStart(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">导出结束日期（可选）</label>
+            <input
+              type="date"
+              className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
+              value={exportEnd}
+              onChange={(e) => setExportEnd(e.target.value)}
+            />
+          </div>
+        </div>
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => {
+              setExportStart('');
+              setExportEnd('');
+              dispatch({ type: 'UPDATE_SETTINGS', payload: { exportStartDate: '', exportEndDate: '' } });
+            }}
+            className="px-4 py-2 rounded-xl text-sm bg-gray-100 dark:bg-zinc-800 text-ios-subtext"
+          >
+            清空筛选
+          </button>
+        </div>
+      </div>
       <div className="bg-white dark:bg-zinc-900 rounded-2xl mx-4 mt-2 shadow-sm border border-ios-border overflow-hidden">
         {state.ledgers.map((l, i) => (
           <div key={l.id} className={cn('p-4 flex items-center justify-between', i !== state.ledgers.length - 1 && 'border-b border-gray-100 dark:border-zinc-800')}>

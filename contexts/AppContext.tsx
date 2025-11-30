@@ -151,6 +151,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [isDBLoaded, setIsDBLoaded] = useState(false);
   const [syncDirty, setSyncDirty] = useState(false);
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const versionCheckTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const versionCheckRunningRef = useRef(false);
   const autoBackupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoBackupRunningRef = useRef(false);
   const autoBackupRef = useRef(false);
@@ -477,12 +479,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (!syncEndpoint || !syncToken || !isDBLoaded || !stateRef.current.isOnline) return;
       dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
       try {
-          // 使用数据库完整数据（包含已标记删除的记录）以确保删除同步
+          const sinceForPush = reason === 'manual' ? 0 : (lastSyncVersion || 0);
           const [txAll, ledgersAll, catsAll] = await Promise.all([
               dbAPI.getAllTransactionsIncludingDeleted(),
               dbAPI.getAllLedgersIncludingDeleted(),
               dbAPI.getAllCategoriesIncludingDeleted(),
           ]);
+          const filterBySince = <T extends { updatedAt?: number; updated_at?: number }>(arr: T[]) =>
+              sinceForPush === 0 ? arr : arr.filter(item => (item.updatedAt ?? item.updated_at ?? 0) > sinceForPush);
+
+          const txFiltered = filterBySince(txAll);
+          const ledgersFiltered = filterBySince(ledgersAll);
+          const catsFiltered = filterBySince(catsAll);
+
           // 规范化字段（含删除标记），确保后端能写入 is_deleted 等字段
           const userId = syncUserId || 'default';
           const mapLedger = (l: any) => ({
@@ -520,15 +529,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           });
 
           const payload = {
-              ledgers: ledgersAll.map(mapLedger),
-              categories: catsAll.map(mapCategory),
-              transactions: txAll.map(mapTx),
+              ledgers: ledgersFiltered.map(mapLedger),
+              categories: catsFiltered.map(mapCategory),
+              transactions: txFiltered.map(mapTx),
               settings: { data: stateRef.current.settings, updated_at: Date.now() }
           };
           await pushToCloud(syncEndpoint, syncToken, syncUserId || 'default', payload);
           // 手动同步强制全量拉取（since=0），避免版本偏差导致删除未拉取
-          const sinceParam = reason === 'manual' ? 0 : (lastSyncVersion || 0);
-          const pulled = await pullFromCloud(syncEndpoint, syncToken, syncUserId || 'default', sinceParam);
+          const sinceForPull = reason === 'manual' ? 0 : (lastSyncVersion || 0);
+          const pulled = await pullFromCloud(syncEndpoint, syncToken, syncUserId || 'default', sinceForPull);
           await mergeFromCloud(pulled);
           setSyncDirty(false);
           logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'success', file: 'D1 Sync', message: reason === 'manual' ? '手动同步成功' : '自动同步成功' });
@@ -548,9 +557,56 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const { syncEndpoint, syncToken } = state.settings;
       if (!syncEndpoint || !syncToken || !state.isOnline) return;
       if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
-      syncTimerRef.current = setTimeout(() => performCloudSync('auto'), 15000);
+      const delaySec = state.settings.syncDebounceSeconds ?? 3;
+      syncTimerRef.current = setTimeout(() => performCloudSync('auto'), Math.max(1000, delaySec * 1000));
       return () => { if (syncTimerRef.current) clearTimeout(syncTimerRef.current); };
   }, [syncDirty, state.settings, state.isOnline, performCloudSync]);
+
+  // Version lightweight polling
+  useEffect(() => {
+      if (versionCheckTimerRef.current) clearInterval(versionCheckTimerRef.current);
+      const { syncEndpoint, syncToken, syncUserId, versionCheckIntervalFg, versionCheckIntervalBg } = state.settings;
+      if (!syncEndpoint || !syncToken || !state.isOnline) return;
+      const fg = Math.max(3, versionCheckIntervalFg ?? 10);
+      const bg = Math.max(fg, versionCheckIntervalBg ?? 20);
+      const getInterval = () => (document.visibilityState === 'visible' ? fg : bg) * 1000;
+
+      const checkVersion = async () => {
+          if (versionCheckRunningRef.current) return;
+          versionCheckRunningRef.current = true;
+          try {
+              const res = await fetch(`${syncEndpoint.replace(/\/$/, '')}/sync/version?user_id=${encodeURIComponent(syncUserId || 'default')}`, {
+                  headers: { 'Authorization': `Bearer ${syncToken}` }
+              });
+              if (!res.ok) return;
+              const data = await res.json();
+              const remoteVersion = Number(data.version || 0);
+              const localVersion = stateRef.current.settings.lastSyncVersion || 0;
+              if (remoteVersion > localVersion) {
+                  await performCloudSync('auto');
+              }
+          } catch (e) {
+              // silent fail
+          } finally {
+              versionCheckRunningRef.current = false;
+          }
+      };
+
+      // initial immediate probe
+      checkVersion();
+      versionCheckTimerRef.current = setInterval(checkVersion, getInterval());
+
+      const handleVisibility = () => {
+          if (versionCheckTimerRef.current) clearInterval(versionCheckTimerRef.current);
+          versionCheckTimerRef.current = setInterval(checkVersion, getInterval());
+          if (document.visibilityState === 'visible') checkVersion();
+      };
+      document.addEventListener('visibilitychange', handleVisibility);
+      return () => {
+          if (versionCheckTimerRef.current) clearInterval(versionCheckTimerRef.current);
+          document.removeEventListener('visibilitychange', handleVisibility);
+      };
+  }, [state.settings.syncEndpoint, state.settings.syncToken, state.settings.syncUserId, state.settings.versionCheckIntervalFg, state.settings.versionCheckIntervalBg, state.isOnline, performCloudSync]);
 
   // 自动备份：先同步 D1/KV 再执行 WebDAV 备份，并记录日志
   const runAutoBackup = useCallback(async () => {
@@ -775,6 +831,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 };
 
 export const useApp = () => useContext(AppContext);
+
+
+
 
 
 
