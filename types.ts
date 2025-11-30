@@ -24,6 +24,15 @@ export interface Category {
   isDeleted?: boolean;
 }
 
+export interface CategoryGroup {
+  id: string;
+  name: string;
+  categoryIds: string[];
+  order: number;
+  updatedAt?: number;
+  isDeleted?: boolean;
+}
+
 export interface Transaction {
   id: string;
   ledgerId: string;
@@ -127,6 +136,7 @@ export interface AppState {
   ledgers: Ledger[];
   transactions: Transaction[];
   categories: Category[];
+  categoryGroups: CategoryGroup[];
   settings: AppSettings;
   currentLedgerId: string;
   operationLogs: OperationLog[];
@@ -144,6 +154,10 @@ export type AppAction =
   | { type: 'BATCH_DELETE_TRANSACTIONS'; payload: string[] }
   | { type: 'BATCH_UPDATE_TRANSACTIONS'; payload: { ids: string[]; updates: Partial<Transaction> } }
   | { type: 'RESTORE_TRANSACTION'; payload: Transaction }
+  | { type: 'ADD_CATEGORY_GROUP'; payload: CategoryGroup }
+  | { type: 'UPDATE_CATEGORY_GROUP'; payload: CategoryGroup }
+  | { type: 'DELETE_CATEGORY_GROUP'; payload: string }
+  | { type: 'REORDER_CATEGORY_GROUPS'; payload: CategoryGroup[] }
   | { type: 'ADD_LEDGER'; payload: Ledger }
   | { type: 'UPDATE_LEDGER'; payload: Ledger }
   | { type: 'DELETE_LEDGER'; payload: string }

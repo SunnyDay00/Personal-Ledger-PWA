@@ -1,7 +1,7 @@
 
-import { db } from './db';
+import { db, ensureStoresReady, resetDB } from './db';
 import { WebDAVService } from './webdav';
-import { AppSettings, Ledger, Transaction, Category } from '../types';
+import { AppSettings, Ledger, Transaction, Category, CategoryGroup } from '../types';
 import { transactionsToCsv, parseCsvToTransactions } from '../utils';
 
 // Helper: Get Year from Timestamp
@@ -29,6 +29,21 @@ export class SyncService {
     async performSync() {
         let attempt = 0;
         const MAX_CONFLICT_RETRIES = 3;
+        // 确认表存在，否则重建一次
+        let ready = await ensureStoresReady();
+        if (!ready) {
+            await resetDB();
+            ready = await ensureStoresReady();
+        }
+        let hasGroupStore = ready && db.tables.some(t => (t as any).name === 'categoryGroups');
+        if (hasGroupStore) {
+            try {
+                await db.categoryGroups.count();
+            } catch {
+                // 当前数据库里缺少该表，降级为无分组模式，避免 objectStore not found
+                hasGroupStore = false;
+            }
+        }
 
         while (true) {
             try {
@@ -36,10 +51,10 @@ export class SyncService {
                 this.contentCache.clear();
 
                 // === STEP 1: PULL ===
-                await this.pullAndMerge();
+                await this.pullAndMerge(hasGroupStore);
 
                 // === STEP 2: PUSH ===
-                await this.pushChanges();
+                await this.pushChanges(hasGroupStore);
                 
                 // If successful, break loop
                 break;
@@ -61,7 +76,7 @@ export class SyncService {
         }
     }
 
-    private async pullAndMerge() {
+    private async pullAndMerge(hasGroupStore: boolean) {
         // 1. Discover all files
         const files = await this.webdav.listFiles('/');
         
@@ -92,6 +107,9 @@ export class SyncService {
                 const cloudSettingsData = JSON.parse(text);
                 if (cloudSettingsData.categories) {
                     await this.mergeCategories(cloudSettingsData.categories);
+                }
+                if (hasGroupStore && cloudSettingsData.categoryGroups) {
+                    await this.mergeCategoryGroups(cloudSettingsData.categoryGroups);
                 }
             } catch (e) { console.warn("Failed to pull settings.json", e); }
         }
@@ -148,7 +166,7 @@ export class SyncService {
         }
     }
 
-    private async pushChanges() {
+    private async pushChanges(hasGroupStore: boolean) {
         // A. Ledgers (Full list)
         const allLedgers = await db.ledgers.toArray();
         const validLedgers = allLedgers.filter(l => !l.isDeleted);
@@ -160,10 +178,13 @@ export class SyncService {
         const currentSettings = await db.settings.get('main');
         const allCats = await db.categories.toArray();
         const validCats = allCats.filter(c => !c.isDeleted).sort((a,b) => a.order - b.order);
+        const allGroups = hasGroupStore ? await db.categoryGroups.toArray() : [];
+        const validGroups = allGroups.filter(g => !g.isDeleted).sort((a,b) => (a.order ?? 0) - (b.order ?? 0));
         
         const settingsPayload = {
             settings: currentSettings?.value,
             categories: validCats,
+            categoryGroups: hasGroupStore ? validGroups : undefined,
             operationLogs: [] 
         };
         const settingsJson = JSON.stringify(settingsPayload, null, 2);
@@ -259,6 +280,25 @@ export class SyncService {
                      if (cloudTime > localTime) {
                          await db.categories.put({ ...cloudC, updatedAt: cloudTime });
                      }
+                }
+            }
+        });
+    }
+
+    private async mergeCategoryGroups(cloudGroups: CategoryGroup[]) {
+        const hasGroupStore = db.tables.some(t => (t as any).name === 'categoryGroups');
+        if (!hasGroupStore) return;
+        await (db as any).transaction('rw', db.categoryGroups, async () => {
+            for (const g of cloudGroups) {
+                const localG = await db.categoryGroups.get(g.id);
+                if (!localG) {
+                    await db.categoryGroups.put({ ...g, updatedAt: g.updatedAt || Date.now(), isDeleted: false });
+                } else {
+                    const cloudTime = g.updatedAt || 0;
+                    const localTime = localG.updatedAt || 0;
+                    if (cloudTime > localTime) {
+                        await db.categoryGroups.put({ ...g, updatedAt: cloudTime });
+                    }
                 }
             }
         });

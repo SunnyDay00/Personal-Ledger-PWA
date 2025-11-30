@@ -7,6 +7,7 @@ import { THEME_PRESETS, AVAILABLE_ICONS } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
 import { generateId, exportToJson, exportToCsv, cn, readCsvFileWithEncoding } from '../utils';
 import { WebDAVService } from '../services/webdav';
+import { db } from '../services/db';
 import { format } from 'date-fns';
 import { SyncLogModal } from './SyncLogModal';
 import { Ledger, Category } from '../types';
@@ -85,6 +86,12 @@ export const SettingsView: React.FC = () => {
   const [newCatIcon, setNewCatIcon] = useState('Circle');
   const [isReordering, setIsReordering] = useState(false);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [groupModal, setGroupModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; categoryIds: string[] }>({
+    isOpen: false,
+    mode: 'create',
+    name: '',
+    categoryIds: [],
+  });
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
@@ -118,6 +125,19 @@ export const SettingsView: React.FC = () => {
       .filter((c) => c.type === catType)
       .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   }, [state.categories, catType]);
+  const sortedGroups = useMemo(() => {
+    return (state.categoryGroups || []).filter(g => !g.isDeleted).sort((a,b) => (a.order ?? 0) - (b.order ?? 0));
+  }, [state.categoryGroups]);
+
+  // 如果本地 DB 已有分组但 state 为空，尝试从 DB 刷新到 state（避免界面不显示）
+  useEffect(() => {
+    if (sortedGroups.length > 0) return;
+    db.categoryGroups.orderBy('order').toArray().then(groups => {
+      if (groups && groups.length > 0) {
+        dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groups } });
+      }
+    }).catch(() => {});
+  }, [sortedGroups.length, dispatch]);
   const handleSaveD1 = () => {
     if (!d1Form.endpoint.trim() || !d1Form.token.trim()) {
       window.alert('请填写同步地址和 AUTH_TOKEN');
@@ -264,6 +284,55 @@ export const SettingsView: React.FC = () => {
   const handleDeleteCategory = (id: string) => {
     if (!window.confirm('确定删除该分类吗？已有账目会保留分类引用。')) return;
     dispatch({ type: 'DELETE_CATEGORY', payload: id });
+  };
+
+  const openCreateGroup = () => setGroupModal({ isOpen: true, mode: 'create', name: '', categoryIds: [] });
+  const openEditGroup = (g: any) => setGroupModal({ isOpen: true, mode: 'edit', id: g.id, name: g.name, categoryIds: g.categoryIds || [] });
+  const handleSaveGroup = () => {
+    if (!groupModal.name.trim()) {
+      window.alert('请输入分组名称');
+      return;
+    }
+    if (groupModal.mode === 'create') {
+      dispatch({
+        type: 'ADD_CATEGORY_GROUP',
+        payload: {
+          id: generateId(),
+          name: groupModal.name.trim(),
+          categoryIds: groupModal.categoryIds,
+          order: sortedGroups.length,
+          updatedAt: Date.now(),
+          isDeleted: false,
+        },
+      });
+    } else if (groupModal.mode === 'edit' && groupModal.id) {
+      const original = sortedGroups.find(g => g.id === groupModal.id);
+      if (original) {
+        dispatch({
+          type: 'UPDATE_CATEGORY_GROUP',
+          payload: { ...original, name: groupModal.name.trim(), categoryIds: groupModal.categoryIds, updatedAt: Date.now() },
+        });
+      }
+    }
+    setGroupModal({ isOpen: false, mode: 'create', name: '', categoryIds: [] });
+  };
+  const handleDeleteGroup = (id: string) => {
+    if (!window.confirm('确定删除该分类组吗？')) return;
+    dispatch({ type: 'DELETE_CATEGORY_GROUP', payload: id });
+  };
+  const moveGroup = (index: number, direction: 'up' | 'down') => {
+    const list = [...sortedGroups];
+    const swapIndex = direction === 'up' ? index - 1 : index + 1;
+    if (swapIndex < 0 || swapIndex >= list.length) return;
+    [list[index], list[swapIndex]] = [list[swapIndex], list[index]];
+    const normalized = list.map((g, i) => ({ ...g, order: i, updatedAt: Date.now() }));
+    dispatch({ type: 'REORDER_CATEGORY_GROUPS', payload: normalized });
+  };
+  const toggleCategoryInGroup = (catId: string) => {
+    setGroupModal(prev => {
+      const exists = prev.categoryIds.includes(catId);
+      return { ...prev, categoryIds: exists ? prev.categoryIds.filter(id => id !== catId) : [...prev.categoryIds, catId] };
+    });
   };
 
   const moveCategory = (index: number, direction: 'left' | 'right') => {
@@ -723,6 +792,36 @@ export const SettingsView: React.FC = () => {
   const renderCategories = () => (
     <>
       <div className="h-4"></div>
+      <div className="mx-4 mb-4 bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-ios-border p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h3 className="text-sm font-semibold">分类组</h3>
+            <p className="text-xs text-ios-subtext">自定义分组，在统计中按分组查看汇总。</p>
+          </div>
+          <button onClick={openCreateGroup} className="px-3 py-1.5 rounded-xl bg-ios-primary text-white text-xs font-medium">新建分组</button>
+        </div>
+        {sortedGroups.length === 0 && <p className="text-xs text-ios-subtext">暂无分组</p>}
+        <div className="space-y-2">
+          {sortedGroups.map((g, idx) => {
+            const count = (g.categoryIds || []).length;
+            return (
+              <div key={g.id} className="flex items-center justify-between bg-gray-50 dark:bg-zinc-800 rounded-xl px-3 py-2">
+                <div>
+                  <div className="text-sm font-medium">{g.name}</div>
+                  <div className="text-[11px] text-ios-subtext">{count} 个分类</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => moveGroup(idx, 'up')} disabled={idx === 0} className="p-1 text-ios-subtext disabled:opacity-30"><Icon name="ChevronUp" className="w-4 h-4" /></button>
+                  <button onClick={() => moveGroup(idx, 'down')} disabled={idx === sortedGroups.length - 1} className="p-1 text-ios-subtext disabled:opacity-30"><Icon name="ChevronDown" className="w-4 h-4" /></button>
+                  <button onClick={() => openEditGroup(g)} className="p-1 text-ios-primary"><Icon name="Edit2" className="w-4 h-4" /></button>
+                  <button onClick={() => handleDeleteGroup(g.id)} className="p-1 text-red-500"><Icon name="Trash2" className="w-4 h-4" /></button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="flex items-center justify-between mx-4 mb-4">
         <div className="flex p-1 bg-gray-200 dark:bg-zinc-800 rounded-xl flex-1 mr-4">
           <button onClick={() => setCatType('expense')} className={cn('flex-1 py-1.5 rounded-lg text-sm font-medium transition-all', catType === 'expense' ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext')}>
@@ -913,6 +1012,50 @@ export const SettingsView: React.FC = () => {
                     <Icon name={icon} className="w-5 h-5" />
                   </button>
                 ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {groupModal.isOpen && (
+        <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm">
+          <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-6 animate-slide-up h-[70vh] flex flex-col">
+            <div className="flex justify-between items-center mb-4">
+              <button onClick={() => setGroupModal({ isOpen: false, mode: 'create', name: '', categoryIds: [] })} className="text-ios-subtext">取消</button>
+              <h3 className="font-bold text-lg">{groupModal.mode === 'create' ? '新建分类组' : '编辑分类组'}</h3>
+              <button onClick={handleSaveGroup} className="text-ios-primary font-bold">保存</button>
+            </div>
+
+            <div className="space-y-4 flex-1 overflow-y-auto no-scrollbar">
+              <div>
+                <label className="text-xs text-ios-subtext ml-1 mb-1 block">分组名称</label>
+                <input
+                  type="text"
+                  className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
+                  value={groupModal.name}
+                  onChange={(e) => setGroupModal(prev => ({ ...prev, name: e.target.value }))}
+                  placeholder="如：吃喝、交通"
+                />
+              </div>
+              <div>
+                <div className="text-xs text-ios-subtext mb-2">选择包含的分类</div>
+                <div className="grid grid-cols-2 gap-2 max-h-80 overflow-y-auto no-scrollbar">
+                  {state.categories.filter(c => !c.isDeleted).sort((a,b)=>(a.order??0)-(b.order??0)).map(cat => {
+                    const checked = groupModal.categoryIds.includes(cat.id);
+                    return (
+                      <label key={cat.id} className={cn("flex items-center gap-2 p-2 rounded-xl border", checked ? "border-ios-primary bg-ios-primary/5" : "border-gray-200 dark:border-zinc-800")}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleCategoryInGroup(cat.id)}
+                        />
+                        <span className="text-sm">{cat.name}</span>
+                        <span className="text-[10px] text-ios-subtext">{cat.type === 'expense' ? '支出' : '收入'}</span>
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
             </div>
           </div>

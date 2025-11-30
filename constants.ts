@@ -45,6 +45,8 @@ export const INITIAL_LEDGERS: Ledger[] = [
   { id: 'l1', name: '个人生活', themeColor: '#007AFF', createdAt: Date.now() },
 ];
 
+export const DEFAULT_CATEGORY_GROUPS = [];
+
 // Helper to create category list easily
 const createCats = (type: 'expense' | 'income', list: string[], startIndex: number): Category[] => {
   const iconMap: Record<string, string> = {

@@ -36,6 +36,9 @@ export const loadState = (): AppState | undefined => {
             loadedState.settings.enableCloudSync = false;
         }
     }
+    if (!loadedState.categoryGroups) {
+        loadedState.categoryGroups = [];
+    }
 
     return loadedState;
   } catch (err) {

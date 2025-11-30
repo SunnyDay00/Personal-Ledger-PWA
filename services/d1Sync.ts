@@ -1,6 +1,7 @@
 export interface D1SyncPayload {
   ledgers?: any[];
   categories?: any[];
+  groups?: any[];
   transactions?: any[];
   settings?: any;
 }
@@ -9,6 +10,7 @@ export interface D1PullResponse {
   version: number;
   ledgers: any[];
   categories: any[];
+  groups?: any[];
   transactions: any[];
   settings: any | null;
 }

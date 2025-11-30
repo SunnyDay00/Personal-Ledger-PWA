@@ -1,9 +1,9 @@
 ﻿import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef, useCallback } from 'react';
-import { AppState, AppAction, Transaction, Ledger, OperationLog, BackupLog, Category, AppSettings } from '../types';
+import { AppState, AppAction, Transaction, Ledger, OperationLog, BackupLog, Category, CategoryGroup, AppSettings } from '../types';
 import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, INITIAL_LEDGERS } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
 import { generateId, extractCategoriesFromCsv, formatCurrency, parseCsvToTransactions } from '../utils';
-import { db, initAndMigrateDB, dbAPI } from '../services/db';
+import { db, initAndMigrateDB, dbAPI, resetDB, ensureStoresReady } from '../services/db';
 import { pushToCloud, pullFromCloud } from '../services/d1Sync';
 import { SyncService } from '../services/sync';
 
@@ -11,6 +11,7 @@ const initialState: AppState = {
   ledgers: INITIAL_LEDGERS,
   transactions: [],
   categories: DEFAULT_CATEGORIES,
+  categoryGroups: [],
   settings: DEFAULT_SETTINGS,
   currentLedgerId: INITIAL_LEDGERS[0].id,
   operationLogs: [],
@@ -109,7 +110,12 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, isOnline: action.payload };
     case 'RESTORE_DATA':
       const newSettings = { ...state.settings, ...(action.payload.settings || {}) };
-      return { ...state, ...action.payload, settings: newSettings };
+      return { 
+        ...state, 
+        ...action.payload, 
+        categoryGroups: action.payload.categoryGroups ?? state.categoryGroups, 
+        settings: newSettings 
+      };
     case 'SET_THEME_MODE':
       return { ...state, settings: { ...state.settings, themeMode: action.payload } };
     case 'ADD_SEARCH_HISTORY':
@@ -130,6 +136,14 @@ function appReducer(state: AppState, action: AppAction): AppState {
         const type = action.payload[0].type;
         const otherCategories = state.categories.filter(c => c.type !== type);
         return { ...state, categories: [...otherCategories, ...action.payload] };
+    case 'ADD_CATEGORY_GROUP':
+        return { ...state, categoryGroups: [...state.categoryGroups, action.payload] };
+    case 'UPDATE_CATEGORY_GROUP':
+        return { ...state, categoryGroups: state.categoryGroups.map(g => g.id === action.payload.id ? action.payload : g) };
+    case 'DELETE_CATEGORY_GROUP':
+        return { ...state, categoryGroups: state.categoryGroups.filter(g => g.id !== action.payload) };
+    case 'REORDER_CATEGORY_GROUPS':
+        return { ...state, categoryGroups: action.payload };
     case 'SAVE_NOTE_HISTORY': {
         const { categoryId, note } = action.payload;
         if (!note || !note.trim()) return state;
@@ -156,47 +170,81 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const autoBackupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoBackupRunningRef = useRef(false);
   const autoBackupRef = useRef(false);
+  // 默认认为不存在，检测成功后再置为 true，避免首次恢复访问不存在的 store
+  const groupStoreAvailableRef = useRef(false);
 
   // Initialize DB and Load State
   useEffect(() => {
-    const init = async () => {
+    const init = async (retry = false) => {
+      try {
+        const ok = await ensureStoresReady();
         await initAndMigrateDB();
-        
+
+        // detect categoryGroups store availability
+        try {
+          await db.categoryGroups.count();
+          groupStoreAvailableRef.current = true;
+        } catch {
+          groupStoreAvailableRef.current = false;
+        }
+
         // Load data from DB to Memory for UI (ViewModel)
-        const [settings, ledgers, categories, transactions, backupLogs] = await Promise.all([
-            dbAPI.getSettings(),
-            dbAPI.getLedgers(),
-            dbAPI.getCategories(),
-            dbAPI.getTransactions(),
-            dbAPI.getBackupLogs()
+        const [settings, ledgers, categories, transactions, backupLogs, groups] = await Promise.all([
+          dbAPI.getSettings(),
+          dbAPI.getLedgers(),
+          dbAPI.getCategories(),
+          dbAPI.getTransactions(),
+          dbAPI.getBackupLogs(),
+          groupStoreAvailableRef.current ? db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order') : Promise.resolve([])
         ]);
 
         const loadedSettings = settings ? { ...DEFAULT_SETTINGS, ...settings } : DEFAULT_SETTINGS;
         if (loadedSettings.enableCloudSync === undefined) loadedSettings.enableCloudSync = false;
 
-        // Seed DB when鍏ㄦ柊鍚姩锛屼繚璇佸垎绫?璐︽湰瀛樺湪浜庢暟鎹簱涓究浜庡悗缁垹闄?鏇存柊
         const shouldSeedLedgers = !ledgers || ledgers.length === 0;
         const shouldSeedCategories = !categories || categories.length === 0;
+        const shouldSeedGroups = !groups || groups.length === 0;
         const shouldSeedSettings = !settings;
         const ledgerSeed = (shouldSeedLedgers ? INITIAL_LEDGERS : ledgers).map(l => ({ ...l, updatedAt: l.updatedAt || Date.now(), isDeleted: false }));
         const categorySeed = (shouldSeedCategories ? DEFAULT_CATEGORIES : categories).map((c, idx) => ({ ...c, order: c.order ?? idx, updatedAt: c.updatedAt || Date.now(), isDeleted: false }));
+        const groupSeed = shouldSeedGroups ? [] : groups.map((g: any, idx: number) => ({ ...g, order: g.order ?? idx, updatedAt: g.updatedAt || Date.now(), isDeleted: false }));
         if (shouldSeedLedgers) await db.ledgers.bulkPut(ledgerSeed);
         if (shouldSeedCategories) await db.categories.bulkPut(categorySeed);
+        if (groupStoreAvailableRef.current) {
+          if (shouldSeedGroups && groupSeed.length === 0) {
+            await db.categoryGroups.clear();
+          } else if (groupSeed.length > 0) {
+            await db.categoryGroups.bulkPut(groupSeed);
+          }
+        }
         if (shouldSeedSettings) await db.settings.put({ key: 'main', value: loadedSettings });
 
         const newState: Partial<AppState> = {
-            settings: loadedSettings,
-            ledgers: ledgerSeed,
-            categories: categorySeed,
-            transactions: transactions || [],
-            backupLogs: backupLogs || [],
-            currentLedgerId: ledgerSeed[0]?.id || INITIAL_LEDGERS[0].id,
-            syncStatus: 'idle',
-            isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true
+          settings: loadedSettings,
+          ledgers: ledgerSeed,
+          categories: categorySeed,
+          categoryGroups: groupStoreAvailableRef.current ? groupSeed : [],
+          transactions: transactions || [],
+          backupLogs: backupLogs || [],
+          currentLedgerId: ledgerSeed[0]?.id || INITIAL_LEDGERS[0].id,
+          syncStatus: 'idle',
+          isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true
         };
 
         dispatch({ type: 'RESTORE_DATA', payload: newState });
         setIsDBLoaded(true);
+        await reloadGroupsToState();
+      } catch (e: any) {
+        // 如果是缺少 objectStore，再尝试一次全量重建
+        if (!retry && (e?.name === 'NotFoundError' || /objectStore/i.test(e?.message || ''))) {
+          console.warn('DB schema missing, resetting DB and retrying once...', e);
+          await resetDB();
+          groupStoreAvailableRef.current = false;
+          await init(true);
+          return;
+        }
+        console.error('Init failed', e);
+      }
     };
     init();
   }, []);
@@ -213,6 +261,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
+  // 便于在浏览器 Console 调试：window.__state
+  useEffect(() => {
+    if (typeof window !== 'undefined') (window as any).__state = stateRef;
+  }, []);
+
+  // 如果 DB 中已有分组而 state 为空，自动同步到内存；同时暴露 state 便于调试
+  useEffect(() => {
+    if (typeof window !== 'undefined') (window as any).__state = stateRef;
+    const syncGroupsToState = async () => {
+      if (!isDBLoaded) return;
+      try {
+        const groups = await db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order');
+        if (groups.length > 0 && stateRef.current.categoryGroups.length === 0) {
+          dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groups } });
+        }
+      } catch {}
+    };
+    syncGroupsToState();
+  }, [isDBLoaded]);
 
   // Online/Offline Listeners
   useEffect(() => {
@@ -315,6 +382,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const markDirtyTypes: AppAction['type'][] = [
           'ADD_LEDGER','UPDATE_LEDGER','DELETE_LEDGER',
           'ADD_CATEGORY','UPDATE_CATEGORY','DELETE_CATEGORY','REORDER_CATEGORIES',
+          'ADD_CATEGORY_GROUP','UPDATE_CATEGORY_GROUP','DELETE_CATEGORY_GROUP','REORDER_CATEGORY_GROUPS',
           'UPDATE_SETTINGS','BATCH_DELETE_TRANSACTIONS','BATCH_UPDATE_TRANSACTIONS'
       ];
       // Handle DB writes for non-transaction entities
@@ -343,6 +411,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               break;
           case 'REORDER_CATEGORIES':
               db.categories.bulkPut(action.payload.map(c => ({...c, updatedAt: Date.now()})));
+              break;
+          case 'ADD_CATEGORY_GROUP':
+              if (groupStoreAvailableRef.current) db.categoryGroups.put({ ...action.payload, updatedAt: Date.now(), isDeleted: false });
+              break;
+          case 'UPDATE_CATEGORY_GROUP':
+              if (groupStoreAvailableRef.current) db.categoryGroups.put({ ...action.payload, updatedAt: Date.now(), isDeleted: false });
+              break;
+          case 'DELETE_CATEGORY_GROUP':
+              if (groupStoreAvailableRef.current) db.categoryGroups.update(action.payload, { isDeleted: true, updatedAt: Date.now() });
+              break;
+          case 'REORDER_CATEGORY_GROUPS':
+              if (groupStoreAvailableRef.current) db.categoryGroups.bulkPut(action.payload.map(g => ({ ...g, updatedAt: Date.now() })));
               break;
           case 'BATCH_DELETE_TRANSACTIONS':
               db.transactions.where('id').anyOf(action.payload).modify({ isDeleted: true, updatedAt: Date.now() });
@@ -427,10 +507,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, []);
 
   // ============ D1 Sync ============ //
-  const mergeFromCloud = useCallback(async (payload: {ledgers:any[]; categories:any[]; transactions:any[]; settings:any; version:number}) => {
-      const { ledgers = [], categories = [], transactions = [], settings, version } = payload;
+  const hasGroupStoreNow = () => {
+      const exists = db.tables.some(t => (t as any).name === 'categoryGroups');
+      if (!exists) return false;
+      return true;
+  };
 
-      await (db as any).transaction('rw', db.ledgers, db.categories, db.transactions, db.settings, async () => {
+  // 从 IndexedDB 刷新分组到内存，保证界面能显示
+  const reloadGroupsToState = useCallback(async () => {
+      try {
+          const groups = await db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order');
+          dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groups } });
+      } catch {}
+  }, []);
+
+  const mergeFromCloud = useCallback(async (payload: {ledgers:any[]; categories:any[]; groups?: any[]; transactions:any[]; settings:any; version:number}) => {
+      const { ledgers = [], categories = [], groups = [], transactions = [], settings, version } = payload;
+      const hasGroupStore = hasGroupStoreNow();
+
+      await (db as any).transaction('rw', db.ledgers, db.categories, db.transactions, db.settings, hasGroupStore ? db.categoryGroups : undefined, async () => {
           for (const l of ledgers) {
               const normalized: Ledger = { id: l.id, name: l.name, themeColor: l.theme_color || l.themeColor || '#007AFF', createdAt: l.created_at || Date.now(), updatedAt: l.updated_at || Date.now(), isDeleted: !!l.is_deleted };
               const local = await db.ledgers.get(normalized.id);
@@ -445,6 +540,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               if (normalized.isDeleted || !local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
                   await db.categories.put(normalized);
               }
+          }
+          if (hasGroupStore) {
+            for (const g of groups) {
+                const normalized: CategoryGroup = { id: g.id, name: g.name, categoryIds: Array.isArray(g.category_ids) ? g.category_ids : (() => { try { return JSON.parse(g.category_ids || '[]'); } catch { return []; } })(), order: g.order ?? 0, updatedAt: g.updated_at || Date.now(), isDeleted: !!g.is_deleted };
+                const local = await db.categoryGroups.get(normalized.id);
+                if (normalized.isDeleted || !local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
+                    await db.categoryGroups.put(normalized);
+                }
+            }
           }
           for (const t of transactions) {
               const normalized: Transaction = {
@@ -464,33 +568,51 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }
       });
 
-      const [ledgersNew, catsNew, txsNew, settingsRow] = await Promise.all([
+      const [ledgersNew, catsNew, txsNew, groupsNew, settingsRow] = await Promise.all([
           dbAPI.getLedgers(),
           dbAPI.getCategories(),
           dbAPI.getTransactions(),
+          hasGroupStore ? db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order') : Promise.resolve([]),
           db.settings.get('main')
       ]);
-      dispatch({ type: 'RESTORE_DATA', payload: { ledgers: ledgersNew, categories: catsNew, transactions: txsNew, settings: settingsRow?.value } });
+      dispatch({ type: 'RESTORE_DATA', payload: { ledgers: ledgersNew, categories: catsNew, categoryGroups: groupsNew, transactions: txsNew, settings: settingsRow?.value } });
       dispatch({ type: 'UPDATE_SETTINGS', payload: { lastSyncVersion: version } });
   }, []);
 
   const performCloudSync = useCallback(async (reason: 'auto' | 'manual' = 'auto') => {
       const { syncEndpoint, syncToken, syncUserId, lastSyncVersion } = stateRef.current.settings;
       if (!syncEndpoint || !syncToken || !isDBLoaded || !stateRef.current.isOnline) return;
+      const ready = await ensureStoresReady();
+      if (!ready) {
+          // 已重置 DB，重新初始化一次
+          setIsDBLoaded(false);
+          window.location.reload();
+          return;
+      }
+      const hasGroupStore = true; // 始终尝试同步分组，避免误判跳过
       dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
       try {
-          const sinceForPush = reason === 'manual' ? 0 : (lastSyncVersion || 0);
-          const [txAll, ledgersAll, catsAll] = await Promise.all([
+          // 如果本地为空（常见于重置/首次恢复），强制全量 push/pull，避免 lastSyncVersion 过大导致云端数据未拉取
+          let sinceForPush = reason === 'manual' ? 0 : (lastSyncVersion || 0);
+          let sinceForPull = reason === 'manual' ? 0 : (lastSyncVersion || 0);
+          const [txAll, ledgersAll, catsAll, groupsAll] = await Promise.all([
               dbAPI.getAllTransactionsIncludingDeleted(),
               dbAPI.getAllLedgersIncludingDeleted(),
               dbAPI.getAllCategoriesIncludingDeleted(),
+              dbAPI.getAllCategoryGroupsIncludingDeleted(),
           ]);
+          const isLocalEmpty = txAll.length === 0 && ledgersAll.length === 0 && catsAll.length === 0 && groupsAll.length === 0;
+          if (isLocalEmpty) {
+              sinceForPush = 0;
+              sinceForPull = 0;
+          }
           const filterBySince = <T extends { updatedAt?: number; updated_at?: number }>(arr: T[]) =>
               sinceForPush === 0 ? arr : arr.filter(item => (item.updatedAt ?? item.updated_at ?? 0) > sinceForPush);
 
           const txFiltered = filterBySince(txAll);
           const ledgersFiltered = filterBySince(ledgersAll);
           const catsFiltered = filterBySince(catsAll);
+          const groupsFiltered = filterBySince(groupsAll);
 
           // 规范化字段（含删除标记），确保后端能写入 is_deleted 等字段
           const userId = syncUserId || 'default';
@@ -514,6 +636,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               updated_at: c.updatedAt || c.updated_at || Date.now(),
               is_deleted: !!c.isDeleted
           });
+          const mapGroup = (g: any) => ({
+              id: g.id,
+              user_id: userId,
+              name: g.name,
+              // 直接传数组，服务端负责序列化，避免重复 stringify 导致丢失
+              category_ids: g.categoryIds || g.category_ids || [],
+              order: g.order ?? 0,
+              updated_at: g.updatedAt || g.updated_at || Date.now(),
+              is_deleted: !!g.isDeleted
+          });
           const mapTx = (t: any) => ({
               id: t.id,
               user_id: userId,
@@ -531,14 +663,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           const payload = {
               ledgers: ledgersFiltered.map(mapLedger),
               categories: catsFiltered.map(mapCategory),
+              groups: groupsFiltered.map(mapGroup),
               transactions: txFiltered.map(mapTx),
               settings: { data: stateRef.current.settings, updated_at: Date.now() }
           };
           await pushToCloud(syncEndpoint, syncToken, syncUserId || 'default', payload);
           // 手动同步强制全量拉取（since=0），避免版本偏差导致删除未拉取
-          const sinceForPull = reason === 'manual' ? 0 : (lastSyncVersion || 0);
           const pulled = await pullFromCloud(syncEndpoint, syncToken, syncUserId || 'default', sinceForPull);
           await mergeFromCloud(pulled);
+          // 重新从本地 DB 取分组，确保 UI 状态刷新
+          const groupsReloaded = await db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order');
+          dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groupsReloaded } });
           setSyncDirty(false);
           logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'success', file: 'D1 Sync', message: reason === 'manual' ? '手动同步成功' : '自动同步成功' });
           dispatch({ type: 'SET_SYNC_STATUS', payload: 'success' });
@@ -765,6 +900,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const { syncEndpoint, syncToken, syncUserId } = stateRef.current.settings;
       if (!syncEndpoint || !syncToken) {
           throw new Error('请先在设置里填写同步地址和 AUTH_TOKEN');
+      }
+      const ready = await ensureStoresReady();
+      if (!ready) {
+          setIsDBLoaded(false);
+          window.location.reload();
+          return;
       }
       dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
       try {

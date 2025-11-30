@@ -50,6 +50,15 @@ CREATE TABLE IF NOT EXISTS categories (
   updated_at INTEGER,
   is_deleted INTEGER
 );
+CREATE TABLE IF NOT EXISTS groups (
+  id TEXT PRIMARY KEY,
+  user_id TEXT,
+  name TEXT,
+  category_ids TEXT,
+  "order" INTEGER,
+  updated_at INTEGER,
+  is_deleted INTEGER
+);
 CREATE TABLE IF NOT EXISTS transactions (
   id TEXT PRIMARY KEY,
   user_id TEXT,
@@ -128,9 +137,11 @@ async function pullHandler(url, env, origin) {
   const versionStr = await env.SYNC_KV.get(`version:${userId}`);
   const version = versionStr ? Number(versionStr) : Date.now();
 
-  const [ledgers, categories, transactions, settings] = await Promise.all([
+  // groups 使用全量返回，避免版本不一致导致分组缺失（如需增量可再改回 > since）
+  const [ledgers, categories, groups, transactions, settings] = await Promise.all([
     env.DB.prepare(`SELECT * FROM ledgers WHERE user_id=? AND updated_at > ?`).bind(userId, since).all(),
     env.DB.prepare(`SELECT * FROM categories WHERE user_id=? AND updated_at > ?`).bind(userId, since).all(),
+    env.DB.prepare(`SELECT * FROM groups WHERE user_id=?`).bind(userId).all(),
     env.DB.prepare(`SELECT * FROM transactions WHERE user_id=? AND updated_at > ?`).bind(userId, since).all(),
     env.DB.prepare(`SELECT * FROM settings WHERE user_id=?`).bind(userId).first(),
   ]);
@@ -140,6 +151,7 @@ async function pullHandler(url, env, origin) {
       version,
       ledgers: ledgers.results || [],
       categories: categories.results || [],
+      groups: groups.results || [],
       transactions: transactions.results || [],
       settings: settings || null,
     },
@@ -214,6 +226,44 @@ async function pushHandler(request, url, env, origin) {
         c.type || 'expense',
         c.order ?? 0,
         isCustom ? 1 : 0,
+        updatedAt,
+        isDel ? 1 : 0
+      );
+    });
+    await batchInsert(binds, env.DB);
+  }
+
+  // Groups
+  if (Array.isArray(payload.groups) && payload.groups.length > 0) {
+    const stmt = env.DB.prepare(
+      `INSERT INTO groups (id,user_id,name,category_ids,"order",updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?)
+       ON CONFLICT(id) DO UPDATE SET 
+         name=excluded.name,
+         category_ids=excluded.category_ids,
+         "order"=excluded."order",
+         updated_at=excluded.updated_at,
+         is_deleted=excluded.is_deleted,
+         user_id=excluded.user_id
+       WHERE excluded.updated_at >= groups.updated_at`
+    );
+    const binds = payload.groups.map(g => {
+      const isDel = g.isDeleted ?? g.is_deleted ?? false;
+      const updatedAt = Math.max(Number(g.updatedAt ?? g.updated_at ?? 0), now);
+      let cats = [];
+      if (Array.isArray(g.categoryIds)) cats = g.categoryIds;
+      else if (Array.isArray(g.category_ids)) cats = g.category_ids;
+      else if (typeof g.categoryIds === 'string') {
+        try { cats = JSON.parse(g.categoryIds); } catch {}
+      } else if (typeof g.category_ids === 'string') {
+        try { cats = JSON.parse(g.category_ids); } catch {}
+      }
+      return stmt.bind(
+        g.id,
+        userId,
+        g.name || '',
+        JSON.stringify(cats),
+        g.order ?? 0,
         updatedAt,
         isDel ? 1 : 0
       );

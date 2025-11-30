@@ -24,6 +24,7 @@ export const StatsView: React.FC = () => {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [chartType, setChartType] = useState<'pie' | 'bar' | 'line'>('pie');
   const [pieType, setPieType] = useState<'expense' | 'income'>('expense');
+  const [viewMode, setViewMode] = useState<'category' | 'group'>('category');
   const [showLedgerMenu, setShowLedgerMenu] = useState(false);
 
   // Helper to get range
@@ -94,10 +95,21 @@ export const StatsView: React.FC = () => {
       if (chartType === 'pie') {
           // Group by Category based on selected pieType
           const map: Record<string, number> = {};
-          filteredData.filter(t => t.type === pieType).forEach(t => {
-              const catName = categories.find(c => c.id === t.categoryId)?.name || 'Unknown';
-              map[catName] = (map[catName] || 0) + t.amount;
-          });
+          const targetTxs = filteredData.filter(t => t.type === pieType);
+          if (viewMode === 'group') {
+              const groupMap: Record<string, string[]> = {};
+              state.categoryGroups.forEach(g => { groupMap[g.id] = g.categoryIds || []; });
+              targetTxs.forEach(t => {
+                  const group = state.categoryGroups.find(g => g.categoryIds?.includes(t.categoryId) && !g.isDeleted);
+                  const key = group ? group.name : '未分组';
+                  map[key] = (map[key] || 0) + t.amount;
+              });
+          } else {
+              targetTxs.forEach(t => {
+                  const catName = categories.find(c => c.id === t.categoryId)?.name || '未知';
+                  map[catName] = (map[catName] || 0) + t.amount;
+              });
+          }
           return Object.entries(map)
             .map(([name, value]) => ({ name, value }))
             .sort((a,b) => b.value - a.value);
@@ -136,7 +148,7 @@ export const StatsView: React.FC = () => {
           }
           return Object.values(map);
       }
-  }, [filteredData, chartType, timeRange, start, end, categories, pieType]);
+  }, [filteredData, chartType, timeRange, start, end, categories, pieType, viewMode, state.categoryGroups]);
 
   // Extreme Values - Explicitly typed to prevent "type 'never'" errors during build
   const extremes = useMemo((): {
@@ -362,10 +374,14 @@ export const StatsView: React.FC = () => {
 
                     {/* Pie Chart Type Toggle */}
                     {chartType === 'pie' && (
-                        <div className="flex justify-center mb-4">
+                        <div className="flex justify-between items-center mb-4 gap-3">
                             <div className="flex bg-gray-100 dark:bg-zinc-800 p-0.5 rounded-lg">
                                 <button onClick={() => setPieType('expense')} className={clsx("px-4 py-1 text-xs font-medium rounded-md transition-all", pieType === 'expense' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-text" : "text-ios-subtext")}>支出</button>
                                 <button onClick={() => setPieType('income')} className={clsx("px-4 py-1 text-xs font-medium rounded-md transition-all", pieType === 'income' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-text" : "text-ios-subtext")}>收入</button>
+                            </div>
+                            <div className="flex bg-gray-100 dark:bg-zinc-800 p-0.5 rounded-lg">
+                                <button onClick={() => setViewMode('category')} className={clsx("px-3 py-1 text-xs font-medium rounded-md transition-all", viewMode === 'category' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-text" : "text-ios-subtext")}>按分类</button>
+                                <button onClick={() => setViewMode('group')} className={clsx("px-3 py-1 text-xs font-medium rounded-md transition-all", viewMode === 'group' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-text" : "text-ios-subtext")}>按分组</button>
                             </div>
                         </div>
                     )}
