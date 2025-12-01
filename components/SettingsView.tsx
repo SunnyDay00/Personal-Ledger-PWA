@@ -245,7 +245,7 @@ export const SettingsView: React.FC = () => {
       // Use context method to ensure default categories are seeded
       await addLedger(newLedger);
     }
-    setLedgerModal({ isOpen: false, id: null, name: '', color: '#007AFF' });
+    setLedgerModal({ isOpen: false, mode: 'create', id: undefined, name: '', color: '#007AFF' });
   };
 
   const handleDeleteLedger = (l: Ledger) => {

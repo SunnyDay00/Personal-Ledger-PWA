@@ -40,6 +40,7 @@ interface AppContextType {
     restoreFromCloud: () => Promise<void>;
     resetApp: () => Promise<void>;
     restoreFromD1: () => Promise<void>;
+    addLedger: (ledger: Ledger) => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType>({
@@ -59,6 +60,7 @@ const AppContext = createContext<AppContextType>({
     restoreFromCloud: async () => { },
     resetApp: async () => { },
     restoreFromD1: async () => { },
+    addLedger: async () => { },
 });
 
 function appReducer(state: AppState, action: AppAction): AppState {
