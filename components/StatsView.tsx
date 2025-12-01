@@ -126,7 +126,7 @@ export const StatsView: React.FC = () => {
                 const groupMap: Record<string, string[]> = {};
                 state.categoryGroups.forEach(g => { groupMap[g.id] = g.categoryIds || []; });
                 targetTxs.forEach(t => {
-                    const group = state.categoryGroups.find(g => g.categoryIds?.includes(t.categoryId) && !g.isDeleted);
+                    const group = state.categoryGroups.find(g => g.categoryIds?.includes(t.categoryId) && !g.isDeleted && g.ledgerId === currentLedgerId);
                     const key = group ? group.name : '未分组';
                     map[key] = (map[key] || 0) + t.amount;
                 });

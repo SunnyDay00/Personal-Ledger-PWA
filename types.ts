@@ -1,5 +1,4 @@
 
-
 export type ThemeMode = 'light' | 'dark' | 'auto';
 export type TransactionType = 'expense' | 'income';
 export type BudgetType = 'week' | 'month' | 'year';
@@ -15,6 +14,7 @@ export interface Ledger {
 
 export interface Category {
   id: string;
+  ledgerId?: string; // Optional for migration compatibility, but should be set
   name: string;
   icon: string; // Lucide icon name
   type: TransactionType;
@@ -26,6 +26,7 @@ export interface Category {
 
 export interface CategoryGroup {
   id: string;
+  ledgerId?: string; // Optional for migration compatibility, but should be set
   name: string;
   categoryIds: string[];
   order: number;
@@ -180,3 +181,23 @@ export type AppAction =
   | { type: 'DELETE_CATEGORY'; payload: string }
   | { type: 'REORDER_CATEGORIES'; payload: Category[] }
   | { type: 'SAVE_NOTE_HISTORY'; payload: { categoryId: string; note: string } };
+
+export interface AppContextType {
+  state: AppState;
+  dispatch: React.Dispatch<AppAction>;
+  addTransaction: (transaction: Transaction) => void;
+  updateTransaction: (transaction: Transaction) => void;
+  deleteTransaction: (id: string) => void;
+  batchDeleteTransactions: (ids: string[]) => void;
+  batchUpdateTransactions: (ids: string[], updates: Partial<Transaction>) => void;
+  undo: () => void;
+  canUndo: boolean;
+  manualBackup: () => Promise<void>;
+  manualCloudSync: () => Promise<void>;
+  importData: (data: Partial<AppState>) => void;
+  smartImportCsv: (csvContent: string, targetLedgerId?: string) => void;
+  restoreFromCloud: () => Promise<void>;
+  resetApp: () => Promise<void>;
+  restoreFromD1: () => Promise<void>;
+  addLedger: (ledger: Ledger) => Promise<void>;
+}

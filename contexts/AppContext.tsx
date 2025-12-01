@@ -135,7 +135,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
         case 'COMPLETE_ONBOARDING':
             return { ...state, settings: { ...state.settings, isFirstRun: false } };
         case 'ADD_CATEGORY':
-            return { ...state, categories: [...state.categories, action.payload] };
+            return { ...state, categories: [...state.categories, { ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId }] };
         case 'UPDATE_CATEGORY':
             return { ...state, categories: state.categories.map(c => c.id === action.payload.id ? action.payload : c) };
         case 'DELETE_CATEGORY':
@@ -146,7 +146,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
             const otherCategories = state.categories.filter(c => c.type !== type);
             return { ...state, categories: [...otherCategories, ...action.payload] };
         case 'ADD_CATEGORY_GROUP':
-            return { ...state, categoryGroups: [...state.categoryGroups, action.payload] };
+            return { ...state, categoryGroups: [...state.categoryGroups, { ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId }] };
         case 'UPDATE_CATEGORY_GROUP':
             return { ...state, categoryGroups: state.categoryGroups.map(g => g.id === action.payload.id ? action.payload : g) };
         case 'DELETE_CATEGORY_GROUP':
@@ -210,34 +210,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 const loadedSettings = settings ? { ...DEFAULT_SETTINGS, ...settings } : DEFAULT_SETTINGS;
                 if (loadedSettings.enableCloudSync === undefined) loadedSettings.enableCloudSync = false;
 
-                const shouldSeedLedgers = !ledgers || ledgers.length === 0;
-                const shouldSeedCategories = !categories || categories.length === 0;
-                const shouldSeedGroups = !groups || groups.length === 0;
-                const shouldSeedSettings = !settings;
-                const ledgerSeed = (shouldSeedLedgers ? INITIAL_LEDGERS : ledgers).map(l => ({ ...l, updatedAt: l.updatedAt || Date.now(), isDeleted: false }));
-                const categorySeed = (shouldSeedCategories ? DEFAULT_CATEGORIES : categories).map((c, idx) => ({ ...c, order: c.order ?? idx, updatedAt: c.updatedAt || Date.now(), isDeleted: false }));
-                const groupSeed = shouldSeedGroups ? [] : groups.map((g: any, idx: number) => ({ ...g, order: g.order ?? idx, updatedAt: g.updatedAt || Date.now(), isDeleted: false }));
-                if (shouldSeedLedgers) await db.ledgers.bulkPut(ledgerSeed);
-                if (shouldSeedCategories) await db.categories.bulkPut(categorySeed);
-                if (groupStoreAvailableRef.current) {
-                    if (shouldSeedGroups && groupSeed.length === 0) {
-                        await db.categoryGroups.clear();
-                    } else if (groupSeed.length > 0) {
-                        await db.categoryGroups.bulkPut(groupSeed);
-                    }
-                }
-                if (shouldSeedSettings) await db.settings.put({ key: 'main', value: loadedSettings });
-
                 const lastLedgerId = typeof window !== 'undefined' ? localStorage.getItem('lastLedgerId') : null;
-                const initialLedgerId = lastLedgerId && ledgerSeed.some(l => l.id === lastLedgerId)
+
+                // Determine target ledger (prefer last used, otherwise first available)
+                const targetLedgerId = lastLedgerId && ledgers.some(l => l.id === lastLedgerId)
                     ? lastLedgerId
-                    : (ledgerSeed[0]?.id || INITIAL_LEDGERS[0].id);
+                    : (ledgers[0]?.id || '');
+
+                const initialLedgerId = targetLedgerId;
+
+                // If no settings found, save default settings to ensure persistence on first run
+                if (!settings) {
+                    await db.settings.put({ key: 'main', value: DEFAULT_SETTINGS });
+                }
 
                 const newState: Partial<AppState> = {
                     settings: loadedSettings,
-                    ledgers: ledgerSeed,
-                    categories: categorySeed,
-                    categoryGroups: groupStoreAvailableRef.current ? groupSeed : [],
+                    ledgers: ledgers || [],
+                    categories: categories || [],
+                    categoryGroups: groups || [],
                     transactions: transactions || [],
                     backupLogs: backupLogs || [],
                     currentLedgerId: initialLedgerId,
@@ -411,9 +402,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 db.ledgers.update(action.payload, { isDeleted: true, updatedAt: Date.now() });
                 // Also soft delete txs
                 db.transactions.where('ledgerId').equals(action.payload).modify({ isDeleted: true, updatedAt: Date.now() });
+                setSyncDirty(true);
                 break;
             case 'ADD_CATEGORY':
-                db.categories.put({ ...action.payload, updatedAt: Date.now(), isDeleted: false });
+                db.categories.put({ ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: Date.now(), isDeleted: false });
                 break;
             case 'UPDATE_CATEGORY':
                 db.categories.put({ ...action.payload, updatedAt: Date.now() });
@@ -427,16 +419,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 db.categories.bulkPut(action.payload.map(c => ({ ...c, updatedAt: Date.now() })));
                 break;
             case 'ADD_CATEGORY_GROUP':
-                if (groupStoreAvailableRef.current) db.categoryGroups.put({ ...action.payload, updatedAt: Date.now(), isDeleted: false });
+                db.categoryGroups.put({ ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: Date.now(), isDeleted: false });
                 break;
             case 'UPDATE_CATEGORY_GROUP':
-                if (groupStoreAvailableRef.current) db.categoryGroups.put({ ...action.payload, updatedAt: Date.now(), isDeleted: false });
+                db.categoryGroups.put({ ...action.payload, updatedAt: Date.now(), isDeleted: false });
                 break;
             case 'DELETE_CATEGORY_GROUP':
-                if (groupStoreAvailableRef.current) db.categoryGroups.update(action.payload, { isDeleted: true, updatedAt: Date.now() });
+                db.categoryGroups.update(action.payload, { isDeleted: true, updatedAt: Date.now() });
                 break;
             case 'REORDER_CATEGORY_GROUPS':
-                if (groupStoreAvailableRef.current) db.categoryGroups.bulkPut(action.payload.map(g => ({ ...g, updatedAt: Date.now() })));
+                db.categoryGroups.bulkPut(action.payload.map(g => ({ ...g, updatedAt: Date.now() })));
                 break;
             case 'BATCH_DELETE_TRANSACTIONS':
                 db.transactions.where('id').anyOf(action.payload).modify({ isDeleted: true, updatedAt: Date.now() });
@@ -510,6 +502,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             ]);
             dispatch({ type: 'RESTORE_DATA', payload: { ledgers, categories: cats, transactions: txs } });
 
+            setSyncDirty(false);
             setTimeout(() => dispatch({ type: 'SET_SYNC_STATUS', payload: 'idle' }), 3000);
 
         } catch (e: any) {
@@ -549,7 +542,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 }
             }
             for (const c of categories) {
-                const normalized: Category = { id: c.id, name: c.name, icon: c.icon, type: c.type, order: c.order ?? 0, isCustom: c.isCustom, updatedAt: c.updated_at || Date.now(), isDeleted: !!c.is_deleted };
+                const normalized: Category = { id: c.id, ledgerId: c.ledger_id || c.ledgerId, name: c.name, icon: c.icon, type: c.type, order: c.order ?? 0, isCustom: c.isCustom, updatedAt: c.updated_at || Date.now(), isDeleted: !!c.is_deleted };
                 const local = await db.categories.get(normalized.id);
                 if (normalized.isDeleted || !local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
                     await db.categories.put(normalized);
@@ -557,7 +550,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
             if (hasGroupStore) {
                 for (const g of groups) {
-                    const normalized: CategoryGroup = { id: g.id, name: g.name, categoryIds: Array.isArray(g.category_ids) ? g.category_ids : (() => { try { return JSON.parse(g.category_ids || '[]'); } catch { return []; } })(), order: g.order ?? 0, updatedAt: g.updated_at || Date.now(), isDeleted: !!g.is_deleted };
+                    const normalized: CategoryGroup = { id: g.id, ledgerId: g.ledger_id || g.ledgerId, name: g.name, categoryIds: Array.isArray(g.category_ids) ? g.category_ids : (() => { try { return JSON.parse(g.category_ids || '[]'); } catch { return []; } })(), order: g.order ?? 0, updatedAt: g.updated_at || Date.now(), isDeleted: !!g.is_deleted };
                     const local = await db.categoryGroups.get(normalized.id);
                     if (normalized.isDeleted || !local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
                         await db.categoryGroups.put(normalized);
@@ -630,6 +623,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
             // 规范化字段（含删除标记），确保后端能写入 is_deleted 等字段
             const userId = syncUserId || 'default';
+            // Fallback to the first available ledger if current is missing
+            const defaultLedgerId = ledgersAll[0]?.id || 'default';
+
             const mapLedger = (l: any) => ({
                 id: l.id,
                 user_id: userId,
@@ -642,6 +638,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             const mapCategory = (c: any) => ({
                 id: c.id,
                 user_id: userId,
+                ledger_id: c.ledgerId || c.ledger_id || stateRef.current.currentLedgerId || defaultLedgerId,
                 name: c.name,
                 icon: c.icon,
                 type: c.type,
@@ -653,6 +650,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             const mapGroup = (g: any) => ({
                 id: g.id,
                 user_id: userId,
+                ledger_id: g.ledgerId || g.ledger_id || stateRef.current.currentLedgerId || defaultLedgerId,
                 name: g.name,
                 // 直接传数组，服务端负责序列化，避免重复 stringify 导致丢失
                 category_ids: g.categoryIds || g.category_ids || [],
@@ -703,13 +701,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     useEffect(() => {
         if (!syncDirty) return;
-        const { syncEndpoint, syncToken } = state.settings;
-        if (!syncEndpoint || !syncToken || !state.isOnline) return;
+        const { syncEndpoint, syncToken, webdavUrl } = state.settings;
+        if (!state.isOnline) return;
+
+        const hasD1 = syncEndpoint && syncToken;
+        const hasWebDAV = webdavUrl;
+
+        if (!hasD1 && !hasWebDAV) return;
+
         if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
         const delaySec = state.settings.syncDebounceSeconds ?? 3;
-        syncTimerRef.current = setTimeout(() => performCloudSync('auto'), Math.max(1000, delaySec * 1000));
+
+        syncTimerRef.current = setTimeout(async () => {
+            if (hasD1) await performCloudSync('auto');
+            // WebDAV only for manual backup or scheduled auto-backup, not real-time sync
+            // if (hasWebDAV) await performUpload(true);
+        }, Math.max(1000, delaySec * 1000));
+
         return () => { if (syncTimerRef.current) clearTimeout(syncTimerRef.current); };
-    }, [syncDirty, state.settings, state.isOnline, performCloudSync]);
+    }, [syncDirty, state.settings, state.isOnline, performCloudSync, performUpload]);
 
     // Version lightweight polling
     useEffect(() => {
@@ -937,6 +947,31 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
     };
 
+    const addLedger = async (ledger: Ledger) => {
+        dispatch({ type: 'ADD_LEDGER', payload: ledger });
+        dispatch({ type: 'SET_LEDGER', payload: ledger.id });
+        await db.ledgers.put(ledger);
+        logOperation('add', ledger.id, `Created ledger: ${ledger.name}`);
+
+        // Auto-seed default categories for the new ledger
+        const timestamp = Date.now();
+        const newCategories = DEFAULT_CATEGORIES.map((c, idx) => ({
+            ...c,
+            id: `${generateId()}_${timestamp}_${idx}`, // Ensure unique ID
+            ledgerId: ledger.id,
+            order: idx,
+            updatedAt: timestamp,
+            isDeleted: false
+        }));
+
+        // Dispatch and persist categories
+        for (const cat of newCategories) {
+            dispatch({ type: 'ADD_CATEGORY', payload: cat });
+        }
+        await db.categories.bulkPut(newCategories);
+        setSyncDirty(true);
+    };
+
     // Reset app: clear local DB, wipe sync/webdav config, go back to first-run
     const resetApp = async () => {
         if (!window.confirm('确认要退出并清空本地数据吗？这将删除本地账本/分类/流水、清除云同步和 WebDAV 配置，恢复为首次启动状态。')) return;
@@ -979,7 +1014,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (!isDBLoaded) return null; // Or loading spinner
 
     return (
-        <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, batchDeleteTransactions, batchUpdateTransactions, undo, canUndo: !!undoStack, manualBackup, manualCloudSync, importData, smartImportCsv, restoreFromCloud, resetApp, restoreFromD1 }}>
+        <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, batchDeleteTransactions, batchUpdateTransactions, undo, canUndo: !!undoStack, manualBackup, manualCloudSync, importData, smartImportCsv, restoreFromCloud, resetApp, restoreFromD1, addLedger }}>
             {children}
         </AppContext.Provider>
     );

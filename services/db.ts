@@ -3,8 +3,8 @@ import { Transaction, Ledger, Category, CategoryGroup, AppSettings, OperationLog
 import { loadState } from './storage';
 
 // 再次 bump DB 名称，彻底规避旧 schema 残留导致 objectStore not found。
-export const DB_NAME = 'FinanceDB_v7';
-const LEGACY_DB_NAMES = ['FinanceDB_v6', 'FinanceDB_v5', 'FinanceDB_v4', 'FinanceDB_v3', 'FinanceDB'];
+export const DB_NAME = 'FinanceDB_v8';
+const LEGACY_DB_NAMES = ['FinanceDB_v7', 'FinanceDB_v6', 'FinanceDB_v5', 'FinanceDB_v4', 'FinanceDB_v3', 'FinanceDB'];
 
 export class FinanceDB extends Dexie {
   transactions!: Table<Transaction>;
@@ -20,8 +20,8 @@ export class FinanceDB extends Dexie {
     (this as any).version(1).stores({
       transactions: 'id, ledgerId, categoryId, date, updatedAt, isDeleted',
       ledgers: 'id, updatedAt, isDeleted',
-      categories: 'id, type, order, updatedAt, isDeleted',
-      categoryGroups: 'id, order, updatedAt, isDeleted',
+      categories: 'id, ledgerId, type, order, updatedAt, isDeleted',
+      categoryGroups: 'id, ledgerId, order, updatedAt, isDeleted',
       settings: 'key',
       operationLogs: 'id, timestamp, type',
       backupLogs: 'id, timestamp',
@@ -110,8 +110,9 @@ export async function initAndMigrateDB() {
           }
 
           // Migrate Ledgers
+          let ledgersWithTime: Ledger[] = [];
           if (legacyState.ledgers && legacyState.ledgers.length > 0) {
-            const ledgersWithTime = legacyState.ledgers.map(l => ({
+            ledgersWithTime = legacyState.ledgers.map(l => ({
               ...l,
               updatedAt: l.updatedAt || Date.now(),
               isDeleted: false,
@@ -119,25 +120,29 @@ export async function initAndMigrateDB() {
             await db.ledgers.bulkPut(ledgersWithTime);
           }
 
-          // Migrate Categories
-          if (legacyState.categories && legacyState.categories.length > 0) {
-            const catsWithTime = legacyState.categories.map(c => ({
-              ...c,
-              updatedAt: c.updatedAt || Date.now(),
-              isDeleted: false,
-            }));
-            await db.categories.bulkPut(catsWithTime);
-          }
+            const defaultLedgerId = ledgersWithTime[0]?.id || 'default';
 
-          // Migrate Category Groups (if present)
-          if (legacyState.categoryGroups && legacyState.categoryGroups.length > 0) {
-            const groupsWithTime = legacyState.categoryGroups.map(g => ({
-              ...g,
-              updatedAt: g.updatedAt || Date.now(),
-              isDeleted: false,
-            }));
-            await db.categoryGroups.bulkPut(groupsWithTime);
-          }
+            // Migrate Categories
+            if (legacyState.categories && legacyState.categories.length > 0) {
+              const catsWithTime = legacyState.categories.map(c => ({
+                ...c,
+                ledgerId: c.ledgerId || defaultLedgerId,
+                updatedAt: c.updatedAt || Date.now(),
+                isDeleted: false,
+              }));
+              await db.categories.bulkPut(catsWithTime);
+            }
+
+            // Migrate Category Groups (if present)
+            if (legacyState.categoryGroups && legacyState.categoryGroups.length > 0) {
+              const groupsWithTime = legacyState.categoryGroups.map(g => ({
+                ...g,
+                ledgerId: g.ledgerId || defaultLedgerId,
+                updatedAt: g.updatedAt || Date.now(),
+                isDeleted: false,
+              }));
+              await db.categoryGroups.bulkPut(groupsWithTime);
+            }
 
           // Migrate Transactions
           if (legacyState.transactions && legacyState.transactions.length > 0) {

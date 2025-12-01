@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { CloudSyncButton } from './CloudSyncButton';
-import { THEME_PRESETS, AVAILABLE_ICONS } from '../constants';
+import { THEME_PRESETS, AVAILABLE_ICONS, DEFAULT_CATEGORIES } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
 import { generateId, exportToJson, exportToCsv, cn, readCsvFileWithEncoding } from '../utils';
 import { WebDAVService } from '../services/webdav';
@@ -46,7 +46,7 @@ const SettingsItem: React.FC<{ icon: string; label: string; value?: string; onCl
 );
 
 export const SettingsView: React.FC = () => {
-  const { state, dispatch, manualBackup, restoreFromCloud, smartImportCsv, manualCloudSync, resetApp } = useApp();
+  const { state, dispatch, manualBackup, restoreFromCloud, smartImportCsv, manualCloudSync, resetApp, addLedger } = useApp();
   const [page, setPage] = useState<SettingsPage>('main');
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -79,6 +79,7 @@ export const SettingsView: React.FC = () => {
   const [ledgerModal, setLedgerModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; color: string }>(
     { isOpen: false, mode: 'create', name: '', color: '#007AFF' }
   );
+  const [selectedLedgerId, setSelectedLedgerId] = useState(state.currentLedgerId || state.ledgers[0]?.id || '');
   const [catType, setCatType] = useState<'expense' | 'income'>('expense');
   const [isAddingCat, setIsAddingCat] = useState(false);
   const [editingCat, setEditingCat] = useState<Category | null>(null);
@@ -122,12 +123,15 @@ export const SettingsView: React.FC = () => {
 
   const sortedCategories = useMemo(() => {
     return state.categories
-      .filter((c) => c.type === catType)
-      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-  }, [state.categories, catType]);
+      .filter(c => !c.isDeleted && c.ledgerId === selectedLedgerId)
+      .sort((a, b) => a.order - b.order);
+  }, [state.categories, selectedLedgerId]);
+
   const sortedGroups = useMemo(() => {
-    return (state.categoryGroups || []).filter(g => !g.isDeleted).sort((a,b) => (a.order ?? 0) - (b.order ?? 0));
-  }, [state.categoryGroups]);
+    return (state.categoryGroups || [])
+      .filter(g => !g.isDeleted && g.ledgerId === selectedLedgerId)
+      .sort((a, b) => (a.order || 0) - (b.order || 0));
+  }, [state.categoryGroups, selectedLedgerId]);
 
   // 如果本地 DB 已有分组但 state 为空，尝试从 DB 刷新到 state（避免界面不显示）
   useEffect(() => {
@@ -136,7 +140,7 @@ export const SettingsView: React.FC = () => {
       if (groups && groups.length > 0) {
         dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groups } });
       }
-    }).catch(() => {});
+    }).catch(() => { });
   }, [sortedGroups.length, dispatch]);
   const handleSaveD1 = () => {
     if (!d1Form.endpoint.trim() || !d1Form.token.trim()) {
@@ -207,18 +211,41 @@ export const SettingsView: React.FC = () => {
   const openCreateLedger = () => setLedgerModal({ isOpen: true, mode: 'create', name: '', color: '#007AFF' });
   const openEditLedger = (l: Ledger) => setLedgerModal({ isOpen: true, mode: 'edit', id: l.id, name: l.name, color: l.themeColor });
 
-  const saveLedger = () => {
+  const saveLedger = async () => {
     if (!ledgerModal.name.trim()) {
       window.alert('请输入账本名称');
       return;
     }
-    if (ledgerModal.mode === 'create') {
-      dispatch({ type: 'ADD_LEDGER', payload: { id: generateId(), name: ledgerModal.name, themeColor: ledgerModal.color, createdAt: Date.now() } });
-    } else if (ledgerModal.mode === 'edit' && ledgerModal.id) {
-      const original = state.ledgers.find((l) => l.id === ledgerModal.id);
-      if (original) dispatch({ type: 'UPDATE_LEDGER', payload: { ...original, name: ledgerModal.name, themeColor: ledgerModal.color } });
+
+    if (ledgerModal.mode === 'edit' && ledgerModal.id) {
+      // Edit
+      const original = state.ledgers.find(l => l.id === ledgerModal.id);
+      if (original) {
+        const updated: Ledger = {
+          ...original,
+          name: ledgerModal.name,
+          themeColor: ledgerModal.color,
+          updatedAt: Date.now()
+        };
+        dispatch({ type: 'UPDATE_LEDGER', payload: updated });
+        await db.ledgers.put(updated);
+        // logOperation is not imported or available in this scope, removing it to avoid error
+        // If needed, we can add it back if we import it or use a different logging mechanism
+      }
+    } else {
+      // Add
+      const newLedger: Ledger = {
+        id: generateId(),
+        name: ledgerModal.name,
+        themeColor: ledgerModal.color,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        isDeleted: false
+      };
+      // Use context method to ensure default categories are seeded
+      await addLedger(newLedger);
     }
-    setLedgerModal({ ...ledgerModal, isOpen: false });
+    setLedgerModal({ isOpen: false, id: null, name: '', color: '#007AFF' });
   };
 
   const handleDeleteLedger = (l: Ledger) => {
@@ -254,6 +281,7 @@ export const SettingsView: React.FC = () => {
       type: 'ADD_CATEGORY',
       payload: {
         id: generateId(),
+        ledgerId: selectedLedgerId,
         name: newCatName,
         icon: newCatIcon,
         type: catType,
@@ -298,6 +326,7 @@ export const SettingsView: React.FC = () => {
         type: 'ADD_CATEGORY_GROUP',
         payload: {
           id: generateId(),
+          ledgerId: selectedLedgerId,
           name: groupModal.name.trim(),
           categoryIds: groupModal.categoryIds,
           order: sortedGroups.length,
@@ -378,7 +407,7 @@ export const SettingsView: React.FC = () => {
 
       <SettingsGroup title="其他">
         <SettingsItem icon="Download" label="导出数据 (JSON)" onClick={() => exportToJson(state, `ledger_backup_${format(new Date(), 'yyyyMMdd_HHmm')}.json`)} />
-        <SettingsItem icon="Info" label="关于" value={`v${state.settings.version}`} onClick={() => setPage('about')} isLast />
+        <SettingsItem icon="Info" label="关于" onClick={() => setPage('about')} isLast />
       </SettingsGroup>
 
       <SettingsGroup title="退出与重置">
@@ -789,9 +818,166 @@ export const SettingsView: React.FC = () => {
       )}
     </>
   );
+
+
+  const handleInitDefaults = async () => {
+    if (!window.confirm('确定要为当前账本初始化默认分类吗？')) return;
+
+    let order = 0;
+    const timestamp = Date.now();
+
+    // Use the unified rich list from constants
+    DEFAULT_CATEGORIES.forEach((cat, idx) => {
+      // Ensure ID is unique by appending index and timestamp
+      const catId = `${generateId()}_${timestamp}_${idx}`;
+      dispatch({
+        type: 'ADD_CATEGORY',
+        payload: {
+          id: catId,
+          ledgerId: selectedLedgerId,
+          name: cat.name,
+          icon: cat.icon,
+          type: cat.type,
+          order: order++,
+          isCustom: false,
+          updatedAt: Date.now()
+        }
+      });
+    });
+
+    // Force sync to ensure cloud is updated immediately
+    await manualCloudSync();
+    window.alert('初始化完成并已触发同步');
+  };
+
+  const handleCleanDuplicates = async () => {
+    if (!window.confirm('确定要清理当前账本的重复分类（含未归类）吗？这将合并同名分类并更新相关账单。')) return;
+
+    // Include orphans in the cleanup scope
+    const currentCats = state.categories.filter(c => (c.ledgerId === selectedLedgerId || !c.ledgerId) && !c.isDeleted);
+    const groups: Record<string, typeof currentCats> = {};
+
+    // Group by type:name
+    currentCats.forEach(c => {
+      const key = `${c.type}:${c.name.trim()}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(c);
+    });
+
+    let removedCount = 0;
+    let txUpdatedCount = 0;
+
+    for (const key in groups) {
+      const list = groups[key];
+      if (list.length < 2) continue;
+
+      // Sort: prefer item with correct ledgerId, then latest update
+      list.sort((a, b) => {
+        const aValid = a.ledgerId === selectedLedgerId ? 1 : 0;
+        const bValid = b.ledgerId === selectedLedgerId ? 1 : 0;
+        if (aValid !== bValid) return bValid - aValid; // Valid one comes first
+        return (b.updatedAt || 0) - (a.updatedAt || 0);
+      });
+
+      const master = list[0];
+      const dups = list.slice(1);
+
+      // If master is an orphan, claim it
+      if (master.ledgerId !== selectedLedgerId) {
+        dispatch({ type: 'UPDATE_CATEGORY', payload: { ...master, ledgerId: selectedLedgerId, updatedAt: Date.now() } });
+      }
+
+      for (const dup of dups) {
+        const txs = state.transactions.filter(t => t.categoryId === dup.id);
+        if (txs.length > 0) {
+          // Update transactions
+          const ids = txs.map(t => t.id);
+          dispatch({
+            type: 'BATCH_UPDATE_TRANSACTIONS',
+            payload: { ids, updates: { categoryId: master.id } }
+          });
+          txUpdatedCount += txs.length;
+        }
+
+        // Delete dup
+        dispatch({ type: 'DELETE_CATEGORY', payload: dup.id });
+        removedCount++;
+      }
+    }
+
+    window.alert(`清理完成：合并了 ${removedCount} 个重复分类，更新了 ${txUpdatedCount} 条账单。`);
+  };
+
+  const handleDeleteAllGroups = () => {
+    if (!window.confirm('确定要删除当前账本的所有分类组吗？此操作不可恢复。')) return;
+    const groups = state.categoryGroups.filter(g => g.ledgerId === selectedLedgerId && !g.isDeleted);
+    groups.forEach(g => {
+      dispatch({ type: 'DELETE_CATEGORY_GROUP', payload: g.id });
+    });
+    window.alert(`已删除 ${groups.length} 个分类组`);
+  };
+
   const renderCategories = () => (
     <>
       <div className="h-4"></div>
+
+      {/* Ledger Switcher for Categories */}
+      <div className="mx-4 mb-4">
+        <div className="flex items-center gap-2 overflow-x-auto pb-2 no-scrollbar">
+          {state.ledgers.map(l => (
+            <button
+              key={l.id}
+              onClick={() => setSelectedLedgerId(l.id)}
+              className={cn(
+                "flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap border",
+                selectedLedgerId === l.id
+                  ? "bg-ios-primary text-white border-ios-primary"
+                  : "bg-white dark:bg-zinc-900 text-ios-text border-gray-200 dark:border-zinc-700"
+              )}
+            >
+              <div className="w-2 h-2 rounded-full bg-white" style={{ backgroundColor: selectedLedgerId === l.id ? 'white' : l.themeColor }}></div>
+              {l.name}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {state.categories.filter(c => c.ledgerId === selectedLedgerId).length === 0 && (
+        <div className="mx-4 mb-4">
+          <button onClick={handleInitDefaults} className="w-full py-3 bg-ios-primary/10 text-ios-primary rounded-xl text-sm font-medium border border-ios-primary/20 active:bg-ios-primary/20 transition-colors">
+            初始化默认分类
+          </button>
+        </div>
+      )}
+
+      {/* Delete All Groups Button - Only show if groups exist */}
+      {sortedGroups.length > 0 && (
+        <div className="mx-4 mb-4">
+          <button onClick={handleDeleteAllGroups} className="w-full py-3 bg-red-500/10 text-red-600 rounded-xl text-sm font-medium border border-red-500/20 active:bg-red-500/20 transition-colors">
+            删除所有分类组
+          </button>
+        </div>
+      )}
+
+      {/* Clean Duplicates Button - Only show if duplicates exist */}
+      {(() => {
+        const cats = state.categories.filter(c => c.ledgerId === selectedLedgerId && !c.isDeleted);
+        const names = new Set();
+        let hasDup = false;
+        for (const c of cats) {
+          const key = `${c.type}:${c.name.trim()}`;
+          if (names.has(key)) { hasDup = true; break; }
+          names.add(key);
+        }
+        return hasDup;
+      })() && (
+          <div className="mx-4 mb-4">
+            <button onClick={handleCleanDuplicates} className="w-full py-3 bg-orange-500/10 text-orange-600 rounded-xl text-sm font-medium border border-orange-500/20 active:bg-orange-500/20 transition-colors">
+              检测到重复分类 - 点击清理
+            </button>
+          </div>
+        )}
+
       <div className="mx-4 mb-4 bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-ios-border p-4">
         <div className="flex items-center justify-between mb-3">
           <div>
@@ -1041,7 +1227,7 @@ export const SettingsView: React.FC = () => {
               <div>
                 <div className="text-xs text-ios-subtext mb-2">选择包含的分类</div>
                 <div className="grid grid-cols-2 gap-2 max-h-80 overflow-y-auto no-scrollbar">
-                  {state.categories.filter(c => !c.isDeleted).sort((a,b)=>(a.order??0)-(b.order??0)).map(cat => {
+                  {state.categories.filter(c => !c.isDeleted).sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map(cat => {
                     const checked = groupModal.categoryIds.includes(cat.id);
                     return (
                       <label key={cat.id} className={cn("flex items-center gap-2 p-2 rounded-xl border", checked ? "border-ios-primary bg-ios-primary/5" : "border-gray-200 dark:border-zinc-800")}>

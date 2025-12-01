@@ -68,14 +68,39 @@ const createCats = (type: 'expense' | 'income', list: string[], startIndex: numb
 };
 
 export const DEFAULT_CATEGORIES: Category[] = [
-  ...createCats('expense', [
-    '餐饮', '买菜', '零食', '日用', '数码', '娱乐', '服饰', '游玩', 
-    '教育', 'AI', '网络', '社保', '理发', '保险', '出行', '其他'
-  ], 0),
-  ...createCats('income', [
-    '工资', '兼职', '理财', '他人', '其他'
-  ], 0)
-];
+  // 餐饮
+  { name: '餐饮', icon: 'Coffee', type: 'expense' }, { name: '早餐', icon: 'Coffee', type: 'expense' }, { name: '午餐', icon: 'Pizza', type: 'expense' }, { name: '晚餐', icon: 'Utensils', type: 'expense' }, { name: '饮料', icon: 'Cup', type: 'expense' }, { name: '零食', icon: 'IceCream', type: 'expense' }, { name: '买菜', icon: 'Carrot', type: 'expense' }, { name: '外卖', icon: 'Truck', type: 'expense' },
+  // 购物
+  { name: '购物', icon: 'ShoppingBag', type: 'expense' }, { name: '日用', icon: 'ShoppingBag', type: 'expense' }, { name: '数码', icon: 'Smartphone', type: 'expense' }, { name: '衣服', icon: 'Shirt', type: 'expense' }, { name: '家居', icon: 'Home', type: 'expense' }, { name: '美妆', icon: 'Smile', type: 'expense' }, { name: '电器', icon: 'Tv', type: 'expense' },
+  // 交通
+  { name: '交通', icon: 'Train', type: 'expense' }, { name: '打车', icon: 'Car', type: 'expense' }, { name: '公交', icon: 'Bus', type: 'expense' }, { name: '地铁', icon: 'Train', type: 'expense' }, { name: '加油', icon: 'Droplet', type: 'expense' }, { name: '停车', icon: 'MapPin', type: 'expense' }, { name: '维修', icon: 'Tool', type: 'expense' },
+  // 娱乐
+  { name: '娱乐', icon: 'Film', type: 'expense' }, { name: '电影', icon: 'Film', type: 'expense' }, { name: '游戏', icon: 'Gamepad', type: 'expense' }, { name: '会员', icon: 'CreditCard', type: 'expense' }, { name: '旅游', icon: 'Map', type: 'expense' }, { name: '聚会', icon: 'Users', type: 'expense' }, { name: '宠物', icon: 'Github', type: 'expense' },
+  // 居住
+  { name: '居住', icon: 'Home', type: 'expense' }, { name: '房租', icon: 'Key', type: 'expense' }, { name: '水电', icon: 'Zap', type: 'expense' }, { name: '宽带', icon: 'Wifi', type: 'expense' }, { name: '物业', icon: 'Shield', type: 'expense' }, { name: '话费', icon: 'Phone', type: 'expense' },
+  // 医疗
+  { name: '医疗', icon: 'Activity', type: 'expense' }, { name: '药品', icon: 'Thermometer', type: 'expense' }, { name: '体检', icon: 'Heart', type: 'expense' },
+  // 教育
+  { name: '教育', icon: 'Book', type: 'expense' }, { name: '书籍', icon: 'BookOpen', type: 'expense' }, { name: '培训', icon: 'PenTool', type: 'expense' },
+  // 人情
+  { name: '人情', icon: 'Gift', type: 'expense' }, { name: '红包', icon: 'Gift', type: 'expense' }, { name: '礼物', icon: 'Gift', type: 'expense' }, { name: '请客', icon: 'Users', type: 'expense' },
+  // 投资
+  { name: '投资', icon: 'TrendingUp', type: 'expense' }, { name: '理财亏损', icon: 'TrendingDown', type: 'expense' },
+  // 其他
+  { name: '其他', icon: 'MoreHorizontal', type: 'expense' }, { name: '丢失', icon: 'Frown', type: 'expense' },
+  // 收入
+  { name: '工资', icon: 'Briefcase', type: 'income' }, { name: '兼职', icon: 'Clock', type: 'income' }, { name: '理财收益', icon: 'TrendingUp', type: 'income' }, { name: '礼金', icon: 'Gift', type: 'income' }, { name: '奖金', icon: 'Award', type: 'income' }, { name: '报销', icon: 'FileText', type: 'income' }, { name: '其他收入', icon: 'PlusCircle', type: 'income' }
+].map((c, idx) => ({
+  id: `default_${idx}`, // Placeholder ID, will be overwritten
+  name: c.name,
+  icon: c.icon,
+  type: c.type as any,
+  order: idx,
+  isCustom: false,
+  createdAt: Date.now(),
+  updatedAt: Date.now(),
+  isDeleted: false
+}));
 
 export const THEME_PRESETS = [
   '#007AFF', // Blue

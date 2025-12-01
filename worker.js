@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS ledgers (
 CREATE TABLE IF NOT EXISTS categories (
   id TEXT PRIMARY KEY,
   user_id TEXT,
+  ledger_id TEXT,
   name TEXT,
   icon TEXT,
   type TEXT,
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS categories (
 CREATE TABLE IF NOT EXISTS groups (
   id TEXT PRIMARY KEY,
   user_id TEXT,
+  ledger_id TEXT,
   name TEXT,
   category_ids TEXT,
   "order" INTEGER,
@@ -201,9 +203,10 @@ async function pushHandler(request, url, env, origin) {
   // Categories
   if (Array.isArray(payload.categories) && payload.categories.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO categories (id,user_id,name,icon,type,"order",is_custom,updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?,?,?)
+      `INSERT INTO categories (id,user_id,ledger_id,name,icon,type,"order",is_custom,updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET 
+         ledger_id=excluded.ledger_id, 
          name=excluded.name, 
          icon=excluded.icon, 
          type=excluded.type, 
@@ -221,6 +224,7 @@ async function pushHandler(request, url, env, origin) {
       return stmt.bind(
         c.id,
         userId,
+        c.ledgerId || c.ledger_id || '',
         c.name || '',
         c.icon || 'Circle',
         c.type || 'expense',
@@ -236,9 +240,10 @@ async function pushHandler(request, url, env, origin) {
   // Groups
   if (Array.isArray(payload.groups) && payload.groups.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO groups (id,user_id,name,category_ids,"order",updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?)
+      `INSERT INTO groups (id,user_id,ledger_id,name,category_ids,"order",updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET 
+         ledger_id=excluded.ledger_id,
          name=excluded.name,
          category_ids=excluded.category_ids,
          "order"=excluded."order",
@@ -261,6 +266,7 @@ async function pushHandler(request, url, env, origin) {
       return stmt.bind(
         g.id,
         userId,
+        g.ledgerId || g.ledger_id || '',
         g.name || '',
         JSON.stringify(cats),
         g.order ?? 0,

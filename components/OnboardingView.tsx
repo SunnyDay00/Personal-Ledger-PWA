@@ -1,10 +1,10 @@
 ﻿import React, { useState } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
-import { readJsonFile } from '../utils';
+import { readJsonFile, generateId } from '../utils';
 
 export const OnboardingView: React.FC = () => {
-  const { dispatch, importData, restoreFromD1 } = useApp();
+  const { dispatch, importData, restoreFromD1, addLedger } = useApp();
   const [mode, setMode] = useState<'intro' | 'create' | 'restore'>('intro');
   const [restoreTab, setRestoreTab] = useState<'local' | 'cloud'>('cloud');
 
@@ -14,12 +14,22 @@ export const OnboardingView: React.FC = () => {
   const [d1Form, setD1Form] = useState({ endpoint: '', token: '', userId: 'default' });
   const [isRestoring, setIsRestoring] = useState(false);
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (!ledgerName.trim()) {
       setCreateError('请输入账本名称');
       return;
     }
-    dispatch({ type: 'UPDATE_LEDGER', payload: { id: 'l1', name: ledgerName, themeColor: '#007AFF', createdAt: Date.now() } });
+
+    const newLedger = {
+      id: generateId(),
+      name: ledgerName,
+      themeColor: '#007AFF',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      isDeleted: false
+    };
+
+    await addLedger(newLedger);
     dispatch({ type: 'COMPLETE_ONBOARDING' });
   };
 

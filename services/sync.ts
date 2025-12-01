@@ -269,16 +269,22 @@ export class SyncService {
     }
 
     private async mergeCategories(cloudCats: Category[]) {
+         const ledgers = await db.ledgers.toArray();
+         const defaultLedgerId = ledgers[0]?.id || 'default';
+
          await (db as any).transaction('rw', db.categories, async () => {
             for (const cloudC of cloudCats) {
                 const localC = await db.categories.get(cloudC.id);
+                // Assign default ledgerId ONLY if missing (legacy data)
+                const categoryToSave = { ...cloudC, ledgerId: cloudC.ledgerId ?? defaultLedgerId };
+                
                 if (!localC) {
-                    await db.categories.put({ ...cloudC, updatedAt: cloudC.updatedAt || Date.now(), isDeleted: false });
+                    await db.categories.put({ ...categoryToSave, updatedAt: cloudC.updatedAt || Date.now(), isDeleted: false });
                 } else {
                      const cloudTime = cloudC.updatedAt || 0;
                      const localTime = localC.updatedAt || 0;
                      if (cloudTime > localTime) {
-                         await db.categories.put({ ...cloudC, updatedAt: cloudTime });
+                         await db.categories.put({ ...categoryToSave, updatedAt: cloudTime });
                      }
                 }
             }
@@ -288,16 +294,23 @@ export class SyncService {
     private async mergeCategoryGroups(cloudGroups: CategoryGroup[]) {
         const hasGroupStore = db.tables.some(t => (t as any).name === 'categoryGroups');
         if (!hasGroupStore) return;
+
+        const ledgers = await db.ledgers.toArray();
+        const defaultLedgerId = ledgers[0]?.id || 'default';
+
         await (db as any).transaction('rw', db.categoryGroups, async () => {
             for (const g of cloudGroups) {
                 const localG = await db.categoryGroups.get(g.id);
+                // Assign default ledgerId ONLY if missing (legacy data)
+                const groupToSave = { ...g, ledgerId: g.ledgerId ?? defaultLedgerId };
+
                 if (!localG) {
-                    await db.categoryGroups.put({ ...g, updatedAt: g.updatedAt || Date.now(), isDeleted: false });
+                    await db.categoryGroups.put({ ...groupToSave, updatedAt: g.updatedAt || Date.now(), isDeleted: false });
                 } else {
                     const cloudTime = g.updatedAt || 0;
                     const localTime = localG.updatedAt || 0;
                     if (cloudTime > localTime) {
-                        await db.categoryGroups.put({ ...g, updatedAt: cloudTime });
+                        await db.categoryGroups.put({ ...groupToSave, updatedAt: cloudTime });
                     }
                 }
             }
