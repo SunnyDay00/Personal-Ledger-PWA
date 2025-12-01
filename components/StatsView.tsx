@@ -14,6 +14,26 @@ import { clsx } from 'clsx';
 import { Transaction } from '../types';
 import { CloudSyncButton } from './CloudSyncButton';
 
+const CustomTooltip = ({ active, payload, label }: any) => {
+    if (active && payload && payload.length) {
+        return (
+            <div className="bg-white/90 dark:bg-zinc-800/90 backdrop-blur-md p-3 rounded-xl shadow-xl border border-gray-100 dark:border-zinc-700 min-w-[120px]">
+                {label && <p className="text-xs text-ios-subtext mb-1.5">{label}</p>}
+                {payload.map((entry: any, index: number) => (
+                    <div key={index} className="flex items-center justify-between gap-3 text-sm mb-0.5 last:mb-0">
+                        <div className="flex items-center gap-1.5">
+                            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: entry.color || entry.payload.fill }}></div>
+                            <span className="text-ios-text opacity-90">{entry.name}</span>
+                        </div>
+                        <span className="font-semibold tabular-nums text-ios-text">{formatCurrency(entry.value)}</span>
+                    </div>
+                ))}
+            </div>
+        );
+    }
+    return null;
+};
+
 export const StatsView: React.FC = () => {
     const { state, dispatch } = useApp();
     const { transactions, ledgers, categories, settings, currentLedgerId, timeRange, currentDate: currentDateTs } = state;
@@ -385,14 +405,14 @@ export const StatsView: React.FC = () => {
                                                 <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} stroke="none" />
                                             ))}
                                         </Pie>
-                                        <Tooltip formatter={(value: number) => formatCurrency(value)} contentStyle={{ backgroundColor: 'rgba(0,0,0,0.8)', borderRadius: '12px', border: 'none', color: '#fff' }} />
+                                        <Tooltip content={<CustomTooltip />} />
                                     </PieChart>
                                 ) : chartType === 'bar' ? (
                                     <BarChart data={chartData} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
                                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border-color)" />
                                         <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
                                         <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
-                                        <Tooltip cursor={{ fill: 'var(--bg-primary)' }} contentStyle={{ backgroundColor: 'rgba(0,0,0,0.8)', borderRadius: '12px', border: 'none', color: '#fff' }} />
+                                        <Tooltip cursor={{ fill: 'rgba(0,0,0,0.05)' }} content={<CustomTooltip />} />
                                         <Bar dataKey="income" name="收入" fill="#34C759" radius={[4, 4, 0, 0]} maxBarSize={40} />
                                         <Bar dataKey="expense" name="支出" fill="#FF3B30" radius={[4, 4, 0, 0]} maxBarSize={40} />
                                     </BarChart>
@@ -401,7 +421,7 @@ export const StatsView: React.FC = () => {
                                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border-color)" />
                                         <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
                                         <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
-                                        <Tooltip contentStyle={{ backgroundColor: 'rgba(0,0,0,0.8)', borderRadius: '12px', border: 'none', color: '#fff' }} />
+                                        <Tooltip content={<CustomTooltip />} />
                                         <Line type="monotone" dataKey="income" name="收入" stroke="#34C759" strokeWidth={2} dot={false} />
                                         <Line type="monotone" dataKey="expense" name="支出" stroke="#FF3B30" strokeWidth={2} dot={false} />
                                     </LineChart>
