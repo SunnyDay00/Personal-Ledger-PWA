@@ -571,7 +571,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
             if (settings) {
                 const dataObj = typeof settings.data === 'string' ? (() => { try { return JSON.parse(settings.data); } catch { return {}; } })() : (settings.data || {});
-                await db.settings.put({ key: 'main', value: { ...DEFAULT_SETTINGS, ...stateRef.current.settings, ...dataObj, lastSyncVersion: settings.updated_at || Date.now() } });
+                // Preserve local isFirstRun if it's false (user has completed onboarding)
+                // Cloud settings should NOT overwrite this critical local state
+                const localIsFirstRun = stateRef.current.settings.isFirstRun;
+                await db.settings.put({
+                    key: 'main',
+                    value: {
+                        ...DEFAULT_SETTINGS,
+                        ...stateRef.current.settings,
+                        ...dataObj,
+                        // CRITICAL: Preserve local isFirstRun value if user completed onboarding
+                        isFirstRun: localIsFirstRun === false ? false : (dataObj.isFirstRun ?? DEFAULT_SETTINGS.isFirstRun),
+                        lastSyncVersion: settings.updated_at || Date.now()
+                    }
+                });
             }
         });
 
@@ -972,43 +985,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setSyncDirty(true);
     };
 
-    // Reset app: clear local DB, wipe sync/webdav config, go back to first-run
+    // Reset app: completely delete the IndexedDB database and reload
     const resetApp = async () => {
         if (!window.confirm('确认要退出并清空本地数据吗？这将删除本地账本/分类/流水、清除云同步和 WebDAV 配置，恢复为首次启动状态。')) return;
-        if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
-        // 清空本地表
-        await Promise.all([
-            db.ledgers.clear(),
-            db.categories.clear(),
-            db.transactions.clear(),
-            db.settings.clear(),
-            db.operationLogs.clear(),
-            db.backupLogs.clear(),
-        ]);
-        // 重新播种默认数据
-        const ledgerSeed = INITIAL_LEDGERS.map(l => ({ ...l, updatedAt: Date.now(), isDeleted: false }));
-        const categorySeed = DEFAULT_CATEGORIES.map((c, idx) => ({ ...c, order: c.order ?? idx, updatedAt: Date.now(), isDeleted: false }));
-        await db.ledgers.bulkPut(ledgerSeed);
-        await db.categories.bulkPut(categorySeed);
-        await db.settings.put({ key: 'main', value: { ...DEFAULT_SETTINGS, isFirstRun: true, syncEndpoint: '', syncToken: '', syncUserId: 'default', webdavUrl: '', webdavUser: '', webdavPass: '', enableCloudSync: false, lastSyncVersion: 0 } });
 
-        // 重置内存状态
-        dispatch({
-            type: 'RESTORE_DATA',
-            payload: {
-                ledgers: ledgerSeed,
-                categories: categorySeed,
-                transactions: [],
-                settings: { ...DEFAULT_SETTINGS, isFirstRun: true },
-                currentLedgerId: ledgerSeed[0]?.id || INITIAL_LEDGERS[0].id,
-                operationLogs: [],
-                backupLogs: [],
-                syncStatus: 'idle'
+        try {
+            // Stop any ongoing sync
+            if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+
+            // Clear localStorage
+            if (typeof window !== 'undefined') {
+                localStorage.removeItem('lastLedgerId');
+                // Clear any other localStorage items if needed
             }
-        });
-        setSyncDirty(false);
-        setUndoStack(null);
-        alert('已退出并清空本地数据，回到初次使用状态。');
+
+            // CRITICAL: Delete the entire database (not just clear tables)
+            // This ensures complete cleanup including schema/version info
+            await db.delete();
+
+            // Reload the page to reinitialize with a fresh database
+            window.location.reload();
+        } catch (e: any) {
+            console.error('Reset failed:', e);
+            alert('重置失败: ' + (e?.message || '未知错误'));
+        }
     };
 
     if (!isDBLoaded) return null; // Or loading spinner

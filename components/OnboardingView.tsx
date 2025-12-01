@@ -54,9 +54,51 @@ export const OnboardingView: React.FC = () => {
     }
     setIsRestoring(true);
     try {
-      dispatch({ type: 'UPDATE_SETTINGS', payload: { syncEndpoint: d1Form.endpoint.trim(), syncToken: d1Form.token.trim(), syncUserId: d1Form.userId.trim() || 'default' } });
+      // Import db once at the beginning
+      const { db } = await import('../services/db');
+
+      // First save sync config to DB to ensure settings are persisted immediately
+      const newSettings = {
+        syncEndpoint: d1Form.endpoint.trim(),
+        syncToken: d1Form.token.trim(),
+        syncUserId: d1Form.userId.trim() || 'default'
+      };
+
+      const currentSettings = await db.settings.get('main');
+      await db.settings.put({
+        key: 'main',
+        value: {
+          ...(currentSettings?.value || {}),
+          ...newSettings
+        } as any
+      });
+
+      // Then update React state (this will update stateRef for restoreFromD1)
+      dispatch({ type: 'UPDATE_SETTINGS', payload: newSettings });
+
+      // Small delay to ensure state propagation
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Now restore from D1
       await restoreFromD1();
+
+      // CRITICAL: Force set isFirstRun to false AFTER restore
+      // Because mergeFromCloud might overwrite it with cloud settings
+      const finalSettings = await db.settings.get('main');
+      await db.settings.put({
+        key: 'main',
+        value: {
+          ...(finalSettings?.value || {}),
+          isFirstRun: false
+        } as any
+      });
+
+      // Update React state
       dispatch({ type: 'COMPLETE_ONBOARDING' });
+
+      // Small delay to ensure all state persists before showing alert
+      await new Promise(resolve => setTimeout(resolve, 100));
+
       alert('D1+KV 数据已恢复');
     } catch (e: any) {
       alert(e?.message || '恢复失败');
