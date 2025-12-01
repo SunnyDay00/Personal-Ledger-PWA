@@ -139,6 +139,8 @@ export interface AppState {
   categoryGroups: CategoryGroup[];
   settings: AppSettings;
   currentLedgerId: string;
+  currentDate: number;
+  timeRange: 'week' | 'month' | 'year';
   operationLogs: OperationLog[];
   backupLogs: BackupLog[];
   updateLogs: UpdateLog[]; // Static or dynamic
@@ -148,6 +150,8 @@ export interface AppState {
 
 export type AppAction =
   | { type: 'SET_LEDGER'; payload: string }
+  | { type: 'SET_CURRENT_DATE'; payload: number }
+  | { type: 'SET_TIME_RANGE'; payload: 'week' | 'month' | 'year' }
   | { type: 'ADD_TRANSACTION'; payload: Transaction }
   | { type: 'UPDATE_TRANSACTION'; payload: Transaction }
   | { type: 'DELETE_TRANSACTION'; payload: string }
