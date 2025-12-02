@@ -1,9 +1,8 @@
 // 允许的前端域名（本地调试可加 http://localhost:3000）
 const ALLOW_ORIGINS = [
-  'https://money.hellogggboy.com.kg',
-  'http://localhost:3000',
+  '*',
 ];
-const DEFAULT_ALLOW_ORIGIN = 'https://money.hellogggboy.com.kg'; // 不在白名单时用这个，测试可暂设为 '*'
+const DEFAULT_ALLOW_ORIGIN = '*'; // 不在白名单时用这个，测试可暂设为 '*'
 
 // ---- CORS 工具 ----
 function makeCorsHeaders(origin) {
@@ -11,7 +10,7 @@ function makeCorsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': allowed || '*',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-CF-Account-ID, X-CF-API-Token, X-CF-KV-Namespace-ID',
     'Access-Control-Max-Age': '86400',
   };
 }
@@ -79,10 +78,18 @@ CREATE TABLE IF NOT EXISTS settings (
   data TEXT,
   updated_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS usage_stats (
+  id INTEGER PRIMARY KEY,
+  d1_rows_read INTEGER DEFAULT 0,
+  d1_rows_written INTEGER DEFAULT 0,
+  kv_read_ops INTEGER DEFAULT 0,
+  kv_write_ops INTEGER DEFAULT 0,
+  updated_at INTEGER
+);
 `;
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const origin = request.headers.get('Origin');
 
@@ -100,27 +107,81 @@ export default {
       return text('Unauthorized', 401, origin);
     }
 
-    // 确保表存在
-    const stmts = CREATE_SQL.split(';').map(s => s.trim()).filter(Boolean);
-    for (const sql of stmts) await env.DB.prepare(sql).run();
-
+    // 路由分发
     if (url.pathname === '/sync/pull' && request.method === 'GET') {
-      return pullHandler(url, env, origin);
+      // 仅在真正同步时检查表结构，减少 D1 读写
+      await ensureTables(env);
+      return pullHandler(url, env, origin, ctx);
     }
     if (url.pathname === '/sync/push' && request.method === 'POST') {
-      return pushHandler(request, url, env, origin);
+      await ensureTables(env);
+      return pushHandler(request, url, env, origin, ctx);
     }
+    
     // 版本探测：只返回当前 version，便于前端轻量检测
     if (url.pathname === '/sync/version' && request.method === 'GET') {
       const userId = url.searchParams.get('user_id') || 'default';
       const versionStr = await env.SYNC_KV.get(`version:${userId}`);
       const version = versionStr ? Number(versionStr) : Date.now();
+      
+      // 统计 KV 读取 (1次)
+      ctx.waitUntil(updateStats(env, 0, 0, 1, 0));
+      
       return json({ version }, 200, origin);
+    }
+
+    // Usage stats
+    if (url.pathname === '/usage' && request.method === 'GET') {
+      // Check for Cloudflare API headers
+      const cfAccount = request.headers.get('X-CF-Account-ID');
+      const cfToken = request.headers.get('X-CF-API-Token');
+      const cfKvId = request.headers.get('X-CF-KV-Namespace-ID');
+
+      // Get D1 storage usage (approximate) - Always fetch locally for accuracy
+      let dbSize = 0;
+      try {
+         const sizeRes = await env.DB.prepare('PRAGMA page_count;').first();
+         dbSize = (sizeRes?.page_count || 0) * 4096; // 4KB pages
+      } catch (e) {}
+
+      if (cfAccount && cfToken) {
+        return fetchCloudflareStats(cfAccount, cfToken, cfKvId, origin, dbSize);
+      }
+
+      // Local stats logic
+      // 确保 usage_stats 表存在 (读取时检查一次即可)
+      await env.DB.prepare(`
+        CREATE TABLE IF NOT EXISTS usage_stats (
+          id INTEGER PRIMARY KEY,
+          d1_rows_read INTEGER DEFAULT 0,
+          d1_rows_written INTEGER DEFAULT 0,
+          kv_read_ops INTEGER DEFAULT 0,
+          kv_write_ops INTEGER DEFAULT 0,
+          updated_at INTEGER
+        );
+      `).run();
+
+      const stats = await env.DB.prepare('SELECT * FROM usage_stats WHERE id=1').first();
+      
+      return json({ 
+        ...stats, 
+        d1_storage_bytes: dbSize,
+        kv_storage_bytes: 0,
+        note: "数据来源：本地软件统计 (UTC)"
+      }, 200, origin);
     }
 
     return text('Not found', 404, origin);
   },
 };
+
+// ---- 辅助：确保表存在 ----
+async function ensureTables(env) {
+    const stmts = CREATE_SQL.split(';').map(s => s.trim()).filter(Boolean);
+    // 简单优化：并发执行，虽然 D1 内部可能是串行，但减少 await 往返
+    // 注意：usage_stats 表也包含在 CREATE_SQL 中
+    for (const sql of stmts) await env.DB.prepare(sql).run();
+}
 
 // ---- 辅助：分批执行，避免超过 D1 50 查询限制 ----
 async function batchInsert(bindings, db) {
@@ -132,7 +193,7 @@ async function batchInsert(bindings, db) {
 }
 
 // ---- 拉取 ----
-async function pullHandler(url, env, origin) {
+async function pullHandler(url, env, origin, ctx) {
   const userId = url.searchParams.get('user_id') || 'default';
   const since = Number(url.searchParams.get('since') || 0);
 
@@ -148,13 +209,24 @@ async function pullHandler(url, env, origin) {
     env.DB.prepare(`SELECT * FROM settings WHERE user_id=?`).bind(userId).first(),
   ]);
 
+  const lRes = ledgers.results || [];
+  const cRes = categories.results || [];
+  const gRes = groups.results || [];
+  const tRes = transactions.results || [];
+
+  // 统计读取:
+  // D1 Read: sum of rows returned + 1 (settings)
+  // KV Read: 1 (version)
+  const d1Reads = lRes.length + cRes.length + gRes.length + tRes.length + (settings ? 1 : 0);
+  ctx.waitUntil(updateStats(env, d1Reads, 0, 1, 0));
+
   return json(
     {
       version,
-      ledgers: ledgers.results || [],
-      categories: categories.results || [],
-      groups: groups.results || [],
-      transactions: transactions.results || [],
+      ledgers: lRes,
+      categories: cRes,
+      groups: gRes,
+      transactions: tRes,
       settings: settings || null,
     },
     200,
@@ -163,7 +235,7 @@ async function pullHandler(url, env, origin) {
 }
 
 // ---- 推送 ----
-async function pushHandler(request, url, env, origin) {
+async function pushHandler(request, url, env, origin, ctx) {
   const userId = url.searchParams.get('user_id') || 'default';
   const payload = await request.json();
   if (!payload || typeof payload !== 'object') return text('Bad payload', 400, origin);
@@ -329,5 +401,178 @@ async function pushHandler(request, url, env, origin) {
   const newVersion = Date.now();
   await env.SYNC_KV.put(`version:${userId}`, String(newVersion));
 
+  // 统计写入: 
+  // D1 Write: ledgers + categories + groups + transactions + settings(1)
+  // KV Write: 1 (version)
+  const d1Writes = (payload.ledgers?.length || 0) + 
+                   (payload.categories?.length || 0) + 
+                   (payload.groups?.length || 0) + 
+                   (payload.transactions?.length || 0) + 
+                   (payload.settings ? 1 : 0);
+  
+  // 异步更新统计，不阻塞主流程
+  ctx.waitUntil(updateStats(env, 0, d1Writes, 0, 1));
+
   return json({ ok: true, version: newVersion }, 200, origin);
+}
+
+// ---- 统计工具 ----
+async function updateStats(env, d1Read, d1Write, kvRead, kvWrite) {
+  try {
+    const now = Date.now();
+    // 获取当前 UTC 日期字符串 (YYYY-MM-DD)
+    const today = new Date(now).toISOString().split('T')[0];
+
+    // 先读取现有统计
+    const current = await env.DB.prepare('SELECT * FROM usage_stats WHERE id=1').first();
+    
+    let shouldReset = false;
+    if (current && current.updated_at) {
+      const lastDate = new Date(current.updated_at).toISOString().split('T')[0];
+      if (lastDate !== today) {
+        shouldReset = true;
+      }
+    }
+
+    if (shouldReset) {
+      // 跨天重置：覆盖旧数据
+      await env.DB.prepare(`
+        INSERT INTO usage_stats (id, d1_rows_read, d1_rows_written, kv_read_ops, kv_write_ops, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          d1_rows_read = excluded.d1_rows_read,
+          d1_rows_written = excluded.d1_rows_written,
+          kv_read_ops = excluded.kv_read_ops,
+          kv_write_ops = excluded.kv_write_ops,
+          updated_at = excluded.updated_at
+      `).bind(d1Read, d1Write, kvRead, kvWrite, now).run();
+    } else {
+      // 当天累加
+      await env.DB.prepare(`
+        INSERT INTO usage_stats (id, d1_rows_read, d1_rows_written, kv_read_ops, kv_write_ops, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          d1_rows_read = d1_rows_read + excluded.d1_rows_read,
+          d1_rows_written = d1_rows_written + excluded.d1_rows_written,
+          kv_read_ops = kv_read_ops + excluded.kv_read_ops,
+          kv_write_ops = kv_write_ops + excluded.kv_write_ops,
+          updated_at = excluded.updated_at
+      `).bind(d1Read, d1Write, kvRead, kvWrite, now).run();
+    }
+  } catch (e) {
+    console.error('Failed to update stats', e);
+  }
+}
+
+// ---- Cloudflare API Proxy ----
+async function fetchCloudflareStats(accountId, token, kvId, origin, localD1Size) {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const query = `
+      query {
+        viewer {
+          accounts(filter: {accountTag: "${accountId}"}) {
+            d1AnalyticsAdaptiveGroups(limit: 1, filter: {date_geq: "${today}"}) {
+              sum {
+                rowsRead
+                rowsWritten
+              }
+            }
+            d1QueriesAdaptiveGroups(limit: 1, filter: {date_geq: "${today}"}) {
+              count
+            }
+            d1StorageAdaptiveGroups(limit: 1, filter: {date_geq: "${today}"}) {
+              max {
+                databaseSizeBytes
+              }
+            }
+            ${kvId ? `
+            kvOperationsAdaptiveGroups(limit: 1000, filter: {namespaceId: "${kvId}", date_geq: "${today}"}) {
+              sum {
+                requests
+              }
+              dimensions {
+                actionType
+              }
+            }
+            kvStorageAdaptiveGroups(limit: 1, filter: {namespaceId: "${kvId}", date_geq: "${today}"}) {
+              max {
+                byteCount
+              }
+            }
+            ` : ''}
+          }
+        }
+      }
+    `;
+
+    const res = await fetch('https://api.cloudflare.com/client/v4/graphql', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ query }),
+    });
+
+    if (!res.ok) {
+      return json({ error: 'Failed to fetch from Cloudflare API' }, 500, origin);
+    }
+
+    const data = await res.json();
+    const accountData = data?.data?.viewer?.accounts?.[0];
+    
+    if (!accountData) {
+      return json({ error: 'No account data found' }, 404, origin);
+    }
+
+    // Parse D1
+    const d1Sum = accountData.d1AnalyticsAdaptiveGroups?.[0]?.sum || {};
+    const d1Read = d1Sum.rowsRead || 0;
+    const d1Write = d1Sum.rowsWritten || 0;
+    
+    const d1Queries = accountData.d1QueriesAdaptiveGroups?.[0]?.count || 0;
+
+    // Parse D1 Storage (Use API value if available, otherwise fallback to local)
+    let d1Storage = localD1Size;
+    if (accountData.d1StorageAdaptiveGroups?.[0]) {
+        d1Storage = accountData.d1StorageAdaptiveGroups[0].max?.databaseSizeBytes || localD1Size;
+    }
+
+    // Parse KV
+    let kvRead = 0;
+    let kvWrite = 0;
+    let kvStorage = 0;
+
+    if (accountData.kvOperationsAdaptiveGroups) {
+      for (const g of accountData.kvOperationsAdaptiveGroups) {
+        const type = (g.dimensions?.actionType || '').toLowerCase();
+        const count = g.sum?.requests || 0;
+        // KV Free Tier: Read (100k), Write/Delete/List (1k)
+        // Group 'read'/'get' as Read. Group 'write'/'put'/'delete'/'list' as Write.
+        if (['read', 'get'].includes(type)) kvRead += count;
+        else kvWrite += count;
+      }
+    }
+
+    if (accountData.kvStorageAdaptiveGroups?.[0]) {
+      kvStorage = accountData.kvStorageAdaptiveGroups[0].max?.byteCount || 0;
+    }
+
+    return json({
+      id: 0,
+      d1_rows_read: d1Read,
+      d1_rows_written: d1Write,
+      d1_queries: d1Queries,
+      kv_read_ops: kvRead,
+      kv_write_ops: kvWrite,
+      updated_at: Date.now(),
+      d1_storage_bytes: d1Storage,
+      kv_storage_bytes: kvStorage,
+      note: "数据来源：Cloudflare 官方 API"
+    }, 200, origin);
+
+  } catch (e) {
+    return json({ error: e.message }, 500, origin);
+  }
 }

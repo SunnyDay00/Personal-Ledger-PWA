@@ -211,4 +211,11 @@ export const dbAPI = {
   async getBackupLogs() {
     return await db.backupLogs.orderBy('timestamp').reverse().toArray();
   },
+  async getCFConfig() {
+    const row = await db.settings.get('cf_stats_config');
+    return row?.value as any;
+  },
+  async saveCFConfig(config: any) {
+    await db.settings.put({ key: 'cf_stats_config', value: config });
+  },
 };

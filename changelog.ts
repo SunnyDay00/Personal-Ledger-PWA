@@ -2,6 +2,21 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '5.2.0',
+      date: '2025/12/02',
+      content: [
+          '添加查看cloudflare D1、KV数据库使用情况的功能。',
+          '两种查看方式，一种是本地软件统计、一种是通过cloudflare官方API查看'
+      ]
+  },
+  {
+      version: '5.1.0',
+      date: '2025/12/02',
+      content: [
+          '添加操作音效、震动。'
+      ]
+  },
+  {
       version: '5.0.0',
       date: '2025/12/02',
       content: [

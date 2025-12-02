@@ -12,6 +12,7 @@ import { format } from 'date-fns';
 import { SyncLogModal } from './SyncLogModal';
 import { Ledger, Category } from '../types';
 import { feedback } from '../services/feedback';
+import { UsageStatsModal } from './UsageStatsModal';
 
 type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'history' | 'layout' | 'theme' | 'about';
 
@@ -77,6 +78,7 @@ export const SettingsView: React.FC = () => {
   const [exportEnd, setExportEnd] = useState(state.settings.exportEndDate || '');
 
   const [showSyncLog, setShowSyncLog] = useState(false);
+  const [showUsageStats, setShowUsageStats] = useState(false);
   const [ledgerModal, setLedgerModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; color: string }>(
     { isOpen: false, mode: 'create', name: '', color: '#007AFF' }
   );
@@ -548,6 +550,16 @@ export const SettingsView: React.FC = () => {
                 value={d1Form.versionCheckIntervalBg}
                 onChange={(e) => setD1Form({ ...d1Form, versionCheckIntervalBg: Number(e.target.value) || 0 })}
               />
+            </div>
+            <div className="flex items-end">
+              <button
+                type="button"
+                onClick={() => setShowUsageStats(true)}
+                className="w-full h-[46px] bg-gray-100 dark:bg-zinc-800 text-ios-text text-sm font-medium rounded-xl active:bg-gray-200 dark:active:bg-zinc-700 transition-colors flex items-center justify-center gap-2"
+              >
+                <Icon name="Database" className="w-4 h-4" />
+                <span>数据库用量</span>
+              </button>
             </div>
           </div>
         </div>
@@ -1512,6 +1524,13 @@ export const SettingsView: React.FC = () => {
       </div>
 
       {showSyncLog && <SyncLogModal onClose={() => setShowSyncLog(false)} />}
+      <UsageStatsModal
+        isOpen={showUsageStats}
+        onClose={() => setShowUsageStats(false)}
+        endpoint={d1Form.endpoint}
+        token={d1Form.token}
+        userId={d1Form.userId}
+      />
     </div>
   );
 };
