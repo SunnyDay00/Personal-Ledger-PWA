@@ -1,13 +1,12 @@
-
 import React, { useState, useMemo, useEffect } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
+import { feedback } from '../services/feedback';
 import { CloudSyncButton } from './CloudSyncButton'; // Import
 import { formatCurrency, getWeekRange, getMonthRange, getYearRange } from '../utils';
 import { format, isSameDay, addWeeks, addMonths, addYears, addDays } from 'date-fns';
 import { Transaction, Category } from '../types';
 import { AddView } from './AddView';
-import { SyncLogModal } from './SyncLogModal';
 import { clsx } from 'clsx';
 
 interface HomeViewProps {
@@ -111,6 +110,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
 
     const handleBatchDelete = () => {
         if (confirm(`确定要删除选中的 ${selectedIds.size} 条记录吗？`)) {
+            feedback.play('delete');
+            feedback.vibrate('light');
             batchDeleteTransactions(Array.from(selectedIds));
             setIsSelectionMode(false);
             setSelectedIds(new Set());
@@ -120,6 +121,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
     const handleBatchUpdate = (updates: Partial<Transaction>) => {
         if (Object.keys(updates).length === 0) return;
         if (confirm(`确定要更新选中的 ${selectedIds.size} 条记录吗？`)) {
+            feedback.play('success');
+            feedback.vibrate('success');
             batchUpdateTransactions(Array.from(selectedIds), updates);
             setIsSelectionMode(false);
             setSelectedIds(new Set());
@@ -133,14 +136,23 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
             {/* Header - Fixed & Glassmorphism */}
             <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-4 pt-[env(safe-area-inset-top)] h-[calc(env(safe-area-inset-top)+3.5rem)] bg-ios-bg/80 backdrop-blur-xl border-b border-black/5 dark:border-white/5 transition-colors">
                 <div className="relative">
-                    <button onClick={() => setShowLedgerMenu(!showLedgerMenu)} className="flex items-center space-x-2 active:opacity-60 transition-opacity bg-white/50 dark:bg-zinc-800/50 backdrop-blur-md px-3 py-1.5 rounded-full shadow-sm">
+                    <button onClick={() => {
+                        feedback.play('click');
+                        feedback.vibrate('light');
+                        setShowLedgerMenu(!showLedgerMenu);
+                    }} className="flex items-center space-x-2 active:opacity-60 transition-opacity bg-white/50 dark:bg-zinc-800/50 backdrop-blur-md px-3 py-1.5 rounded-full shadow-sm">
                         <h1 className="text-sm font-bold text-ios-text max-w-[120px] truncate">{currentLedger.name}</h1>
                         <Icon name="ChevronDown" className="w-3 h-3 text-ios-subtext" />
                     </button>
                     {showLedgerMenu && (
                         <div className="absolute top-full mt-2 left-0 w-48 bg-white dark:bg-zinc-800 rounded-xl shadow-xl border border-gray-100 dark:border-zinc-700 overflow-hidden animate-fade-in z-50">
                             {ledgers.map(l => (
-                                <button key={l.id} onClick={() => { dispatch({ type: 'SET_LEDGER', payload: l.id }); setShowLedgerMenu(false); }} className="w-full text-left px-4 py-3 text-sm hover:bg-gray-50 dark:hover:bg-zinc-700 flex justify-between items-center">
+                                <button key={l.id} onClick={() => {
+                                    feedback.play('success');
+                                    feedback.vibrate('success');
+                                    dispatch({ type: 'SET_LEDGER', payload: l.id });
+                                    setShowLedgerMenu(false);
+                                }} className="w-full text-left px-4 py-3 text-sm hover:bg-gray-50 dark:hover:bg-zinc-700 flex justify-between items-center">
                                     <span>{l.name}</span>
                                     {l.id === currentLedgerId && <Icon name="Check" className="w-3 h-3 text-ios-primary" />}
                                 </button>
@@ -258,7 +270,12 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
                                                         {t.type === 'expense' ? '-' : '+'}{formatCurrency(t.amount).replace('¥', '')}
                                                     </div>
                                                     {!isSelectionMode && (
-                                                        <button onClick={(e) => { e.stopPropagation(); deleteTransaction(t.id); }} className="p-2 -mr-2 text-gray-300 hover:text-red-500"><Icon name="X" className="w-4 h-4" /></button>
+                                                        <button onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            feedback.play('delete');
+                                                            feedback.vibrate('light');
+                                                            deleteTransaction(t.id);
+                                                        }} className="p-2 -mr-2 text-gray-300 hover:text-red-500"><Icon name="X" className="w-4 h-4" /></button>
                                                     )}
                                                 </div>
                                             </div>

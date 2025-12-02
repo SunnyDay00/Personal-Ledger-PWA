@@ -131,7 +131,7 @@ export const AVAILABLE_ICONS = [
   // Nature & Pets
   'Sun', 'Moon', 'Cloud', 'Zap', 'Droplet', 'Flame', 'TreeDeciduous', 'Flower', 'Dog', 'Cat', 'Fish', 'Bird', 'PawPrint',
   // Sports & Hobbies
-  'Dumbbell', 'Bike', 'Trophy', 'Medal', 'Music', 'Video', 'Palette', 'Brush', 'Tent',
+  'Dumbbell', 'Trophy', 'Medal', 'Music', 'Video', 'Palette', 'Brush', 'Tent',
   // Misc
   'MoreHorizontal', 'Circle', 'Star', 'Crown', 'Ghost', 'Smile', 'Settings', 'Search', 'Bell', 'Calendar', 'Clock'
 ];

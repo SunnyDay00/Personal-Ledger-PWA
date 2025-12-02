@@ -10,6 +10,7 @@ import { Icon } from './ui/Icon';
 import { Toast } from './ui/Toast';
 import { useApp } from '../contexts/AppContext';
 import { clsx } from 'clsx';
+import { feedback } from '../services/feedback';
 
 export const Layout: React.FC = () => {
     const { state, canUndo, undo } = useApp();
@@ -25,6 +26,26 @@ export const Layout: React.FC = () => {
             setShowToast(true);
         }
     }, [canUndo]);
+
+    // Initialize AudioContext on first user interaction
+    // Must be synchronous to satisfy browser autoplay policy
+    useEffect(() => {
+        const initAudio = () => {
+            feedback.initAudio();
+            // Remove listeners immediately
+            window.removeEventListener('click', initAudio);
+            window.removeEventListener('keydown', initAudio);
+        };
+
+        // Use click and keydown as they are valid user gestures and don't block scrolling like touchstart
+        window.addEventListener('click', initAudio, { once: true, passive: true });
+        window.addEventListener('keydown', initAudio, { once: true, passive: true });
+
+        return () => {
+            window.removeEventListener('click', initAudio);
+            window.removeEventListener('keydown', initAudio);
+        };
+    }, []);
 
     if (state.settings.isFirstRun) {
         return <OnboardingView />;
@@ -76,7 +97,11 @@ export const Layout: React.FC = () => {
                     {/* Add Button (Floating Center) */}
                     <div className="relative -top-6">
                         <button
-                            onClick={() => setShowAdd(true)}
+                            onClick={() => {
+                                feedback.play('success');
+                                feedback.vibrate('light');
+                                setShowAdd(true);
+                            }}
                             className="w-16 h-16 rounded-full bg-ios-primary text-white shadow-lg shadow-blue-500/30 flex items-center justify-center transform transition-transform active:scale-95 border-4 border-ios-bg"
                         >
                             <Icon name="Plus" className="w-8 h-8" />
@@ -99,7 +124,13 @@ export const Layout: React.FC = () => {
 };
 
 const TabButton: React.FC<{ active: boolean; onClick: () => void; icon: string; label: string }> = ({ active, onClick, icon, label }) => (
-    <button onClick={onClick} className="flex flex-col items-center justify-center w-20 gap-1 group py-1">
+    <button onClick={() => {
+        if (!active) {
+            feedback.play('click');
+            feedback.vibrate('light');
+        }
+        onClick();
+    }} className="flex flex-col items-center justify-center w-20 gap-1 group py-1">
         <Icon
             name={icon}
             className={clsx(

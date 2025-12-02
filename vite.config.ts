@@ -70,9 +70,17 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
-    sourcemap: false
+    sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ['react', 'react-dom', 'dexie', 'date-fns', 'clsx', 'lucide-react'],
+        }
+      }
+    }
   },
   server: {
-    port: 3000
+    port: 3000,
+    host: true
   }
 });

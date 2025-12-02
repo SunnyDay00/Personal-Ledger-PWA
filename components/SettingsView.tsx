@@ -11,6 +11,7 @@ import { db } from '../services/db';
 import { format } from 'date-fns';
 import { SyncLogModal } from './SyncLogModal';
 import { Ledger, Category } from '../types';
+import { feedback } from '../services/feedback';
 
 type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'history' | 'layout' | 'theme' | 'about';
 
@@ -229,8 +230,8 @@ export const SettingsView: React.FC = () => {
         };
         dispatch({ type: 'UPDATE_LEDGER', payload: updated });
         await db.ledgers.put(updated);
-        // logOperation is not imported or available in this scope, removing it to avoid error
-        // If needed, we can add it back if we import it or use a different logging mechanism
+        feedback.play('success');
+        feedback.vibrate('success');
       }
     } else {
       // Add
@@ -255,6 +256,8 @@ export const SettingsView: React.FC = () => {
     }
     if (!window.confirm(`删除账本 “${l.name}”？本地数据将被清空。`)) return;
     dispatch({ type: 'DELETE_LEDGER', payload: l.id });
+    feedback.play('delete');
+    feedback.vibrate('medium');
   };
 
   const openExportDialog = (l?: Ledger) => {
@@ -293,6 +296,8 @@ export const SettingsView: React.FC = () => {
     setIsAddingCat(false);
     setNewCatName('');
     setNewCatIcon('Circle');
+    feedback.play('success');
+    feedback.vibrate('success');
   };
 
   const openEditCategory = (c: Category) => {
@@ -312,6 +317,8 @@ export const SettingsView: React.FC = () => {
   const handleDeleteCategory = (id: string) => {
     if (!window.confirm('确定删除该分类吗？已有账目会保留分类引用。')) return;
     dispatch({ type: 'DELETE_CATEGORY', payload: id });
+    feedback.play('delete');
+    feedback.vibrate('medium');
   };
 
   const openCreateGroup = () => setGroupModal({ isOpen: true, mode: 'create', name: '', categoryIds: [] });
@@ -344,10 +351,14 @@ export const SettingsView: React.FC = () => {
       }
     }
     setGroupModal({ isOpen: false, mode: 'create', name: '', categoryIds: [] });
+    feedback.play('success');
+    feedback.vibrate('success');
   };
   const handleDeleteGroup = (id: string) => {
     if (!window.confirm('确定删除该分类组吗？')) return;
     dispatch({ type: 'DELETE_CATEGORY_GROUP', payload: id });
+    feedback.play('delete');
+    feedback.vibrate('medium');
   };
   const moveGroup = (index: number, direction: 'up' | 'down') => {
     const list = [...sortedGroups];
@@ -403,6 +414,45 @@ export const SettingsView: React.FC = () => {
       <SettingsGroup title="个性化">
         <SettingsItem icon="Palette" label="主题设置" value={state.settings.themeMode === 'auto' ? '跟随系统' : state.settings.themeMode === 'dark' ? '深色' : '浅色'} onClick={() => setPage('theme')} />
         <SettingsItem icon="Layout" label="界面布局" value="键盘/网格" onClick={() => setPage('layout')} />
+        <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-zinc-800/50">
+          <div className="flex items-center gap-3">
+            <div className="w-7 h-7 rounded-lg bg-ios-primary/10 flex items-center justify-center text-ios-primary">
+              <Icon name="Volume2" className="w-4 h-4" />
+            </div>
+            <span className="font-medium text-sm text-ios-text">操作音效</span>
+          </div>
+          <input
+            type="checkbox"
+            checked={(state.settings as any).enableSound ?? true}
+            onChange={(e) => {
+              const enabled = e.target.checked;
+              dispatch({ type: 'UPDATE_SETTINGS', payload: { enableSound: enabled } as any });
+              // Manually update service to avoid race condition for the test sound
+              feedback.updateSettings(enabled, (state.settings as any).enableHaptics ?? true);
+              if (enabled) feedback.play('click');
+            }}
+            className="toggle-checkbox"
+          />
+        </div>
+        <div className="flex items-center justify-between p-4">
+          <div className="flex items-center gap-3">
+            <div className="w-7 h-7 rounded-lg bg-ios-primary/10 flex items-center justify-center text-ios-primary">
+              <Icon name="Smartphone" className="w-4 h-4" />
+            </div>
+            <span className="font-medium text-sm text-ios-text">震动反馈</span>
+          </div>
+          <input
+            type="checkbox"
+            checked={(state.settings as any).enableHaptics ?? true}
+            onChange={(e) => {
+              const enabled = e.target.checked;
+              dispatch({ type: 'UPDATE_SETTINGS', payload: { enableHaptics: enabled } as any });
+              feedback.updateSettings((state.settings as any).enableSound ?? true, enabled);
+              if (enabled) feedback.vibrate('medium');
+            }}
+            className="toggle-checkbox"
+          />
+        </div>
       </SettingsGroup>
 
       <SettingsGroup title="其他">
@@ -1129,6 +1179,8 @@ export const SettingsView: React.FC = () => {
                 onChange={(e) => setNewCatName(e.target.value)}
                 className="flex-1 bg-transparent text-lg outline-none placeholder:text-gray-400"
                 autoFocus
+                autoComplete="off"
+                name="categoryName"
               />
             </div>
 
@@ -1181,6 +1233,8 @@ export const SettingsView: React.FC = () => {
                 onChange={(e) => setNewCatName(e.target.value)}
                 className="flex-1 bg-transparent text-lg outline-none placeholder:text-gray-400"
                 autoFocus
+                autoComplete="off"
+                name="editCategoryName"
               />
             </div>
 
@@ -1222,6 +1276,8 @@ export const SettingsView: React.FC = () => {
                   value={groupModal.name}
                   onChange={(e) => setGroupModal(prev => ({ ...prev, name: e.target.value }))}
                   placeholder="如：吃喝、交通"
+                  autoComplete="off"
+                  name="groupName"
                 />
               </div>
               <div>

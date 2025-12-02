@@ -6,6 +6,7 @@ import { generateId, extractCategoriesFromCsv, formatCurrency, parseCsvToTransac
 import { db, initAndMigrateDB, dbAPI, resetDB, ensureStoresReady } from '../services/db';
 import { pushToCloud, pullFromCloud } from '../services/d1Sync';
 import { SyncService } from '../services/sync';
+import { feedback } from '../services/feedback';
 
 const initialState: AppState = {
     ledgers: INITIAL_LEDGERS,
@@ -183,6 +184,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const autoBackupRef = useRef(false);
     // 默认认为不存在，检测成功后再置为 true，避免首次恢复访问不存在的 store
     const groupStoreAvailableRef = useRef(false);
+
+    // Sync settings to FeedbackService
+    useEffect(() => {
+        const sound = (state.settings as any).enableSound ?? true;
+        const haptics = (state.settings as any).enableHaptics ?? true;
+        feedback.updateSettings(sound, haptics);
+    }, [(state.settings as any).enableSound, (state.settings as any).enableHaptics]);
 
     // Initialize DB and Load State
     useEffect(() => {
@@ -966,6 +974,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         dispatch({ type: 'ADD_LEDGER', payload: ledger });
         dispatch({ type: 'SET_LEDGER', payload: ledger.id });
         await db.ledgers.put(ledger);
+        feedback.play('success');
+        feedback.vibrate('success');
         logOperation('add', ledger.id, `Created ledger: ${ledger.name}`);
 
         // Auto-seed default categories for the new ledger

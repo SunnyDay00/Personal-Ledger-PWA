@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
+import { feedback } from '../services/feedback';
 import { TransactionType, Transaction } from '../types';
 import { generateId } from '../utils';
 import { clsx } from 'clsx';
@@ -99,10 +100,16 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
 
     const handleKeyPress = (key: string) => {
         if (key === 'backspace') {
+            feedback.play('delete');
+            feedback.vibrate('light');
             setAmountStr(prev => prev.length > 1 ? prev.slice(0, -1) : '0');
         } else if (key === '.') {
+            feedback.play('click');
+            feedback.vibrate('light');
             if (!amountStr.includes('.')) setAmountStr(prev => prev + '.');
         } else {
+            feedback.play('click');
+            feedback.vibrate('light');
             const parts = amountStr.split('.');
             if (parts[1] && parts[1].length >= 2) return; // Limit to 2 decimals
             setAmountStr(prev => prev === '0' ? key : prev + key);
@@ -138,6 +145,8 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
 
         setAmountStr('0');
         setNote('');
+        feedback.play('success');
+        feedback.vibrate('success');
         onClose();
     };
 
