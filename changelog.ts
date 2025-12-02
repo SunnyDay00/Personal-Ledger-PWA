@@ -2,6 +2,15 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '5.0.0',
+      date: '2025/12/02',
+      content: [
+          '重大更新！',
+          '项目修改为现代 PWA 标准。',
+          '首次使用需要联网下载资源，后续无网也能正常使用，同步数据需要联网。'
+      ]
+  },
+  {
       version: '4.0.0',
       date: '2025/12/01',
       content: [

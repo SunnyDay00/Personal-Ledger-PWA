@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Immediate Theme application to prevent white flash */
+body {
+  background-color: #f2f2f7;
+}
+@media (prefers-color-scheme: dark) {
+  body {
+    background-color: #000000;
+  }
+}
+
+/* CSS Variables for Dynamic Theming */
+:root {
+  --bg-primary: #f2f2f7;
+  --bg-card: rgba(255, 255, 255, 0.75);
+  --text-primary: #000000;
+  --text-secondary: #8e8e93;
+  --border-color: rgba(60, 60, 67, 0.1);
+  --color-primary: #007aff; /* Default Blue */
+  --safe-top: env(safe-area-inset-top);
+  --safe-bottom: env(safe-area-inset-bottom);
+}
+
+.dark {
+  --bg-primary: #000000;
+  --bg-card: rgba(28, 28, 30, 0.75);
+  --text-primary: #ffffff;
+  --text-secondary: #98989d;
+  --border-color: rgba(84, 84, 88, 0.35);
+}
+
+/* Fixed Body Layout for iOS PWA to prevent header/footer scroll */
+body,
+html {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  position: fixed; /* Locks the viewport */
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "San Francisco",
+    "Helvetica Neue", sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Scrollbar hiding for clean UI */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Enforce System Font for numbers to avoid slashed zero found in some mono fonts */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  font-family: -apple-system, BlinkMacSystemFont, "San Francisco",
+    "Helvetica Neue", sans-serif;
+}
