@@ -33,11 +33,13 @@ export const UsageStatsModal: React.FC<UsageStatsModalProps> = ({ isOpen, onClos
     const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
-        // Load config from IndexedDB (persistent but not synced)
-        dbAPI.getCFConfig().then(config => {
-            if (config) setCfConfig(config);
-        });
-    }, []);
+        if (isOpen) {
+            // Load config from IndexedDB (persistent but not synced)
+            dbAPI.getCFConfig().then(config => {
+                if (config) setCfConfig(config);
+            });
+        }
+    }, [isOpen]);
 
     useEffect(() => {
         if (isOpen && endpoint && token) {

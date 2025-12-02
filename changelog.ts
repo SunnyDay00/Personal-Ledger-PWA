@@ -2,6 +2,14 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '5.3.0',
+      date: '2025/12/02',
+      content: [
+          '修复IOS端音效问题。',
+          '修复界面问题。'
+      ]
+  },
+  {
       version: '5.2.0',
       date: '2025/12/02',
       content: [

@@ -189,7 +189,11 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
                     {categories.map(cat => (
                         <button
                             key={cat.id}
-                            onClick={() => setSelectedCategoryId(cat.id)}
+                            onClick={() => {
+                                setSelectedCategoryId(cat.id);
+                                feedback.play('click');
+                                feedback.vibrate('light');
+                            }}
                             className="flex flex-col items-center gap-2 group"
                         >
                             <div className={clsx(

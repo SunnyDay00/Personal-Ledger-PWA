@@ -31,14 +31,22 @@ export class FeedbackService {
     }
   }
 
+  public warmUp() {
+    if (!this.isSoundEnabled) return;
+    this.initAudio();
+    if (this.audioContext && this.audioContext.state === 'suspended') {
+      this.audioContext.resume().catch(() => {});
+    }
+  }
+
   public play(type: 'click' | 'delete' | 'success' | 'error') {
     if (!this.isSoundEnabled) {
-        console.log('[Feedback] Play skipped: Sound disabled');
+        // console.log('[Feedback] Play skipped: Sound disabled');
         return;
     }
     this.initAudio();
     if (!this.audioContext) {
-        console.log('[Feedback] Play skipped: No AudioContext');
+        // console.log('[Feedback] Play skipped: No AudioContext');
         return;
     }
     

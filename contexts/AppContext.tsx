@@ -302,9 +302,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const handleOffline = () => dispatch({ type: 'SET_ONLINE_STATUS', payload: false });
         window.addEventListener('online', handleOnline);
         window.addEventListener('offline', handleOffline);
+
+        // Audio Warm-up for PWA
+        const warmUpAudio = () => {
+            feedback.warmUp();
+            window.removeEventListener('touchstart', warmUpAudio);
+            window.removeEventListener('click', warmUpAudio);
+        };
+        window.addEventListener('touchstart', warmUpAudio, { passive: true });
+        window.addEventListener('click', warmUpAudio, { passive: true });
+
         return () => {
             window.removeEventListener('online', handleOnline);
             window.removeEventListener('offline', handleOffline);
+            window.removeEventListener('touchstart', warmUpAudio);
+            window.removeEventListener('click', warmUpAudio);
         };
     }, []);
 

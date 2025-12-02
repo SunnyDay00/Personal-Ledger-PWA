@@ -1,4 +1,4 @@
-﻿import React, { useState } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { readJsonFile, generateId } from '../utils';
@@ -13,6 +13,46 @@ export const OnboardingView: React.FC = () => {
 
   const [d1Form, setD1Form] = useState({ endpoint: '', token: '', userId: 'default' });
   const [isRestoring, setIsRestoring] = useState(false);
+
+  // Viewport management for iOS keyboard
+  const [visualViewport, setVisualViewport] = useState({
+    height: typeof window !== 'undefined' ? window.innerHeight : 800,
+    offsetTop: 0
+  });
+
+  useEffect(() => {
+    const handleResize = () => {
+      const vv = (window as any).visualViewport;
+      if (vv) {
+        setVisualViewport({
+          height: vv.height,
+          offsetTop: vv.offsetTop
+        });
+      } else {
+        setVisualViewport({
+          height: window.innerHeight,
+          offsetTop: 0
+        });
+      }
+    };
+
+    if ((window as any).visualViewport) {
+      (window as any).visualViewport.addEventListener('resize', handleResize);
+      (window as any).visualViewport.addEventListener('scroll', handleResize);
+      handleResize(); // Init
+    } else {
+      window.addEventListener('resize', handleResize);
+    }
+
+    return () => {
+      if ((window as any).visualViewport) {
+        (window as any).visualViewport.removeEventListener('resize', handleResize);
+        (window as any).visualViewport.removeEventListener('scroll', handleResize);
+      } else {
+        window.removeEventListener('resize', handleResize);
+      }
+    };
+  }, []);
 
   const handleCreate = async () => {
     if (!ledgerName.trim()) {
@@ -108,30 +148,32 @@ export const OnboardingView: React.FC = () => {
   };
 
   const renderIntro = () => (
-    <div className="flex flex-col items-center justify-center h-full w-full max-w-sm mx-auto p-6 animate-fade-in">
+    <div className="flex flex-col items-center justify-start pt-20 min-h-full w-full max-w-sm mx-auto p-6 animate-fade-in">
       <div className="w-24 h-24 bg-ios-primary rounded-[2rem] flex items-center justify-center mb-8 shadow-2xl shadow-blue-500/30">
         <Icon name="Wallet" className="w-12 h-12 text-white" />
       </div>
       <h1 className="text-3xl font-bold mb-2 text-ios-text">个人记账本</h1>
       <p className="text-ios-subtext mb-12 text-center">轻量、安全、可云同步的个人记账。</p>
 
-      <button
-        onClick={() => setMode('create')}
-        className="w-full py-4 bg-ios-primary text-white rounded-2xl font-bold text-lg shadow-lg active:scale-95 transition-transform mb-4"
-      >
-        创建新账本
-      </button>
-      <button
-        onClick={() => setMode('restore')}
-        className="w-full py-4 bg-white dark:bg-zinc-800 text-ios-text rounded-2xl font-medium text-lg shadow-sm border border-gray-100 dark:border-zinc-700 active:scale-95 transition-transform"
-      >
-        恢复数据
-      </button>
+      <div className="w-full mt-auto mb-8 space-y-4">
+        <button
+          onClick={() => setMode('create')}
+          className="w-full py-4 bg-ios-primary text-white rounded-2xl font-bold text-lg shadow-lg active:scale-95 transition-transform"
+        >
+          创建新账本
+        </button>
+        <button
+          onClick={() => setMode('restore')}
+          className="w-full py-4 bg-white dark:bg-zinc-800 text-ios-text rounded-2xl font-medium text-lg shadow-sm border border-gray-100 dark:border-zinc-700 active:scale-95 transition-transform"
+        >
+          恢复数据
+        </button>
+      </div>
     </div>
   );
 
   const renderCreate = () => (
-    <div className="flex flex-col h-full w-full max-w-sm mx-auto p-6 animate-slide-up">
+    <div className="flex flex-col min-h-full w-full max-w-sm mx-auto p-6 pt-12 animate-fade-in">
       <button onClick={() => setMode('intro')} className="self-start mb-10 text-ios-subtext flex items-center gap-1">
         <Icon name="ChevronLeft" className="w-5 h-5" /> 返回
       </button>
@@ -161,7 +203,7 @@ export const OnboardingView: React.FC = () => {
   );
 
   const renderRestore = () => (
-    <div className="flex flex-col h-full w-full max-w-sm mx-auto p-6 animate-slide-up">
+    <div className="flex flex-col min-h-full w-full max-w-sm mx-auto p-6 pt-12 animate-fade-in">
       <button onClick={() => setMode('intro')} className="self-start mb-6 text-ios-subtext flex items-center gap-1">
         <Icon name="ChevronLeft" className="w-5 h-5" /> 返回
       </button>
@@ -242,7 +284,13 @@ export const OnboardingView: React.FC = () => {
   );
 
   return (
-    <div className="h-screen w-screen bg-ios-bg overflow-hidden relative">
+    <div
+      className="fixed left-0 w-screen bg-ios-bg overflow-y-auto overflow-x-hidden relative"
+      style={{
+        height: visualViewport.height,
+        top: visualViewport.offsetTop
+      }}
+    >
       {mode === 'intro' && renderIntro()}
       {mode === 'create' && renderCreate()}
       {mode === 'restore' && renderRestore()}
