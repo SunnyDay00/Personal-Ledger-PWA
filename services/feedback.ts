@@ -140,7 +140,7 @@ export class FeedbackService {
     this.resumeContext();
   }
 
-  public play(type: 'click' | 'delete' | 'success' | 'error') {
+  public play(type: 'click' | 'delete' | 'success' | 'error' | 'undo' | 'switch') {
     if (!this.isSoundEnabled) return;
 
     this.initAudio();
@@ -182,6 +182,28 @@ export class FeedbackService {
             gain.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
             osc.start(now);
             osc.stop(now + 0.08);
+            break;
+
+          case 'undo':
+            // Rising tone, "whoop"
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(200, now);
+            osc.frequency.exponentialRampToValueAtTime(400, now + 0.15);
+            gain.gain.setValueAtTime(0.2, now);
+            gain.gain.linearRampToValueAtTime(0, now + 0.15);
+            osc.start(now);
+            osc.stop(now + 0.15);
+            break;
+
+          case 'switch':
+            // Very short, light tick
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(600, now);
+            osc.frequency.exponentialRampToValueAtTime(300, now + 0.03);
+            gain.gain.setValueAtTime(0.1, now); // Quiet
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.03);
+            osc.start(now);
+            osc.stop(now + 0.03);
             break;
 
           case 'success':

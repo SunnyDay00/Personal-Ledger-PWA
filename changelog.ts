@@ -2,6 +2,14 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '5.4.0',
+      date: '2025/12/02',
+      content: [
+          '添加更多音效效果。',
+          '修改Vite 的安全机制，可通过cloudflare进行内网穿透搭建。'
+      ]
+  },
+  {
       version: '5.3.0',
       date: '2025/12/02',
       content: [

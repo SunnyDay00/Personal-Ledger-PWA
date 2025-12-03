@@ -71,7 +71,11 @@ export const Layout: React.FC = () => {
             {showToast && canUndo && (
                 <Toast
                     message="已删除，撤回？"
-                    onUndo={() => { undo(); setShowToast(false); }}
+                    onUndo={() => {
+                        feedback.play('undo');
+                        undo();
+                        setShowToast(false);
+                    }}
                     onClose={() => setShowToast(false)}
                 />
             )}

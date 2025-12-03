@@ -42,6 +42,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
     }, [timeRange, currentDate]);
 
     const handlePrev = () => {
+        feedback.play('switch');
         let newDate;
         if (timeRange === 'week') newDate = addWeeks(currentDate, -1);
         else if (timeRange === 'month') newDate = addMonths(currentDate, -1);
@@ -50,6 +51,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
     };
 
     const handleNext = () => {
+        feedback.play('switch');
         let newDate;
         if (timeRange === 'week') newDate = addWeeks(currentDate, 1);
         else if (timeRange === 'month') newDate = addMonths(currentDate, 1);
@@ -187,7 +189,10 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
                     </div>
                     <div className="flex justify-center bg-gray-200/50 dark:bg-zinc-800/50 p-0.5 rounded-lg">
                         {(['week', 'month', 'year'] as const).map(range => (
-                            <button key={range} onClick={() => dispatch({ type: 'SET_TIME_RANGE', payload: range })} className={`flex-1 py-1 text-xs font-medium rounded-md transition-all ${timeRange === range ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext'}`}>{range === 'week' ? '周' : range === 'month' ? '月' : '年'}</button>
+                            <button key={range} onClick={() => {
+                                feedback.play('switch');
+                                dispatch({ type: 'SET_TIME_RANGE', payload: range });
+                            }} className={`flex-1 py-1 text-xs font-medium rounded-md transition-all ${timeRange === range ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext'}`}>{range === 'week' ? '周' : range === 'month' ? '月' : '年'}</button>
                         ))}
                     </div>
                 </div>
