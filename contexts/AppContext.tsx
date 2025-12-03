@@ -312,11 +312,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const handleVisibilityChange = () => {
             console.log('[AppContext] Visibility changed:', document.visibilityState);
             if (document.visibilityState === 'hidden') {
-                // When app goes background, completely reset audio context.
-                // This ensures next time user interacts, we create a fresh context (like first launch).
-                feedback.reset();
+                // Do NOT reset audio context on background. 
+                // Letting it suspend and then "kicking" it with unlockAudio() on resume is more reliable
+                // and avoids race conditions during quick re-opens.
             }
-            // On visible, do NOTHING. Wait for user interaction (touchstart) to create new context.
+            // On visible, do NOTHING. Wait for user interaction (touchstart) to resume.
         };
 
         // iOS requires user interaction to unlock audio context
