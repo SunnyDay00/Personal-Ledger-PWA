@@ -459,6 +459,30 @@ export const SettingsView: React.FC = () => {
 
       <SettingsGroup title="其他">
         <SettingsItem icon="Download" label="导出数据 (JSON)" onClick={() => exportToJson(state, `ledger_backup_${format(new Date(), 'yyyyMMdd_HHmm')}.json`)} />
+        <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-zinc-800/50">
+          <div className="flex items-center gap-3">
+            <div className="w-7 h-7 rounded-lg bg-ios-primary/10 flex items-center justify-center text-ios-primary">
+              <Icon name="Terminal" className="w-4 h-4" />
+            </div>
+            <span className="font-medium text-sm text-ios-text">调试模式 (vConsole)</span>
+          </div>
+          <input
+            type="checkbox"
+            checked={state.settings.debugMode ?? false}
+            onChange={(e) => {
+              const enabled = e.target.checked;
+              dispatch({ type: 'UPDATE_SETTINGS', payload: { debugMode: enabled } });
+              localStorage.setItem('debugMode', enabled ? 'true' : 'false');
+              if (enabled) {
+                if (!window.confirm('开启调试模式需要刷新页面生效。立即刷新？')) return;
+                window.location.reload();
+              } else {
+                window.location.reload();
+              }
+            }}
+            className="toggle-checkbox"
+          />
+        </div>
         <SettingsItem icon="Info" label="关于" onClick={() => setPage('about')} isLast />
       </SettingsGroup>
 

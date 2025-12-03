@@ -131,6 +131,9 @@ export interface AppSettings {
   
   // Version
   version: string;
+  
+  // Debug
+  debugMode?: boolean;
 }
 
 export interface AppState {

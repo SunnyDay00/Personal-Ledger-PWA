@@ -303,20 +303,34 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         window.addEventListener('online', handleOnline);
         window.addEventListener('offline', handleOffline);
 
-        // Audio Warm-up for PWA
-        const warmUpAudio = () => {
-            feedback.warmUp();
-            window.removeEventListener('touchstart', warmUpAudio);
-            window.removeEventListener('click', warmUpAudio);
+        // Audio Warm-up for PWA (Persistent for iOS)
+        const handleInteraction = () => {
+            console.log('[AppContext] User interaction detected, resuming audio context...');
+            feedback.resumeContext();
         };
-        window.addEventListener('touchstart', warmUpAudio, { passive: true });
-        window.addEventListener('click', warmUpAudio, { passive: true });
+
+        const handleVisibilityChange = () => {
+            console.log('[AppContext] Visibility changed:', document.visibilityState);
+            if (document.visibilityState === 'hidden') {
+                // When app goes background, completely reset audio context.
+                // This ensures next time user interacts, we create a fresh context (like first launch).
+                feedback.reset();
+            }
+            // On visible, do NOTHING. Wait for user interaction (touchstart) to create new context.
+        };
+
+        // iOS requires user interaction to unlock audio context
+        // We use touchend/click as they are more reliable for audio resumption than touchstart
+        window.addEventListener('touchend', handleInteraction, { passive: false });
+        window.addEventListener('click', handleInteraction, { passive: true });
+        document.addEventListener('visibilitychange', handleVisibilityChange);
 
         return () => {
             window.removeEventListener('online', handleOnline);
             window.removeEventListener('offline', handleOffline);
-            window.removeEventListener('touchstart', warmUpAudio);
-            window.removeEventListener('click', warmUpAudio);
+            window.removeEventListener('touchend', handleInteraction);
+            window.removeEventListener('click', handleInteraction);
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
         };
     }, []);
 
@@ -1044,7 +1058,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     );
 };
 
-export const useApp = () => useContext(AppContext);
+export const useApp = () => {
+    const context = useContext(AppContext);
+    if (!context) {
+        throw new Error('useApp must be used within an AppProvider');
+    }
+    return context;
+};
 
 
 
