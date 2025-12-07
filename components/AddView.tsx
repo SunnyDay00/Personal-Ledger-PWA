@@ -176,10 +176,24 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
                 <div className="grid gap-y-6 p-4" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
                     {categories.map(cat => (
                         <button key={cat.id} onClick={() => { setSelectedCategoryId(cat.id); feedback.play('click'); feedback.vibrate('light'); }} className="flex flex-col items-center gap-2 group">
-                            <div className={clsx("w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200", selectedCategoryId === cat.id ? "bg-ios-primary text-white shadow-lg shadow-blue-500/30 scale-110" : "bg-gray-100 dark:bg-zinc-800 text-ios-subtext group-active:scale-95")}>
+                            <div className={clsx(
+                                "w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200",
+                                selectedCategoryId === cat.id
+                                    ? "bg-ios-primary text-white shadow-lg shadow-blue-500/30 scale-110"
+                                    : state.settings.fontContrast === 'high'
+                                        ? "bg-gray-200 dark:bg-zinc-700 text-gray-900 dark:text-gray-100 group-active:scale-95"
+                                        : "bg-gray-100 dark:bg-zinc-800 text-ios-subtext group-active:scale-95"
+                            )}>
                                 <Icon name={cat.icon} className="w-5 h-5" />
                             </div>
-                            <span className={clsx("text-[10px] transition-colors truncate w-full text-center", selectedCategoryId === cat.id ? "text-ios-primary font-medium" : "text-ios-subtext")}>{cat.name}</span>
+                            <span className={clsx(
+                                "text-[10px] transition-colors truncate w-full text-center",
+                                selectedCategoryId === cat.id
+                                    ? "text-ios-primary font-medium"
+                                    : state.settings.fontContrast === 'high'
+                                        ? "text-gray-900 dark:text-gray-100 font-medium"
+                                        : "text-ios-subtext"
+                            )}>{cat.name}</span>
                         </button>
                     ))}
                 </div>

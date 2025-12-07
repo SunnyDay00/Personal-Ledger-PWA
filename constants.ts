@@ -9,6 +9,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   enableSound: true,
   enableHaptics: true,
   hapticStrength: 2,
+  fontContrast: 'normal',
   webdavUrl: '',
   webdavUser: '',
   webdavPass: '',

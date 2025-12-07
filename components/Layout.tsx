@@ -220,20 +220,29 @@ const TabButton: React.FC<{ active: boolean; onClick: () => void; icon: string; 
             feedback.vibrate('light');
         }
         onClick();
-    }} className="flex flex-col items-center justify-center w-[20%] gap-1 group py-1">
-        <Icon
-            name={icon}
-            className={clsx(
-                "w-6 h-6 transition-colors duration-200",
+    }} className="flex flex-col items-center justify-center w-[20%] h-full group relative">
+        {/* Active Pill Indicator */}
+        {active && (
+            <div className="absolute inset-x-1 inset-y-0 bg-ios-primary/10 dark:bg-ios-primary/20 rounded-2xl shadow-[0_0_15px_rgba(0,122,255,0.3)] border border-ios-primary/10 dark:border-ios-primary/20 animate-fade-in">
+                <div className="absolute inset-0 rounded-2xl border-t border-white/40 dark:border-white/20" />
+            </div>
+        )}
+
+        <div className="relative z-10 flex flex-col items-center gap-1">
+            <Icon
+                name={icon}
+                className={clsx(
+                    "w-6 h-6 transition-all duration-300",
+                    active ? "text-ios-primary scale-110 drop-shadow-sm" : "text-gray-400 dark:text-gray-500"
+                )}
+                strokeWidth={active ? 2.5 : 2}
+            />
+            <span className={clsx(
+                "text-[10px] font-medium transition-colors duration-200",
                 active ? "text-ios-primary" : "text-gray-400 dark:text-gray-500"
-            )}
-            strokeWidth={active ? 2.5 : 2}
-        />
-        <span className={clsx(
-            "text-[10px] font-medium transition-colors duration-200",
-            active ? "text-ios-primary" : "text-gray-400 dark:text-gray-500"
-        )}>
-            {label}
-        </span>
+            )}>
+                {label}
+            </span>
+        </div>
     </button>
 );

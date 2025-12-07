@@ -515,6 +515,27 @@ export const SettingsView: React.FC = () => {
           )}
         </div>
 
+        <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-zinc-800/50">
+          <div className="flex items-center gap-3">
+            <div className="w-7 h-7 rounded-lg bg-ios-primary/10 flex items-center justify-center text-ios-primary">
+              <Icon name="Type" className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="font-medium text-sm text-ios-text">字体增强</div>
+              <div className="text-[10px] text-ios-subtext">加深文字颜色，提高对比度</div>
+            </div>
+          </div>
+          <input
+            type="checkbox"
+            checked={(state.settings.fontContrast === 'high')}
+            onChange={(e) => {
+              const enabled = e.target.checked;
+              dispatch({ type: 'UPDATE_SETTINGS', payload: { fontContrast: enabled ? 'high' : 'normal' } });
+            }}
+            className="toggle-checkbox"
+          />
+        </div>
+
         <SettingsItem icon="Layout" label="界面布局" value="键盘/网格" onClick={() => setPage('layout')} />
         <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-zinc-800/50">
           <div className="flex items-center gap-3">
@@ -918,12 +939,12 @@ export const SettingsView: React.FC = () => {
     <>
       <div className="h-4"></div>
       <div className="bg-white dark:bg-zinc-900 rounded-2xl mx-4 shadow-sm border border-ios-border p-4 space-y-3">
-        <div className="grid grid-cols-2 gap-3">
+        <div className="flex flex-col gap-3">
           <div>
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">导出开始日期（可选）</label>
             <input
               type="date"
-              className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
+              className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20 appearance-none min-h-[44px]"
               value={exportStart}
               onChange={(e) => setExportStart(e.target.value)}
             />
@@ -932,7 +953,7 @@ export const SettingsView: React.FC = () => {
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">导出结束日期（可选）</label>
             <input
               type="date"
-              className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
+              className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20 appearance-none min-h-[44px]"
               value={exportEnd}
               onChange={(e) => setExportEnd(e.target.value)}
             />

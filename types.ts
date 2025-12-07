@@ -95,6 +95,7 @@ export interface AppSettings {
   enableSound: boolean;
   enableHaptics: boolean;
   hapticStrength: number; // 0=Off, 1=Light, 2=Medium, 3=Heavy
+  fontContrast: 'normal' | 'high';
   
   // WebDAV
   webdavUrl: string;
