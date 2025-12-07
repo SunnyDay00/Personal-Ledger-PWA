@@ -2,6 +2,15 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '6.1.0',
+      date: '2025/12/07',
+      content: [
+          '修复IOS端震动效果。',
+          '添加调整震动幅度的功能。',
+          '修改软件长按“记一笔”的功能。'
+      ]
+  },
+  {
       version: '6.0.0',
       date: '2025/12/07',
       content: [

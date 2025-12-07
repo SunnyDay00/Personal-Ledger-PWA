@@ -7,6 +7,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   customThemeColor: DEFAULT_THEME_COLOR,
   enableAnimations: false,
   enableSound: true,
+  enableHaptics: true,
+  hapticStrength: 2,
   webdavUrl: '',
   webdavUser: '',
   webdavPass: '',

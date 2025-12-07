@@ -6,19 +6,15 @@
 
 iOS 的图标文件位于 `ios/App/App/Assets.xcassets/AppIcon.appiconset` 文件夹中。
 
-你需要准备以下尺寸的 PNG 图片，并替换文件夹中对应的文件 (文件名保持一致，或者修改 `Contents.json`):
+iOS 的图标文件位于 `ios/App/App/Assets.xcassets/AppIcon.appiconset` 文件夹中。
 
-- `AppIcon-20x20@2x.png` (40x40)
-- `AppIcon-20x20@3x.png` (60x60)
-- `AppIcon-29x29@2x.png` (58x58)
-- `AppIcon-29x29@3x.png` (87x87)
-- `AppIcon-40x40@2x.png` (80x80)
-- `AppIcon-40x40@3x.png` (120x120)
-- `AppIcon-60x60@2x.png` (120x120)
-- `AppIcon-60x60@3x.png` (180x180)
-- `AppIcon-1024.png` (1024x1024)
+**只需要替换这一个文件即可**：
 
-**简便方法**: 你可以直接替换 `AppIcon-1024.png` (1024x1024)，然后使用在线工具生成其他尺寸并覆盖。
+- 文件名: `AppIcon-512@2x.png`
+- 格式: PNG
+- 尺寸: **必须是 1024x1024 像素**
+
+替换后，Xcode 会自动根据这个高清图标生成所有需要的尺寸。
 
 ## 2. 修改版本号与名称
 

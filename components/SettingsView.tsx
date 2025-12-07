@@ -79,6 +79,7 @@ export const SettingsView: React.FC = () => {
 
   const [showSyncLog, setShowSyncLog] = useState(false);
   const [showUsageStats, setShowUsageStats] = useState(false);
+  const [showLedgerSelect, setShowLedgerSelect] = useState(false);
   const [ledgerModal, setLedgerModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; color: string }>(
     { isOpen: false, mode: 'create', name: '', color: '#007AFF' }
   );
@@ -413,14 +414,7 @@ export const SettingsView: React.FC = () => {
           icon="Bookmark"
           label="默认账本"
           value={state.ledgers.find(l => l.id === state.settings.defaultLedgerId)?.name || '上次使用'}
-          onClick={() => {
-            const current = state.settings.defaultLedgerId || '';
-            const options = [{ id: '', name: '上次使用 (默认)' }, ...state.ledgers];
-            const nextIndex = (options.findIndex(o => o.id === current) + 1) % options.length;
-            const nextId = options[nextIndex].id;
-            dispatch({ type: 'UPDATE_SETTINGS', payload: { defaultLedgerId: nextId } });
-            feedback.play('click');
-          }}
+          onClick={() => setShowLedgerSelect(true)}
         />
         <SettingsItem icon="Grid" label="分类管理" onClick={() => setPage('categories')} />
         <SettingsItem icon="ClipboardList" label="操作历史" onClick={() => setPage('history')} />
@@ -428,6 +422,59 @@ export const SettingsView: React.FC = () => {
 
       <SettingsGroup title="个性化">
         <SettingsItem icon="Palette" label="主题设置" value={state.settings.themeMode === 'auto' ? '跟随系统' : state.settings.themeMode === 'dark' ? '深色' : '浅色'} onClick={() => setPage('theme')} />
+
+        {/* Haptic Settings with Slider */}
+        <div className="bg-white dark:bg-zinc-900 border-b border-gray-100 dark:border-zinc-800/50">
+          <div className="flex items-center justify-between p-4">
+            <div className="flex items-center gap-3">
+              <div className="w-7 h-7 rounded-lg bg-ios-primary/10 flex items-center justify-center text-ios-primary">
+                <Icon name="Smartphone" className="w-4 h-4" />
+              </div>
+              <span className="font-medium text-sm text-ios-text">震动反馈</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={(state.settings as any).enableHaptics ?? true}
+              onChange={(e) => {
+                const enabled = e.target.checked;
+                dispatch({ type: 'UPDATE_SETTINGS', payload: { enableHaptics: enabled, hapticStrength: enabled ? state.settings.hapticStrength || 2 : 2 } as any });
+                feedback.updateSettings((state.settings as any).enableSound ?? true, enabled, state.settings.hapticStrength || 2);
+                if (enabled) feedback.vibrate('medium');
+              }}
+              className="toggle-checkbox"
+            />
+          </div>
+
+          {/* Slider for Haptic Strength */}
+          {((state.settings as any).enableHaptics ?? true) && (
+            <div className="px-4 pb-4 pt-0">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] text-ios-subtext">强度</span>
+                <span className="text-[10px] font-medium text-ios-primary">
+                  {(state.settings.hapticStrength || 2) === 1 ? '弱' : (state.settings.hapticStrength || 2) === 2 ? '中' : '强'}
+                </span>
+              </div>
+              <input
+                type="range"
+                min="1"
+                max="3"
+                step="1"
+                value={state.settings.hapticStrength || 2}
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  dispatch({ type: 'UPDATE_SETTINGS', payload: { hapticStrength: val } as any });
+                  feedback.updateSettings((state.settings as any).enableSound ?? true, true, val);
+                  feedback.vibrate(val === 1 ? 'light' : val === 2 ? 'medium' : 'heavy');
+                }}
+                className="w-full h-1 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer accent-ios-primary"
+              />
+              <div className="flex justify-between text-[10px] text-gray-400 mt-1 px-1">
+                <span>弱</span><span>中</span><span>强</span>
+              </div>
+            </div>
+          )}
+        </div>
+
         <SettingsItem icon="Layout" label="界面布局" value="键盘/网格" onClick={() => setPage('layout')} />
         <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-zinc-800/50">
           <div className="flex items-center gap-3">
@@ -449,25 +496,7 @@ export const SettingsView: React.FC = () => {
             className="toggle-checkbox"
           />
         </div>
-        <div className="flex items-center justify-between p-4">
-          <div className="flex items-center gap-3">
-            <div className="w-7 h-7 rounded-lg bg-ios-primary/10 flex items-center justify-center text-ios-primary">
-              <Icon name="Smartphone" className="w-4 h-4" />
-            </div>
-            <span className="font-medium text-sm text-ios-text">震动反馈</span>
-          </div>
-          <input
-            type="checkbox"
-            checked={(state.settings as any).enableHaptics ?? true}
-            onChange={(e) => {
-              const enabled = e.target.checked;
-              dispatch({ type: 'UPDATE_SETTINGS', payload: { enableHaptics: enabled } as any });
-              feedback.updateSettings((state.settings as any).enableSound ?? true, enabled);
-              if (enabled) feedback.vibrate('medium');
-            }}
-            className="toggle-checkbox"
-          />
-        </div>
+        {/* Old Haptics Section Removed in favor of merged section above */}
       </SettingsGroup>
 
       <SettingsGroup title="其他">
@@ -510,6 +539,69 @@ export const SettingsView: React.FC = () => {
           </button>
         </div>
       </SettingsGroup>
+
+      {/* Ledger Selection Modal */}
+      {showLedgerSelect && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 animate-in fade-in duration-200" onClick={() => setShowLedgerSelect(false)}>
+          <div className="w-full max-w-sm bg-white dark:bg-zinc-900 rounded-2xl overflow-hidden shadow-2xl scale-100" onClick={e => e.stopPropagation()}>
+            <div className="p-4 border-b border-gray-100 dark:border-white/5 flex justify-between items-center bg-gray-50/50 dark:bg-white/5">
+              <span className="font-semibold text-ios-text">选择默认账本</span>
+              <button onClick={() => setShowLedgerSelect(false)} className="p-1 rounded-full active:bg-gray-200 dark:active:bg-white/10">
+                <Icon name="X" className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="max-h-[60vh] overflow-y-auto p-2">
+              <button
+                onClick={() => {
+                  dispatch({ type: 'UPDATE_SETTINGS', payload: { defaultLedgerId: '' } });
+                  setShowLedgerSelect(false);
+                  feedback.play('click');
+                }}
+                className={cn(
+                  "w-full flex items-center justify-between p-3 rounded-xl mb-1 transition-colors",
+                  !state.settings.defaultLedgerId
+                    ? "bg-ios-primary/10 text-ios-primary font-medium"
+                    : "hover:bg-gray-50 dark:hover:bg-white/5 text-ios-text"
+                )}
+              >
+                <div className="flex items-center gap-3">
+                  <Icon name="Clock" className="w-5 h-5" />
+                  <span>上次使用 (自动)</span>
+                </div>
+                {!state.settings.defaultLedgerId && <Icon name="Check" className="w-4 h-4" />}
+              </button>
+
+              <div className="h-px bg-gray-100 dark:bg-white/5 my-2 mx-2"></div>
+
+              {state.ledgers.map(ledger => {
+                const isSelected = state.settings.defaultLedgerId === ledger.id;
+                return (
+                  <button
+                    key={ledger.id}
+                    onClick={() => {
+                      dispatch({ type: 'UPDATE_SETTINGS', payload: { defaultLedgerId: ledger.id } });
+                      setShowLedgerSelect(false);
+                      feedback.play('click');
+                    }}
+                    className={cn(
+                      "w-full flex items-center justify-between p-3 rounded-xl mb-1 transition-colors",
+                      isSelected
+                        ? "bg-ios-primary/10 text-ios-primary font-medium"
+                        : "hover:bg-gray-50 dark:hover:bg-white/5 text-ios-text"
+                    )}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-3 h-3 rounded-full" style={{ backgroundColor: ledger.themeColor }}></div>
+                      <span>{ledger.name}</span>
+                    </div>
+                    {isSelected && <Icon name="Check" className="w-4 h-4" />}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 

@@ -93,6 +93,8 @@ export interface AppSettings {
   customThemeColor: string;
   enableAnimations: boolean;
   enableSound: boolean;
+  enableHaptics: boolean;
+  hapticStrength: number; // 0=Off, 1=Light, 2=Medium, 3=Heavy
   
   // WebDAV
   webdavUrl: string;

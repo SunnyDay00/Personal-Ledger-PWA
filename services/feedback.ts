@@ -7,6 +7,7 @@ export class FeedbackService {
   private audioContext: AudioContext | null = null;
   private isSoundEnabled: boolean = true;
   private isHapticsEnabled: boolean = true;
+  private hapticStrength: number = 2; // 1=Weak, 2=Medium, 3=Strong
 
   private constructor() {}
 
@@ -17,9 +18,10 @@ export class FeedbackService {
     return FeedbackService.instance;
   }
 
-  public updateSettings(sound: boolean, haptics: boolean) {
+  public updateSettings(sound: boolean, haptics: boolean, strength: number = 2) {
     this.isSoundEnabled = sound;
     this.isHapticsEnabled = haptics;
+    this.hapticStrength = strength;
   }
 
   public async reset() {
@@ -239,7 +241,32 @@ export class FeedbackService {
     if (!this.isHapticsEnabled) return;
 
     try {
-      switch (type) {
+      // Logic to boost strength based on setting
+      // Strength 1: Standard (Light, Medium, Heavy)
+      // Strength 2: Boosted (Light->Medium, Medium->Heavy, Heavy->Heavy)
+      // Strength 3: Max (Light->Heavy, Medium->Heavy, Heavy->Vibrate)
+      
+      let effectiveType = type;
+      if (this.hapticStrength >= 2) {
+         if (type === 'light') effectiveType = 'medium';
+         else if (type === 'medium') effectiveType = 'heavy';
+      }
+      if (this.hapticStrength >= 3) {
+         if (type === 'light') effectiveType = 'heavy';
+         else if (type === 'medium') effectiveType = 'heavy';
+         // Heavy stays heavy or becomes vibration below
+      }
+
+      // Max strength special handling for 'heavy' type or if everything is boosted
+      if (this.hapticStrength >= 3 && (type === 'heavy' || effectiveType === 'heavy')) {
+           // Use native vibration for stronger effect if it's a heavy impact
+           if (typeof navigator !== 'undefined' && navigator.vibrate) {
+                navigator.vibrate(40); // Hard buzz
+                return;
+           }
+      }
+
+      switch (effectiveType) {
         case 'light':
           await Haptics.impact({ style: ImpactStyle.Light });
           break;
@@ -259,7 +286,7 @@ export class FeedbackService {
     } catch (e) {
       // Fallback for web or if plugin fails
       if (typeof navigator !== 'undefined' && navigator.vibrate) {
-        navigator.vibrate(10);
+        navigator.vibrate(15);
       }
     }
   }
