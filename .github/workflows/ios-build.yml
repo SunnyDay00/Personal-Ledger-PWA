@@ -29,7 +29,7 @@ jobs:
       - name: Build iOS App
         run: |
           cd ios/App
-          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' App.xcodeproj/project.pbxproj
+          sed -i '' 's/CODE_SIGN_STYLE = .*/CODE_SIGN_STYLE = Manual;/g' App.xcodeproj/project.pbxproj
           xcodebuild -workspace App.xcworkspace \
             -scheme App \
             -configuration Release \
