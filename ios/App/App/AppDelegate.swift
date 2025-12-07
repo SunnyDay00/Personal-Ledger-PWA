@@ -46,4 +46,20 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return ApplicationDelegateProxy.shared.application(application, continue: userActivity, restorationHandler: restorationHandler)
     }
 
+    func application(_ application: UIApplication, performActionFor shortcutItem: UIApplicationShortcutItem, completionHandler: @escaping (Bool) -> Void) {
+        if shortcutItem.type == "add_transaction" {
+            if let url = URL(string: "personalledger://add") {
+                // Determine if we should open it immediately or wait
+                // In iOS 13+, SceneDelegate might handle this, but for Capacitor apps often AppDelegate is enough
+                UIApplication.shared.open(url, options: [:]) { success in
+                    completionHandler(success)
+                }
+            } else {
+                completionHandler(false)
+            }
+        } else {
+            completionHandler(false)
+        }
+    }
+
 }
