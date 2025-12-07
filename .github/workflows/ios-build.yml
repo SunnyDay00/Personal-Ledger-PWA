@@ -29,6 +29,7 @@ jobs:
       - name: Build iOS Archive
         run: |
           cd ios/App
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' App.xcodeproj/project.pbxproj
           xcodebuild -workspace App.xcworkspace \
             -scheme App \
             clean archive \
