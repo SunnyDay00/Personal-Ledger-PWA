@@ -12,17 +12,44 @@ export const SearchModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
 
     const history = state.settings.searchHistory;
 
-    // iOS-optimized focus: delay to prevent layout shift
+    // Viewport management for iOS keyboard
+    const [visualViewport, setVisualViewport] = useState({
+        height: typeof window !== 'undefined' ? window.innerHeight : 800,
+        offsetTop: 0
+    });
+
     useEffect(() => {
-        const timer = setTimeout(() => {
-            if (inputRef.current) {
-                inputRef.current.focus({
-                    preventScroll: true // Prevent automatic scrolling
+        const handleResize = () => {
+            const vv = (window as any).visualViewport;
+            if (vv) {
+                setVisualViewport({
+                    height: vv.height,
+                    offsetTop: vv.offsetTop
+                });
+            } else {
+                setVisualViewport({
+                    height: window.innerHeight,
+                    offsetTop: 0
                 });
             }
-        }, 100); // Small delay to let layout stabilize
+        };
 
-        return () => clearTimeout(timer);
+        if ((window as any).visualViewport) {
+            (window as any).visualViewport.addEventListener('resize', handleResize);
+            (window as any).visualViewport.addEventListener('scroll', handleResize);
+            handleResize(); // Init
+        } else {
+            window.addEventListener('resize', handleResize);
+        }
+
+        return () => {
+            if ((window as any).visualViewport) {
+                (window as any).visualViewport.removeEventListener('resize', handleResize);
+                (window as any).visualViewport.removeEventListener('scroll', handleResize);
+            } else {
+                window.removeEventListener('resize', handleResize);
+            }
+        };
     }, []);
 
     const results = useMemo(() => {
@@ -45,8 +72,14 @@ export const SearchModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     };
 
     return (
-        <div className="fixed inset-0 z-50 bg-ios-bg animate-slide-up flex flex-col">
-            <div className="pt-[env(safe-area-inset-top)] px-4 pb-2 bg-white/80 dark:bg-zinc-900/80 backdrop-blur-xl border-b border-ios-border">
+        <div
+            className="fixed left-0 z-50 bg-ios-bg animate-slide-up flex flex-col w-full"
+            style={{
+                height: visualViewport.height,
+                top: visualViewport.offsetTop
+            }}
+        >
+            <div className="pt-[env(safe-area-inset-top)] px-4 pb-2 bg-white/80 dark:bg-zinc-900/80 backdrop-blur-xl border-b border-ios-border shrink-0">
                 <div className="flex items-center gap-3 h-14">
                     <div className="flex-1 relative">
                         <Icon name="Search" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ios-subtext" />

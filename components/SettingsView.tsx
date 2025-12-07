@@ -98,6 +98,46 @@ export const SettingsView: React.FC = () => {
     categoryIds: [],
   });
 
+  // Viewport management for iOS keyboard
+  const [visualViewport, setVisualViewport] = useState({
+    height: typeof window !== 'undefined' ? window.innerHeight : 800,
+    offsetTop: 0
+  });
+
+  useEffect(() => {
+    const handleResize = () => {
+      const vv = (window as any).visualViewport;
+      if (vv) {
+        setVisualViewport({
+          height: vv.height,
+          offsetTop: vv.offsetTop
+        });
+      } else {
+        setVisualViewport({
+          height: window.innerHeight,
+          offsetTop: 0
+        });
+      }
+    };
+
+    if ((window as any).visualViewport) {
+      (window as any).visualViewport.addEventListener('resize', handleResize);
+      (window as any).visualViewport.addEventListener('scroll', handleResize);
+      handleResize(); // Init
+    } else {
+      window.addEventListener('resize', handleResize);
+    }
+
+    return () => {
+      if ((window as any).visualViewport) {
+        (window as any).visualViewport.removeEventListener('resize', handleResize);
+        (window as any).visualViewport.removeEventListener('scroll', handleResize);
+      } else {
+        window.removeEventListener('resize', handleResize);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   }, [page]);
@@ -968,7 +1008,13 @@ export const SettingsView: React.FC = () => {
       </div>
 
       {ledgerModal.isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm p-4">
+        <div
+          className="fixed left-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm p-4 w-full"
+          style={{
+            height: visualViewport.height,
+            top: visualViewport.offsetTop
+          }}
+        >
           <div className="bg-white dark:bg-zinc-900 w-full max-w-xs rounded-2xl p-5 shadow-2xl animate-fade-in">
             <h3 className="font-bold text-lg mb-4 text-center">{ledgerModal.mode === 'create' ? '新建账本' : '编辑账本'}</h3>
             <input
@@ -1301,7 +1347,13 @@ export const SettingsView: React.FC = () => {
       </div>
 
       {isAddingCat && (
-        <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm">
+        <div
+          className="fixed left-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm w-full"
+          style={{
+            height: visualViewport.height,
+            top: visualViewport.offsetTop
+          }}
+        >
           <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-6 animate-slide-up h-[70vh] flex flex-col">
             <div className="flex justify-between items-center mb-6">
               <button onClick={() => setIsAddingCat(false)} className="text-ios-subtext">取消</button>
@@ -1346,7 +1398,13 @@ export const SettingsView: React.FC = () => {
       )}
 
       {editingCat && (
-        <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm">
+        <div
+          className="fixed left-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm w-full"
+          style={{
+            height: visualViewport.height,
+            top: visualViewport.offsetTop
+          }}
+        >
           <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-6 animate-slide-up h-[70vh] flex flex-col">
             <div className="flex justify-between items-center mb-6">
               <button
@@ -1400,7 +1458,13 @@ export const SettingsView: React.FC = () => {
       )}
 
       {groupModal.isOpen && (
-        <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm">
+        <div
+          className="fixed left-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm w-full"
+          style={{
+            height: visualViewport.height,
+            top: visualViewport.offsetTop
+          }}
+        >
           <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-6 animate-slide-up h-[70vh] flex flex-col">
             <div className="flex justify-between items-center mb-4">
               <button onClick={() => setGroupModal({ isOpen: false, mode: 'create', name: '', categoryIds: [] })} className="text-ios-subtext">取消</button>
