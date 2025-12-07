@@ -2,6 +2,13 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '6.2.0',
+      date: '2025/12/07',
+      content: [
+          '修复添加备注输入框动画。'
+      ]
+  },
+  {
       version: '6.1.0',
       date: '2025/12/07',
       content: [

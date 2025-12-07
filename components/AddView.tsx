@@ -24,41 +24,37 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
     const [isNoteFocused, setIsNoteFocused] = useState(false);
     const noteInputRef = useRef<HTMLInputElement>(null);
 
-    // KEYBOARD STRATEGY: MANUAL VISUAL VIEWPORT
-    // Capacitor config is resize: 'none'. We manually set height.
-    const [viewportStyle, setViewportStyle] = useState({
-        height: '100dvh', // Default to dynamic viewport height
-        top: 0
-    });
+    // KEYBOARD STRATEGY: CAPACITOR PLUGIN EVENTS
+    // resize: 'none' in config.
+    // We listen for native keyboard height and apply it as padding-bottom.
+    const [keyboardHeight, setKeyboardHeight] = useState(0);
 
     useEffect(() => {
-        const handleResize = () => {
-            const vv = window.visualViewport;
-            if (vv) {
-                // When keyboard opens, vv.height shrinks.
-                // We set our container to exactly match this visible area.
-                setViewportStyle({
-                    height: `${vv.height}px`,
-                    top: vv.offsetTop // Handle any scroll offset
-                });
+        let showListener: any;
+        let hideListener: any;
 
-                // Ensure we scroll to show the input if needed
-                // But with fixed height, the "Footer" is always at bottom of visible area!
-                // So no manual scroll needed for the input bar itself.
-            }
+        const setupListeners = async () => {
+            showListener = await Keyboard.addListener('keyboardWillShow', info => {
+                // Ensure we get the correct height. 
+                // Sometimes info.keyboardHeight is 0 or incorrect initially, but typically reliable on iOS.
+                if (info.keyboardHeight > 0) {
+                    setKeyboardHeight(info.keyboardHeight);
+                    // Lock scroll to prevent bouncing
+                    window.scrollTo(0, 0);
+                }
+            });
+
+            hideListener = await Keyboard.addListener('keyboardWillHide', () => {
+                setKeyboardHeight(0);
+                window.scrollTo(0, 0);
+            });
         };
 
-        if (window.visualViewport) {
-            window.visualViewport.addEventListener('resize', handleResize);
-            window.visualViewport.addEventListener('scroll', handleResize);
-            handleResize(); // Init
-        }
+        setupListeners();
 
         return () => {
-            if (window.visualViewport) {
-                window.visualViewport.removeEventListener('resize', handleResize);
-                window.visualViewport.removeEventListener('scroll', handleResize);
-            }
+            if (showListener) showListener.remove();
+            if (hideListener) hideListener.remove();
         };
     }, []);
 
@@ -144,12 +140,22 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
     }, [amountStr]);
 
     return (
-        // KEY CHANGE: Fixed positioning with explicit height/top from visualViewport
+        // Root Container:
+        // - fixed inset-0: Occupies full screen (behind status bar & home indicator)
+        // - bg-ios-bg: Background color
+        // - transition-all: Smooth padding change
+        // Padding Bottom Logic:
+        // - If keyboard open: Use exact keyboard height.
+        // - If keyboard closed: Use safe area inset (for iPhone X+ home bar) or 16px if 0.
         <div
-            className={clsx("fixed left-0 w-full flex flex-col bg-ios-bg overflow-hidden z-50", state.settings.enableAnimations && "animate-slide-up")}
+            className={clsx(
+                "fixed inset-0 z-50 flex flex-col bg-ios-bg overflow-hidden w-full h-full",
+                state.settings.enableAnimations && "animate-slide-up",
+                "transition-[padding] duration-300 ease-out" // Smooth transition for padding
+            )}
             style={{
-                top: viewportStyle.top,
-                height: viewportStyle.height
+                // Explicitly use pixel value for keyboard, otherwise safe area.
+                paddingBottom: keyboardHeight > 0 ? `${keyboardHeight}px` : 'env(safe-area-inset-bottom)'
             }}
         >
 
@@ -164,7 +170,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
             </div>
 
             {/* 2. Content Area (Flex Grow + min-h-0) 
-                CRITICAL: min-h-0 allows this area to shrink below its content size when the keyboard (and Footer) pushes up.
+                Shrinks when padding-bottom pushes the Footer up.
             */}
             <div className="flex-1 overflow-y-auto no-scrollbar relative min-h-0" onClick={() => { if (isNoteFocused) setIsNoteFocused(false); }}>
                 <div className="grid gap-y-6 p-4" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
@@ -180,11 +186,12 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
             </div>
 
             {/* 3. Footer (Input + Keypad) 
-                By being the last child in a Flex Column container with Fixed Height,
-                this Footer will always be visible at the bottom.
+                Pinned to bottom of the content box. 
+                Because we padded the ROOT container, this Footer sits ON TOP of the padding (i.e., on top of the keyboard).
             */}
             <div className={clsx(
-                "bg-white dark:bg-zinc-900 rounded-t-3xl shadow-[0_-5px_20px_rgba(0,0,0,0.1)] border-t border-white/10 transition-transform duration-300 shrink-0",
+                "bg-white dark:bg-zinc-900 rounded-t-3xl shadow-[0_-5px_20px_rgba(0,0,0,0.1)] border-t border-white/10 shrink-0",
+                // Removed transition-transform here, handled by padding
             )}>
                 {/* Note Input Row */}
                 <div className="px-5 py-3 border-b border-ios-border flex items-center gap-4 relative z-20">
@@ -198,7 +205,6 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
                             onFocus={() => setIsNoteFocused(true)}
                             onBlur={() => setIsNoteFocused(false)}
                             onChange={(e) => setNote(e.target.value)}
-                            // Ensure fast tap
                             className="bg-transparent text-sm placeholder:text-ios-subtext focus:outline-none flex-1 text-ios-text"
                         />
                     </div>
