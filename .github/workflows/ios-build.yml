@@ -26,14 +26,16 @@ jobs:
       - name: Sync Capacitor
         run: npx cap sync
 
-      - name: Build iOS Archive
+      - name: Build iOS App
         run: |
           cd ios/App
           sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' App.xcodeproj/project.pbxproj
           xcodebuild -workspace App.xcworkspace \
             -scheme App \
-            clean archive \
-            -archivePath App.xcarchive \
+            -configuration Release \
+            -derivedDataPath derived_data \
+            -destination 'generic/platform=iOS' \
+            clean build \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
@@ -42,7 +44,7 @@ jobs:
         run: |
           cd ios/App
           mkdir Payload
-          cp -r App.xcarchive/Products/Applications/App.app Payload/
+          cp -r derived_data/Build/Products/Release-iphoneos/App.app Payload/
           zip -r App.ipa Payload
 
       - name: Upload IPA
