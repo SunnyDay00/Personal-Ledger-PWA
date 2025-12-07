@@ -2,6 +2,14 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '6.3.0',
+      date: '2025/12/08',
+      content: [
+          '调整低部栏布局。',
+          '优化界面问题。'
+      ]
+  },
+  {
       version: '6.2.0',
       date: '2025/12/07',
       content: [

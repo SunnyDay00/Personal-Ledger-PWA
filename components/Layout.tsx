@@ -6,6 +6,7 @@ import { AddView } from './AddView';
 import { OnboardingView } from './OnboardingView';
 import { SearchModal } from './SearchModal';
 import { BudgetModal } from './BudgetModal';
+import { LedgerManageView } from './LedgerManageView';
 import { Icon } from './ui/Icon';
 import { Toast } from './ui/Toast';
 import { useApp } from '../contexts/AppContext';
@@ -13,10 +14,11 @@ import { clsx } from 'clsx';
 import { feedback } from '../services/feedback';
 import { App, URLOpenListenerEvent } from '@capacitor/app';
 import { Transaction } from '../types';
+import { LiquidFilter } from './LiquidFilter';
 
 export const Layout: React.FC = () => {
     const { state, canUndo, undo } = useApp();
-    const [activeTab, setActiveTab] = useState<'home' | 'stats' | 'settings'>('home');
+    const [activeTab, setActiveTab] = useState<'home' | 'stats' | 'ledgers' | 'settings'>('home');
     const [showAdd, setShowAdd] = useState(false);
     const [showSearch, setShowSearch] = useState(false);
     const [showBudget, setShowBudget] = useState(false);
@@ -112,12 +114,14 @@ export const Layout: React.FC = () => {
 
     return (
         <div className="h-full w-full flex flex-col bg-ios-bg text-ios-text overflow-hidden font-sans">
+            <LiquidFilter />
 
             {/* Main Content Area */}
             {/* Main takes full height, navigation floats on top at bottom */}
             <main className="h-full w-full overflow-hidden relative">
                 {activeTab === 'home' && <HomeView onOpenSearch={() => setShowSearch(true)} onOpenBudget={() => setShowBudget(true)} />}
                 {activeTab === 'stats' && <StatsView />}
+                {activeTab === 'ledgers' && <LedgerManageView />}
                 {activeTab === 'settings' && <SettingsView />}
             </main>
 
@@ -140,25 +144,42 @@ export const Layout: React.FC = () => {
             )}
 
             {/* Tab Bar - Absolute Positioning for Glass Effect overlaying content */}
-            <nav className="absolute bottom-0 left-0 right-0 z-40 pb-[env(safe-area-inset-bottom)] bg-white/60 dark:bg-zinc-900/60 backdrop-blur-xl border-t border-black/5 dark:border-white/10 shadow-[0_-1px_10px_rgba(0,0,0,0.02)]">
-                <div className="flex items-center justify-around h-16 px-2">
+            <nav
+                className="absolute bottom-0 left-0 right-0 z-40 pb-[env(safe-area-inset-bottom)]"
+            >
+                {/* Background Layer (Clipped) */}
+                <div className="absolute inset-0 overflow-hidden bg-white/60 dark:bg-zinc-900/60 backdrop-blur-3xl backdrop-saturate-150 border-t border-white/20 dark:border-white/10 shadow-[0_-1px_10px_rgba(0,0,0,0.02)]">
+                    {/* Texture Overlay */}
+                    <div
+                        className="absolute inset-0 pointer-events-none opacity-30 mix-blend-overlay"
+                        style={{
+                            background: 'linear-gradient(180deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0) 100%)',
+                            filter: 'url(#liquid-glass)',
+                            zIndex: -1
+                        }}
+                    />
+                </div>
 
+                <div className="flex items-center justify-between h-16 px-2 relative z-10 text-[10px]">
+
+                    {/* 1. Home */}
                     <TabButton
                         active={activeTab === 'home'}
                         onClick={() => setActiveTab('home')}
-                        icon="Book"
-                        label="账本"
+                        icon="Home"
+                        label="首页"
                     />
 
+                    {/* 2. Stats */}
                     <TabButton
                         active={activeTab === 'stats'}
                         onClick={() => setActiveTab('stats')}
-                        icon="PieChart"
+                        icon="BarChart3"
                         label="统计"
                     />
 
-                    {/* Add Button (Floating Center) */}
-                    <div className="relative -top-6">
+                    {/* 3. Add (Floating Center) */}
+                    <div className="relative -top-6 w-[20%] flex justify-center">
                         <button
                             onClick={() => {
                                 feedback.play('success');
@@ -171,15 +192,21 @@ export const Layout: React.FC = () => {
                         </button>
                     </div>
 
+                    {/* 4. Ledgers (New) */}
+                    <TabButton
+                        active={activeTab === 'ledgers'}
+                        onClick={() => setActiveTab('ledgers')}
+                        icon="List"
+                        label="账本"
+                    />
+
+                    {/* 5. Settings */}
                     <TabButton
                         active={activeTab === 'settings'}
                         onClick={() => setActiveTab('settings')}
                         icon="Settings"
                         label="设置"
                     />
-
-                    {/* Symmetrical Spacer for layout balance */}
-                    <div className="w-0"></div>
                 </div>
             </nav>
         </div>
@@ -193,15 +220,14 @@ const TabButton: React.FC<{ active: boolean; onClick: () => void; icon: string; 
             feedback.vibrate('light');
         }
         onClick();
-    }} className="flex flex-col items-center justify-center w-20 gap-1 group py-1">
+    }} className="flex flex-col items-center justify-center w-[20%] gap-1 group py-1">
         <Icon
             name={icon}
             className={clsx(
                 "w-6 h-6 transition-colors duration-200",
-                active ? "text-ios-primary fill-current" : "text-gray-400 dark:text-gray-500"
+                active ? "text-ios-primary" : "text-gray-400 dark:text-gray-500"
             )}
-            fill={active ? "currentColor" : "none"}
-            strokeWidth={active ? 0 : 2}
+            strokeWidth={active ? 2.5 : 2}
         />
         <span className={clsx(
             "text-[10px] font-medium transition-colors duration-200",

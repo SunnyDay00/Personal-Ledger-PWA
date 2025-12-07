@@ -208,7 +208,12 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
                             className="bg-transparent text-sm placeholder:text-ios-subtext focus:outline-none flex-1 text-ios-text"
                         />
                     </div>
-                    <div className="text-3xl font-bold tracking-tight text-ios-text min-w-[30%] text-right tabular-nums">
+                    <div className={clsx(
+                        "font-bold tracking-tight text-ios-text min-w-[30%] text-right tabular-nums transition-all duration-200",
+                        amountStr.length > 13 ? "text-lg" :
+                            amountStr.length > 10 ? "text-xl" :
+                                amountStr.length > 8 ? "text-2xl" : "text-3xl"
+                    )}>
                         {displayAmount}
                     </div>
                 </div>
