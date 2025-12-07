@@ -409,6 +409,19 @@ export const SettingsView: React.FC = () => {
 
       <SettingsGroup title="管理">
         <SettingsItem icon="Book" label="多账本管理" value={`${state.ledgers.length}个`} onClick={() => setPage('ledgers')} />
+        <SettingsItem
+          icon="Bookmark"
+          label="默认账本"
+          value={state.ledgers.find(l => l.id === state.settings.defaultLedgerId)?.name || '上次使用'}
+          onClick={() => {
+            const current = state.settings.defaultLedgerId || '';
+            const options = [{ id: '', name: '上次使用 (默认)' }, ...state.ledgers];
+            const nextIndex = (options.findIndex(o => o.id === current) + 1) % options.length;
+            const nextId = options[nextIndex].id;
+            dispatch({ type: 'UPDATE_SETTINGS', payload: { defaultLedgerId: nextId } });
+            feedback.play('click');
+          }}
+        />
         <SettingsItem icon="Grid" label="分类管理" onClick={() => setPage('categories')} />
         <SettingsItem icon="ClipboardList" label="操作历史" onClick={() => setPage('history')} />
       </SettingsGroup>

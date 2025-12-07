@@ -11,6 +11,8 @@ import { Toast } from './ui/Toast';
 import { useApp } from '../contexts/AppContext';
 import { clsx } from 'clsx';
 import { feedback } from '../services/feedback';
+import { App, URLOpenListenerEvent } from '@capacitor/app';
+import { Transaction } from '../types';
 
 export const Layout: React.FC = () => {
     const { state, canUndo, undo } = useApp();
@@ -19,6 +21,63 @@ export const Layout: React.FC = () => {
     const [showSearch, setShowSearch] = useState(false);
     const [showBudget, setShowBudget] = useState(false);
     const [showToast, setShowToast] = useState(false);
+    const [initialAddData, setInitialAddData] = useState<Partial<Transaction> | undefined>(undefined);
+
+    // Handle Deep Links (URL Scheme)
+    useEffect(() => {
+        App.addListener('appUrlOpen', (event: URLOpenListenerEvent) => {
+            try {
+                // Example: personalledger://add?amount=100&note=Lunch&type=expense&category=Food
+                const urlStr = event.url;
+                if (!urlStr.includes('add')) return;
+
+                const url = new URL(urlStr);
+                const params = url.searchParams;
+
+                const amount = parseFloat(params.get('amount') || '0');
+                const note = params.get('note') ? decodeURIComponent(params.get('note')!) : '';
+                const typeParam = params.get('type');
+                const type = (typeParam === 'income' || typeParam === 'expense') ? typeParam : 'expense';
+
+                const categoryName = params.get('category') ? decodeURIComponent(params.get('category')!) : null;
+                const ledgerName = params.get('ledger') ? decodeURIComponent(params.get('ledger')!) : null;
+
+                let categoryId: string | undefined;
+                let ledgerId: string | undefined;
+
+                // Find Ledger
+                if (ledgerName) {
+                    const ledger = state.ledgers.find(l => l.name === ledgerName);
+                    if (ledger) ledgerId = ledger.id;
+                }
+
+                // Find Category (in target ledger or current)
+                const targetLedgerId = ledgerId || state.currentLedgerId;
+                if (categoryName) {
+                    const category = state.categories.find(c =>
+                        c.name === categoryName &&
+                        c.ledgerId === targetLedgerId &&
+                        c.type === type
+                    );
+                    if (category) categoryId = category.id;
+                }
+
+                setInitialAddData({
+                    amount: amount > 0 ? amount : undefined,
+                    note: note || undefined,
+                    type,
+                    categoryId,
+                    ledgerId,
+                    date: Date.now() // Default to now
+                });
+
+                setShowAdd(true);
+                feedback.play('success');
+            } catch (e) {
+                console.error('Error parsing URL:', e);
+            }
+        });
+    }, [state.ledgers, state.categories, state.currentLedgerId]);
 
     // Show toast when canUndo becomes true
     useEffect(() => {
@@ -63,7 +122,7 @@ export const Layout: React.FC = () => {
             </main>
 
             {/* Overlays */}
-            {showAdd && <AddView onClose={() => setShowAdd(false)} />}
+            {showAdd && <AddView onClose={() => { setShowAdd(false); setInitialAddData(undefined); }} initialTransaction={initialAddData} />}
             {showSearch && <SearchModal onClose={() => setShowSearch(false)} />}
             {showBudget && <BudgetModal onClose={() => setShowBudget(false)} />}
 

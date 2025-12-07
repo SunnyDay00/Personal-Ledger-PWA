@@ -9,7 +9,7 @@ import { format, addDays, isSameDay } from 'date-fns';
 
 interface AddViewProps {
     onClose: () => void;
-    initialTransaction?: Transaction;
+    initialTransaction?: Partial<Transaction>;
 }
 
 export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction }) => {
@@ -75,16 +75,16 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
     // Init for Edit Mode & Smart Selection
     useEffect(() => {
         if (initialTransaction) {
-            setType(initialTransaction.type);
-            setAmountStr(initialTransaction.amount.toString());
-            setSelectedCategoryId(initialTransaction.categoryId);
-            setNote(initialTransaction.note);
-            setDate(new Date(initialTransaction.date));
+            if (initialTransaction.type) setType(initialTransaction.type);
+            if (initialTransaction.amount) setAmountStr(initialTransaction.amount.toString());
+            if (initialTransaction.categoryId) setSelectedCategoryId(initialTransaction.categoryId);
+            if (initialTransaction.note) setNote(initialTransaction.note);
+            if (initialTransaction.date) setDate(new Date(initialTransaction.date));
         }
 
         if (categories.length > 0) {
             const isValid = selectedCategoryId && categories.some(c => c.id === selectedCategoryId);
-            if (!isValid && !initialTransaction) {
+            if (!isValid && !initialTransaction?.categoryId) {
                 setSelectedCategoryId(categories[0].id);
             }
         } else {
@@ -120,16 +120,19 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
         const amount = parseFloat(amountStr);
         if (amount <= 0 || !selectedCategoryId) return;
 
-        if (initialTransaction) {
+        if (initialTransaction && initialTransaction.id) {
             updateTransaction({
                 ...initialTransaction,
+                id: initialTransaction.id,
+                ledgerId: initialTransaction.ledgerId || state.currentLedgerId,
+                createdAt: initialTransaction.createdAt || Date.now(),
                 amount,
                 type,
                 categoryId: selectedCategoryId,
                 date: date.getTime(),
                 note,
                 updatedAt: Date.now()
-            });
+            } as Transaction);
         } else {
             addTransaction({
                 id: generateId(),

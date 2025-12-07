@@ -40,3 +40,26 @@
 
 - **有效期**: 免费 Apple ID 签名的应用有效期为 **7 天**。7 天后应用会无法打开，你需要重新使用 Sideloadly 进行安装 (重复第 3 步即可，数据通常会保留，但建议做好云同步备份)。
 - **更新应用**: 如果你更新了代码，只需重复 "云端打包" 和 "安装到手机" 的步骤即可覆盖安装。
+
+## 4. 进阶功能
+
+### 快捷操作 (Quick Actions)
+
+长按桌面图标，可以选择 "记一笔" 快速进入记账页面。
+
+### URL Scheme (快捷指令)
+
+你可以使用 iOS 的 "快捷指令" (Shortcuts) App 来自动化记账。
+支持的 URL 格式: `personalledger://add`
+
+**参数说明:**
+
+- `amount`: 金额 (数字)
+- `note`: 备注 (文字, 需 URL 编码)
+- `type`: 类型 (`expense` 支出 / `income` 收入)
+- `category`: 分类名称 (需 URL 编码)
+- `ledger`: 账本名称 (需 URL 编码)
+
+**示例:**
+`personalledger://add?amount=25&note=早餐&category=餐饮`
+(打开 App 并预填金额 25，备注"早餐"，分类"餐饮")

@@ -2,6 +2,16 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '6.0.0',
+      date: '2025/12/07',
+      content: [
+          '使用GitHub被项目打包成IOS端使用的IPA文件。通过自签证书可以安装。',
+          '添加IOS软件震动功能。',
+          '添加软件长按“记一笔”的功能。',
+          '添加快捷指令 (Shortcuts) 调用功能。'
+      ]
+  },
+  {
       version: '5.4.0',
       date: '2025/12/02',
       content: [

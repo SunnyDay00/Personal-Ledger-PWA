@@ -1,3 +1,7 @@
+import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
+
+const DB_NAME = 'personal_ledger_settings';
+
 export class FeedbackService {
   private static instance: FeedbackService;
   private audioContext: AudioContext | null = null;
@@ -61,8 +65,6 @@ export class FeedbackService {
   }
 
   private isResuming: boolean = false;
-
-  // ... constructor ...
 
   public async resumeContext() {
     if (!this.isSoundEnabled) return;
@@ -233,25 +235,32 @@ export class FeedbackService {
     }
   }
 
-  public vibrate(type: 'light' | 'medium' | 'heavy' | 'success' | 'error') {
-    if (!this.isHapticsEnabled || typeof navigator === 'undefined' || !navigator.vibrate) return;
+  public async vibrate(type: 'light' | 'medium' | 'heavy' | 'success' | 'error') {
+    if (!this.isHapticsEnabled) return;
 
-    switch (type) {
-      case 'light':
-        navigator.vibrate(10); // Very short tick
-        break;
-      case 'medium':
-        navigator.vibrate(20);
-        break;
-      case 'heavy':
-        navigator.vibrate(40);
-        break;
-      case 'success':
-        navigator.vibrate([10, 30, 20]); // Da-da
-        break;
-      case 'error':
-        navigator.vibrate([50, 30, 50]); // Buzz-buzz
-        break;
+    try {
+      switch (type) {
+        case 'light':
+          await Haptics.impact({ style: ImpactStyle.Light });
+          break;
+        case 'medium':
+          await Haptics.impact({ style: ImpactStyle.Medium });
+          break;
+        case 'heavy':
+          await Haptics.impact({ style: ImpactStyle.Heavy });
+          break;
+        case 'success':
+          await Haptics.notification({ type: NotificationType.Success });
+          break;
+        case 'error':
+          await Haptics.notification({ type: NotificationType.Error });
+          break;
+      }
+    } catch (e) {
+      // Fallback for web or if plugin fails
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate(10);
+      }
     }
   }
 }
