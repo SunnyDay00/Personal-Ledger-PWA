@@ -158,11 +158,17 @@ export const LedgerManageView: React.FC = () => {
                                 {/* Stats Grid */}
                                 <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs border-t border-dashed border-gray-200 dark:border-zinc-700 pt-3">
                                     <div className="flex justify-between items-center text-gray-500">
-                                        <span>总支出</span>
+                                        <div className="flex flex-col">
+                                            <span>总支出</span>
+                                            <span className="text-[11px] text-gray-600 dark:text-gray-400 font-medium mt-0.5">共 {stats.expenseCount} 笔</span>
+                                        </div>
                                         <span className="font-medium text-ios-text text-base">¥{stats.expenseTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 元</span>
                                     </div>
                                     <div className="flex justify-between items-center text-gray-500">
-                                        <span>总收入</span>
+                                        <div className="flex flex-col">
+                                            <span>总收入</span>
+                                            <span className="text-[11px] text-gray-600 dark:text-gray-400 font-medium mt-0.5">共 {stats.incomeCount} 笔</span>
+                                        </div>
                                         <span className="font-medium text-green-600 dark:text-green-400 text-base">¥{stats.incomeTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 元</span>
                                     </div>
                                     <div className="col-span-2 mt-1 text-right">
