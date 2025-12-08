@@ -2,6 +2,14 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '6.4.0',
+      date: '2025/12/08',
+      content: [
+          '配置同步功能。',
+          '现在的同步机制将包括:WebDAV 配置、Cloudflare API 配置。'
+      ]
+  },
+  {
       version: '6.3.0',
       date: '2025/12/08',
       content: [
