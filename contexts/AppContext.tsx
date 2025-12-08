@@ -612,7 +612,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
 
             if (settings) {
-                const dataObj = typeof settings.data === 'string' ? (() => { try { return JSON.parse(settings.data); } catch { return {}; } })() : (settings.data || {});
+                const dataObj = typeof settings.data === 'string'
+                    ? (() => { try { return JSON.parse(settings.data); } catch { return {}; } })()
+                    : (settings.data || settings);
                 // Preserve local isFirstRun if it's false (user has completed onboarding)
                 // Cloud settings should NOT overwrite this critical local state
                 const localIsFirstRun = stateRef.current.settings.isFirstRun;
@@ -907,6 +909,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (data.transactions) db.transactions.bulkPut(data.transactions.map(t => ({ ...t, isDeleted: false, updatedAt: Date.now() })));
         if (data.ledgers) db.ledgers.bulkPut(data.ledgers.map(l => ({ ...l, isDeleted: false, updatedAt: Date.now() })));
         if (data.categories) db.categories.bulkPut(data.categories.map(c => ({ ...c, isDeleted: false, updatedAt: Date.now() })));
+        if (data.categoryGroups) db.categoryGroups.bulkPut(data.categoryGroups.map(g => ({ ...g, isDeleted: false, updatedAt: Date.now() })));
+        if (data.settings) db.settings.put({ key: 'main', value: { ...DEFAULT_SETTINGS, ...data.settings } });
         setSyncDirty(true);
     };
 
