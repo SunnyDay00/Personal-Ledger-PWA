@@ -145,9 +145,21 @@ export const LedgerManageView: React.FC = () => {
                                             {ledger.name.slice(0, 1)}
                                         </div>
                                         <div>
-                                            <h3 className={clsx("font-semibold text-lg", isActive ? "text-ios-primary" : "text-ios-text")}>
-                                                {ledger.name}
-                                            </h3>
+                                            <div className="flex items-center gap-2">
+                                                <h3 className={clsx("font-semibold text-lg", isActive ? "text-ios-primary" : "text-ios-text")}>
+                                                    {ledger.name}
+                                                </h3>
+                                                {/* Balance Display */}
+                                                <span className={clsx(
+                                                    "text-sm font-medium",
+                                                    (stats.incomeTotal - stats.expenseTotal) >= 0
+                                                        ? "text-green-600 dark:text-green-400"
+                                                        : "text-red-500 dark:text-red-400"
+                                                )}>
+                                                    {(stats.incomeTotal - stats.expenseTotal) >= 0 ? '' : '-'}
+                                                    ¥{Math.abs(stats.incomeTotal - stats.expenseTotal).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                </span>
+                                            </div>
                                             <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
                                                 创建于 {format(ledger.createdAt || 0, 'yyyy年MM月dd日')}
                                             </p>
