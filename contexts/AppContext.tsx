@@ -270,9 +270,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // Persist Changes to DB (Write-Behind / Side-Effects)
     // We use this useEffect to save Settings whenever they change
+    const prevSettingsRef = useRef<string | null>(null);
     useEffect(() => {
         if (isDBLoaded) {
             dbAPI.saveSettings(state.settings);
+            // Trigger sync when settings change (excluding lastSyncVersion to prevent infinite loop)
+            const settingsWithoutVersion = { ...state.settings, lastSyncVersion: undefined };
+            const currentHash = JSON.stringify(settingsWithoutVersion);
+            if (prevSettingsRef.current !== null && prevSettingsRef.current !== currentHash) {
+                setSyncDirty(true);
+            }
+            prevSettingsRef.current = currentHash;
         }
     }, [state.settings, isDBLoaded]);
 
@@ -1096,7 +1104,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     const triggerCloudSync = () => {
-        console.log('[triggerCloudSync] Called! Setting syncDirty = true');
         setSyncDirty(true);
     };
 
