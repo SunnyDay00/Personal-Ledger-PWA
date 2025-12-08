@@ -564,8 +564,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         } catch { }
     }, []);
 
-    const mergeFromCloud = useCallback(async (payload: { ledgers: any[]; categories: any[]; groups?: any[]; transactions: any[]; settings: any; version: number }) => {
-        const { ledgers = [], categories = [], groups = [], transactions = [], settings, version } = payload;
+    const mergeFromCloud = useCallback(async (payload: { ledgers: any[]; categories: any[]; groups?: any[]; transactions: any[]; settings: any; cfConfig?: any; version: number }) => {
+        const { ledgers = [], categories = [], groups = [], transactions = [], settings, cfConfig, version } = payload;
         const hasGroupStore = hasGroupStoreNow();
 
         await (db as any).transaction('rw', db.ledgers, db.categories, db.transactions, db.settings, hasGroupStore ? db.categoryGroups : undefined, async () => {
@@ -605,6 +605,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     await db.transactions.put(normalized);
                 }
             }
+
+            // Sync CF Config
+            if (cfConfig) {
+                await db.settings.put({ key: 'cf_stats_config', value: cfConfig });
+            }
+
             if (settings) {
                 const dataObj = typeof settings.data === 'string' ? (() => { try { return JSON.parse(settings.data); } catch { return {}; } })() : (settings.data || {});
                 // Preserve local isFirstRun if it's false (user has completed onboarding)
@@ -721,12 +727,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 is_deleted: !!t.isDeleted
             });
 
+            const cfConfig = await db.settings.get('cf_stats_config');
             const payload = {
                 ledgers: ledgersFiltered.map(mapLedger),
                 categories: catsFiltered.map(mapCategory),
                 groups: groupsFiltered.map(mapGroup),
                 transactions: txFiltered.map(mapTx),
-                settings: { data: stateRef.current.settings, updated_at: Date.now() }
+                settings: { data: stateRef.current.settings, updated_at: Date.now() },
+                cfConfig: cfConfig?.value
             };
             await pushToCloud(syncEndpoint, syncToken, syncUserId || 'default', payload);
             // 手动同步强制全量拉取（since=0），避免版本偏差导致删除未拉取

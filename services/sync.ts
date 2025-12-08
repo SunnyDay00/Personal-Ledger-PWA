@@ -111,6 +111,11 @@ export class SyncService {
                     await db.settings.put({ key: 'cf_stats_config', value: cloudSettingsData.cfConfig });
                 }
 
+                // Sync Main Settings (WebDAV, Theme, etc.)
+                if (cloudSettingsData.settings) {
+                    await db.settings.put({ key: 'main', value: cloudSettingsData.settings });
+                }
+
                 if (cloudSettingsData.categories) {
                     await this.mergeCategories(cloudSettingsData.categories);
                 }
