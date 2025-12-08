@@ -154,8 +154,8 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
                 "transition-[padding] duration-300 ease-out" // Smooth transition for padding
             )}
             style={{
-                // Explicitly use pixel value for keyboard, otherwise safe area.
-                paddingBottom: keyboardHeight > 0 ? `${keyboardHeight}px` : 'env(safe-area-inset-bottom)'
+                // Explicitly use pixel value for keyboard
+                paddingBottom: keyboardHeight > 0 ? `${keyboardHeight}px` : '0px'
             }}
         >
 

@@ -12,15 +12,21 @@ export const SyncLogModal: React.FC<{ onClose: () => void }> = ({ onClose }) => 
   const getLogTypeLabel = (type: string) => {
     switch (type) {
       case 'settings':
-        return '配置与分类';
+        return '配置数据';
       case 'ledgers':
         return '账本列表';
       case 'ledger_csv':
         return '账本数据';
+      case 'transactions':
+        return '账目数据';
+      case 'mixed':
+        return '混合更新';
       case 'full':
         return '全量数据';
       case 'restore':
         return '数据恢复';
+      case 'incremental':
+        return '增量同步';
       default:
         return type;
     }

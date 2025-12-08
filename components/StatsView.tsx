@@ -76,7 +76,7 @@ export const StatsView: React.FC = () => {
 
     const displayDate = useMemo(() => {
         if (timeRange === 'year') return format(currentDate, 'yyyy年');
-        if (timeRange === 'month') return format(currentDate, 'yyyy年MM月');
+        if (timeRange === 'month') return format(currentDate, 'yyyy年 MM月');
         const { start: s, end: e } = getWeekRange(currentDate);
         return `${format(s, 'MM.dd')} - ${format(e, 'MM.dd')}`;
     }, [timeRange, currentDate]);
@@ -94,17 +94,7 @@ export const StatsView: React.FC = () => {
         });
     }, [transactions, currentLedgerId, startTimestamp, endTimestamp]);
 
-    // Global Ledger Stats (Total counts for the selected ledger, ignoring date range)
-    const ledgerTotalStats = useMemo(() => {
-        const targetTxs = transactions.filter(t =>
-            t.ledgerId === currentLedgerId
-        );
-        return {
-            total: targetTxs.length,
-            expense: targetTxs.filter(t => t.type === 'expense').length,
-            income: targetTxs.filter(t => t.type === 'income').length
-        };
-    }, [transactions, currentLedgerId]);
+
 
     // Metrics
     const { income, expense, balance } = useMemo(() => {
@@ -320,32 +310,7 @@ export const StatsView: React.FC = () => {
                         </div>
                     </div>
 
-                    {/* Ledger Info Card */}
-                    <div className="bg-white dark:bg-zinc-900 rounded-2xl p-4 shadow-sm border border-ios-border mb-3">
-                        <div className="flex items-center gap-2 mb-3">
-                            <div className="w-8 h-8 rounded-full bg-blue-50 dark:bg-blue-900/20 flex items-center justify-center text-ios-primary">
-                                <Icon name="BookOpen" className="w-4 h-4" />
-                            </div>
-                            <div>
-                                <div className="text-xs text-ios-subtext">账本创建时间</div>
-                                <div className="text-sm font-medium">{format(advancedStats.createdDate, 'yyyy-MM-dd')}</div>
-                            </div>
-                        </div>
-                        <div className="grid grid-cols-3 gap-2 border-t border-gray-100 dark:border-zinc-800 pt-3">
-                            <div className="flex flex-col items-center">
-                                <span className="text-[10px] text-ios-subtext mb-0.5">总笔数</span>
-                                <span className="text-sm font-bold tabular-nums text-ios-text">{ledgerTotalStats.total}</span>
-                            </div>
-                            <div className="flex flex-col items-center border-l border-gray-100 dark:border-zinc-800">
-                                <span className="text-[10px] text-ios-subtext mb-0.5">支出笔数</span>
-                                <span className="text-sm font-bold tabular-nums text-red-500">{ledgerTotalStats.expense}</span>
-                            </div>
-                            <div className="flex flex-col items-center border-l border-gray-100 dark:border-zinc-800">
-                                <span className="text-[10px] text-ios-subtext mb-0.5">收入笔数</span>
-                                <span className="text-sm font-bold tabular-nums text-green-500">{ledgerTotalStats.income}</span>
-                            </div>
-                        </div>
-                    </div>
+
 
                     {/* Summary Cards */}
                     <div className="grid grid-cols-3 gap-3 mb-6">

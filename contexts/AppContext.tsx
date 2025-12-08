@@ -42,6 +42,7 @@ interface AppContextType {
     resetApp: () => Promise<void>;
     restoreFromD1: () => Promise<void>;
     addLedger: (ledger: Ledger) => Promise<void>;
+    triggerCloudSync: () => void;
 }
 
 const AppContext = createContext<AppContextType>({
@@ -62,6 +63,7 @@ const AppContext = createContext<AppContextType>({
     resetApp: async () => { },
     restoreFromD1: async () => { },
     addLedger: async () => { },
+    triggerCloudSync: () => { },
 });
 
 function appReducer(state: AppState, action: AppAction): AppState {
@@ -177,6 +179,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const [isDBLoaded, setIsDBLoaded] = useState(false);
     const [syncDirty, setSyncDirty] = useState(false);
     const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const isRestoringRef = useRef(false); // Guard against auto-sync immediately after restore
+    const [isRestoring, setIsRestoring] = useState(false);
     const versionCheckTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const versionCheckRunningRef = useRef(false);
     const autoBackupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -606,28 +610,39 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 }
             }
 
-            // Sync CF Config
-            if (cfConfig) {
-                await db.settings.put({ key: 'cf_stats_config', value: cfConfig });
-            }
+            // cfConfig is now part of settings.data, no separate handling needed
 
             if (settings) {
                 const dataObj = typeof settings.data === 'string'
                     ? (() => { try { return JSON.parse(settings.data); } catch { return {}; } })()
                     : (settings.data || settings);
-                // Preserve local isFirstRun if it's false (user has completed onboarding)
-                // Cloud settings should NOT overwrite this critical local state
-                const localIsFirstRun = stateRef.current.settings.isFirstRun;
+
+                // CRITICAL FIX: Merge Logic to Prefer Cloud Settings but Preserve Connection
+                const dbSettingsRow = await db.settings.get('main');
+                const localSettings = { ...(dbSettingsRow?.value || DEFAULT_SETTINGS), ...stateRef.current.settings };
+
+                const newSettings = {
+                    ...localSettings, // Start with local structure
+                    ...dataObj,       // Overlay Cloud Settings (Wins for preferences, ledgers, etc.)
+
+                    // RE-APPLY Local Connection Settings to ensure they are not lost if cloud data is missing them
+                    // RE-APPLY Local Connection Settings to ensure they are not lost if cloud data is missing them
+                    // Logic: If cloud has valid non-empty string, use it. Otherwise, keep local.
+                    webdavUrl: (dataObj.webdavUrl && String(dataObj.webdavUrl).trim() !== '') ? dataObj.webdavUrl : localSettings.webdavUrl,
+                    webdavUser: (dataObj.webdavUser && String(dataObj.webdavUser).trim() !== '') ? dataObj.webdavUser : localSettings.webdavUser,
+                    webdavPass: (dataObj.webdavPass && String(dataObj.webdavPass).trim() !== '') ? dataObj.webdavPass : localSettings.webdavPass,
+                    syncEndpoint: (dataObj.syncEndpoint && String(dataObj.syncEndpoint).trim() !== '') ? dataObj.syncEndpoint : localSettings.syncEndpoint,
+                    syncToken: (dataObj.syncToken && String(dataObj.syncToken).trim() !== '') ? dataObj.syncToken : localSettings.syncToken,
+                    syncUserId: (dataObj.syncUserId && String(dataObj.syncUserId).trim() !== '') ? dataObj.syncUserId : localSettings.syncUserId,
+
+                    // PRESERVE Local First Run state if false
+                    isFirstRun: localSettings.isFirstRun === false ? false : (dataObj.isFirstRun ?? DEFAULT_SETTINGS.isFirstRun),
+                    lastSyncVersion: settings.updated_at || Date.now()
+                };
+
                 await db.settings.put({
                     key: 'main',
-                    value: {
-                        ...DEFAULT_SETTINGS,
-                        ...stateRef.current.settings,
-                        ...dataObj,
-                        // CRITICAL: Preserve local isFirstRun value if user completed onboarding
-                        isFirstRun: localIsFirstRun === false ? false : (dataObj.isFirstRun ?? DEFAULT_SETTINGS.isFirstRun),
-                        lastSyncVersion: settings.updated_at || Date.now()
-                    }
+                    value: newSettings
                 });
             }
         });
@@ -645,6 +660,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const performCloudSync = useCallback(async (reason: 'auto' | 'manual' = 'auto') => {
         const { syncEndpoint, syncToken, syncUserId, lastSyncVersion } = stateRef.current.settings;
+
+        // Skip auto-sync if we just restored to prevent overwriting cloud with local state
+        if (reason === 'auto' && isRestoringRef.current) {
+            return;
+        }
+
         if (!syncEndpoint || !syncToken || !isDBLoaded || !stateRef.current.isOnline) return;
         const ready = await ensureStoresReady();
         if (!ready) {
@@ -729,14 +750,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 is_deleted: !!t.isDeleted
             });
 
-            const cfConfig = await db.settings.get('cf_stats_config');
+            // cfConfig is now part of settings, no separate field needed
             const payload = {
                 ledgers: ledgersFiltered.map(mapLedger),
                 categories: catsFiltered.map(mapCategory),
                 groups: groupsFiltered.map(mapGroup),
                 transactions: txFiltered.map(mapTx),
-                settings: { data: stateRef.current.settings, updated_at: Date.now() },
-                cfConfig: cfConfig?.value
+                settings: { data: stateRef.current.settings, updated_at: Date.now() }
             };
             await pushToCloud(syncEndpoint, syncToken, syncUserId || 'default', payload);
             // 手动同步强制全量拉取（since=0），避免版本偏差导致删除未拉取
@@ -760,8 +780,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     useEffect(() => {
         if (!syncDirty) return;
-        const { syncEndpoint, syncToken, webdavUrl } = state.settings;
-        if (!state.isOnline) return;
+        // Use stateRef to avoid infinite loop caused by state.settings changes
+        const { syncEndpoint, syncToken, webdavUrl, syncDebounceSeconds } = stateRef.current.settings;
+        if (!stateRef.current.isOnline) return;
 
         const hasD1 = syncEndpoint && syncToken;
         const hasWebDAV = webdavUrl;
@@ -769,7 +790,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (!hasD1 && !hasWebDAV) return;
 
         if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
-        const delaySec = state.settings.syncDebounceSeconds ?? 3;
+        const delaySec = syncDebounceSeconds ?? 3;
 
         syncTimerRef.current = setTimeout(async () => {
             if (hasD1) await performCloudSync('auto');
@@ -778,7 +799,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }, Math.max(1000, delaySec * 1000));
 
         return () => { if (syncTimerRef.current) clearTimeout(syncTimerRef.current); };
-    }, [syncDirty, state.settings, state.isOnline, performCloudSync, performUpload]);
+    }, [syncDirty, performCloudSync, performUpload]);
 
     // Version lightweight polling
     useEffect(() => {
@@ -981,17 +1002,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     // D1/KV 只拉取恢复（不会推送本地），适合首次“恢复数据”
-    const restoreFromD1 = async () => {
+    const restoreFromD1 = useCallback(async () => {
+        setIsRestoring(true);
+        isRestoringRef.current = true; // Block auto-sync
+
         const { syncEndpoint, syncToken, syncUserId } = stateRef.current.settings;
         if (!syncEndpoint || !syncToken) {
+            isRestoringRef.current = false;
+            setIsRestoring(false);
             throw new Error('请先在设置里填写同步地址和 AUTH_TOKEN');
         }
+
         const ready = await ensureStoresReady();
         if (!ready) {
             setIsDBLoaded(false);
             window.location.reload();
             return;
         }
+
         dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
         try {
             const pulled = await pullFromCloud(syncEndpoint, syncToken, syncUserId || 'default', 0);
@@ -1000,13 +1028,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'download', status: 'success', file: 'D1 Sync', message: '仅拉取恢复成功' });
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'success' });
             setTimeout(() => dispatch({ type: 'SET_SYNC_STATUS', payload: 'idle' }), 2000);
+
+            // Cooldown for auto-sync blockage
+            setTimeout(() => { isRestoringRef.current = false; }, 10000);
         } catch (e: any) {
+            isRestoringRef.current = false;
             logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'download', status: 'failure', file: 'D1 Sync', message: e?.message || '恢复失败' });
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
             setSyncDirty(true);
             throw e;
+        } finally {
+            setIsRestoring(false);
         }
-    };
+    }, [mergeFromCloud]);
 
     const addLedger = async (ledger: Ledger) => {
         dispatch({ type: 'ADD_LEDGER', payload: ledger });
@@ -1061,10 +1095,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
     };
 
+    const triggerCloudSync = () => {
+        console.log('[triggerCloudSync] Called! Setting syncDirty = true');
+        setSyncDirty(true);
+    };
+
     if (!isDBLoaded) return null; // Or loading spinner
 
     return (
-        <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, batchDeleteTransactions, batchUpdateTransactions, undo, canUndo: !!undoStack, manualBackup, manualCloudSync, importData, smartImportCsv, restoreFromCloud, resetApp, restoreFromD1, addLedger }}>
+        <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, batchDeleteTransactions, batchUpdateTransactions, undo, canUndo: !!undoStack, manualBackup, manualCloudSync, importData, smartImportCsv, restoreFromCloud, resetApp, restoreFromD1, addLedger, triggerCloudSync }}>
             {children}
         </AppContext.Provider>
     );

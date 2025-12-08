@@ -59,7 +59,7 @@ export interface OperationLog {
 export interface BackupLog {
   id: string;
   timestamp: number;
-  type: 'settings' | 'ledgers' | 'ledger_csv' | 'full' | 'restore';
+  type: 'settings' | 'ledgers' | 'ledger_csv' | 'full' | 'restore' | 'transactions' | 'mixed' | 'incremental';
   action: 'upload' | 'download';
   status: 'success' | 'failure';
   file?: string;
@@ -137,6 +137,13 @@ export interface AppSettings {
   
   // Debug
   debugMode?: boolean;
+
+  // Cloudflare API Config (for usage stats)
+  cfConfig?: {
+    accountId: string;
+    apiToken: string;
+    kvId: string;
+  };
 }
 
 export interface AppState {

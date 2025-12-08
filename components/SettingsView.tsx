@@ -149,6 +149,11 @@ export const SettingsView: React.FC = () => {
         user: state.settings.webdavUser || '',
         pass: state.settings.webdavPass || '',
       });
+      setReminderDays(state.settings.backupReminderDays ?? 7);
+      setAutoBackupEnabled(state.settings.backupAutoEnabled ?? false);
+      setAutoBackupDays(state.settings.backupIntervalDays ?? 7);
+      setExportStart(state.settings.exportStartDate || '');
+      setExportEnd(state.settings.exportEndDate || '');
     }
     setD1Form({
       endpoint: state.settings.syncEndpoint || '',
@@ -158,12 +163,17 @@ export const SettingsView: React.FC = () => {
       versionCheckIntervalFg: state.settings.versionCheckIntervalFg ?? 10,
       versionCheckIntervalBg: state.settings.versionCheckIntervalBg ?? 20,
     });
-    setReminderDays(state.settings.backupReminderDays ?? 7);
-    setAutoBackupEnabled(state.settings.backupAutoEnabled ?? false);
-    setAutoBackupDays(state.settings.backupIntervalDays ?? 7);
-    setExportStart(state.settings.exportStartDate || '');
-    setExportEnd(state.settings.exportEndDate || '');
   }, [state.settings, isWebDavEditing]);
+
+  const handleWebDavChange = (key: keyof typeof webdavForm, value: string) => {
+    setIsWebDavEditing(true);
+    setWebdavForm(prev => ({ ...prev, [key]: value }));
+  };
+
+  const handleAutoBackupToggle = (checked: boolean) => {
+    setIsWebDavEditing(true);
+    setAutoBackupEnabled(checked);
+  }
 
   const sortedCategories = useMemo(() => {
     return state.categories
@@ -443,8 +453,7 @@ export const SettingsView: React.FC = () => {
     <>
       <div className="h-4"></div>
       <SettingsGroup title="同步与备份">
-        <SettingsItem icon="Cloud" label="D1+KV 云同步" value={state.settings.syncEndpoint ? '已配置' : '未配置'} onClick={() => setPage('security')} />
-        <SettingsItem icon="RefreshCw" label={isManualSyncing ? '正在同步…' : '立即手动同步'} onClick={handleManualCloudSync} />
+        <SettingsItem icon="Cloud" label="云同步与备份" value={state.settings.syncEndpoint ? '已配置' : '未配置'} onClick={() => setPage('security')} />
         <SettingsItem icon="FileText" label="同步日志" onClick={() => setShowSyncLog(true)} isLast />
       </SettingsGroup>
 
@@ -679,11 +688,12 @@ export const SettingsView: React.FC = () => {
           <span className="text-xs text-ios-subtext">{state.settings.syncEndpoint ? '已配置' : '未配置'}</span>
         </div>
 
-        <div className="space-y-3">
+        <form onSubmit={(e) => e.preventDefault()} className="space-y-3">
           <div>
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">同步地址</label>
             <input
               type="text"
+              name="d1-endpoint"
               placeholder="https://sync.xxx.workers.dev"
               className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
               value={d1Form.endpoint}
@@ -694,6 +704,7 @@ export const SettingsView: React.FC = () => {
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">AUTH_TOKEN</label>
             <input
               type="password"
+              name="d1-token"
               placeholder="云端设置的密钥"
               className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
               value={d1Form.token}
@@ -704,6 +715,7 @@ export const SettingsView: React.FC = () => {
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">用户标识（多设备保持一致）</label>
             <input
               type="text"
+              name="d1-user"
               placeholder="default"
               className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
               value={d1Form.userId}
@@ -752,7 +764,7 @@ export const SettingsView: React.FC = () => {
               </button>
             </div>
           </div>
-        </div>
+        </form>
 
         <div className="flex gap-3 pt-2">
           <button
@@ -788,33 +800,36 @@ export const SettingsView: React.FC = () => {
           </div>
         </div>
 
-        <div className="space-y-3">
+        <form onSubmit={(e) => e.preventDefault()} className="space-y-3">
           <div>
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">服务器地址 (URL)</label>
             <input
               type="text"
+              name="webdav-url"
               placeholder="https://dav.example.com/remote.php/webdav"
               className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
               value={webdavForm.url}
-              onChange={(e) => { setWebdavForm({ ...webdavForm, url: e.target.value }); setIsWebDavEditing(true); }}
+              onChange={(e) => handleWebDavChange('url', e.target.value)}
             />
           </div>
           <div>
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">账号 (User)</label>
             <input
               type="text"
+              name="webdav-user"
               className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
               value={webdavForm.user}
-              onChange={(e) => { setWebdavForm({ ...webdavForm, user: e.target.value }); setIsWebDavEditing(true); }}
+              onChange={(e) => handleWebDavChange('user', e.target.value)}
             />
           </div>
           <div>
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">密码 / 应用密钥</label>
             <input
               type="password"
+              name="webdav-password"
               className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
               value={webdavForm.pass}
-              onChange={(e) => { setWebdavForm({ ...webdavForm, pass: e.target.value }); setIsWebDavEditing(true); }}
+              onChange={(e) => handleWebDavChange('pass', e.target.value)}
             />
           </div>
           <div>
@@ -836,7 +851,7 @@ export const SettingsView: React.FC = () => {
             <input
               type="checkbox"
               checked={autoBackupEnabled}
-              onChange={(e) => { setAutoBackupEnabled(e.target.checked); setIsWebDavEditing(true); }}
+              onChange={(e) => handleAutoBackupToggle(e.target.checked)}
             />
           </div>
           <div>
@@ -851,7 +866,7 @@ export const SettingsView: React.FC = () => {
               onChange={(e) => { const v = Math.max(1, Math.min(60, Number(e.target.value) || 1)); setAutoBackupDays(v); setIsWebDavEditing(true); }}
             />
           </div>
-        </div>
+        </form>
 
         <div className="flex gap-3 pt-2">
           <button

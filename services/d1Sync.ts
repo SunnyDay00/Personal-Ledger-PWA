@@ -4,6 +4,7 @@ export interface D1SyncPayload {
   groups?: any[];
   transactions?: any[];
   settings?: any;
+  cfConfig?: any;
 }
 
 export interface D1PullResponse {
@@ -13,6 +14,7 @@ export interface D1PullResponse {
   groups?: any[];
   transactions: any[];
   settings: any | null;
+  cfConfig?: any;
 }
 
 const buildHeaders = (token: string) => {

@@ -198,16 +198,16 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
                 </div>
 
                 <div className="grid grid-cols-3 gap-3 mb-6">
-                    <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center justify-center">
-                        <span className="text-[10px] text-ios-subtext mb-1">收入</span>
+                    <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
+                        <span className="text-xs text-ios-subtext mb-1">收入</span>
                         <span className="text-sm font-bold text-green-500 tabular-nums">{formatCurrency(income)}</span>
                     </div>
-                    <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center justify-center">
-                        <span className="text-[10px] text-ios-subtext mb-1">支出</span>
+                    <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
+                        <span className="text-xs text-ios-subtext mb-1">支出</span>
                         <span className="text-sm font-bold text-red-500 tabular-nums">{formatCurrency(expense)}</span>
                     </div>
-                    <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center justify-center">
-                        <span className="text-[10px] text-ios-subtext mb-1">结余</span>
+                    <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
+                        <span className="text-xs text-ios-subtext mb-1">结余</span>
                         <span className="text-sm font-bold text-ios-primary tabular-nums">{formatCurrency(currentBalance)}</span>
                     </div>
                 </div>
