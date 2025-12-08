@@ -105,6 +105,12 @@ export class SyncService {
                 this.contentCache.set('settings.json', text);
 
                 const cloudSettingsData = JSON.parse(text);
+                
+                // Sync CF Config if present
+                if (cloudSettingsData.cfConfig) {
+                    await db.settings.put({ key: 'cf_stats_config', value: cloudSettingsData.cfConfig });
+                }
+
                 if (cloudSettingsData.categories) {
                     await this.mergeCategories(cloudSettingsData.categories);
                 }
@@ -176,6 +182,8 @@ export class SyncService {
 
         // B. Settings & Categories
         const currentSettings = await db.settings.get('main');
+        const cfConfig = await db.settings.get('cf_stats_config'); // Get CF Config
+
         const allCats = await db.categories.toArray();
         const validCats = allCats.filter(c => !c.isDeleted).sort((a,b) => a.order - b.order);
         const allGroups = hasGroupStore ? await db.categoryGroups.toArray() : [];
@@ -183,6 +191,7 @@ export class SyncService {
         
         const settingsPayload = {
             settings: currentSettings?.value,
+            cfConfig: cfConfig?.value, // Sync CF Config
             categories: validCats,
             categoryGroups: hasGroupStore ? validGroups : undefined,
             operationLogs: [] 
