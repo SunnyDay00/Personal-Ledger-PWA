@@ -143,24 +143,22 @@ export const Layout: React.FC = () => {
                 />
             )}
 
-            {/* Tab Bar - Absolute Positioning for Glass Effect overlaying content */}
+            {/* Tab Bar - Floating Capsule Design */}
             <nav
-                className="absolute bottom-0 left-0 right-0 z-40 pb-[env(safe-area-inset-bottom)]"
+                className="absolute bottom-6 left-4 right-4 z-40 h-16"
             >
-                {/* Background Layer (Clipped) */}
-                <div className="absolute inset-0 overflow-hidden bg-white/60 dark:bg-zinc-900/60 backdrop-blur-3xl backdrop-saturate-150 border-t border-white/20 dark:border-white/10 shadow-[0_-1px_10px_rgba(0,0,0,0.02)]">
-                    {/* Texture Overlay */}
+                {/* Floating Capsule Background */}
+                <div className="absolute inset-0 overflow-hidden rounded-full bg-white/60 dark:bg-[#1c1c1e]/60 backdrop-blur-md border border-white/20 dark:border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.12)]">
+                    {/* Glossy Reflection Overlay */}
                     <div
-                        className="absolute inset-0 pointer-events-none opacity-30 mix-blend-overlay"
+                        className="absolute inset-0 pointer-events-none opacity-40 mix-blend-overlay"
                         style={{
-                            background: 'linear-gradient(180deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0) 100%)',
-                            filter: 'url(#liquid-glass)',
-                            zIndex: -1
+                            background: 'linear-gradient(180deg, rgba(255,255,255,0.4) 0%, rgba(255,255,255,0.05) 50%, rgba(255,255,255,0) 100%)'
                         }}
                     />
                 </div>
 
-                <div className="flex items-center justify-between h-16 px-2 relative z-10 text-[10px]">
+                <div className="flex items-center justify-between h-full px-1.5 relative z-10 text-[10px] font-bold">
 
                     {/* 1. Home */}
                     <TabButton
@@ -168,6 +166,7 @@ export const Layout: React.FC = () => {
                         onClick={() => setActiveTab('home')}
                         icon="Home"
                         label="首页"
+                        position="first"
                     />
 
                     {/* 2. Stats */}
@@ -176,19 +175,24 @@ export const Layout: React.FC = () => {
                         onClick={() => setActiveTab('stats')}
                         icon="BarChart3"
                         label="统计"
+                        position="second"
                     />
 
-                    {/* 3. Add (Floating Center) */}
-                    <div className="relative -top-6 w-[20%] flex justify-center">
+                    {/* 3. Add (Center Green Button) */}
+                    <div className="flex justify-center items-center w-[20%]">
                         <button
                             onClick={() => {
                                 feedback.play('success');
                                 feedback.vibrate('light');
                                 setShowAdd(true);
                             }}
-                            className="w-16 h-16 rounded-full bg-ios-primary text-white shadow-lg shadow-blue-500/30 flex items-center justify-center transform transition-transform active:scale-95 border-4 border-ios-bg"
+                            className="w-14 h-10 rounded-[20px] bg-[#34C759] text-white shadow-[0_4px_15px_rgba(52,199,89,0.4)] flex items-center justify-center transform transition-all hover:scale-105 active:scale-95 relative overflow-hidden group"
                         >
-                            <Icon name="Plus" className="w-8 h-8" />
+                            {/* Glass Shine */}
+                            <div className="absolute inset-0 bg-gradient-to-b from-white/20 to-transparent pointer-events-none" />
+                            <div className="absolute bottom-0 inset-x-0 h-1/2 bg-gradient-to-t from-black/10 to-transparent pointer-events-none" />
+
+                            <Icon name="Plus" className="w-6 h-6 z-10 drop-shadow-sm" strokeWidth={3} />
                         </button>
                     </div>
 
@@ -198,6 +202,7 @@ export const Layout: React.FC = () => {
                         onClick={() => setActiveTab('ledgers')}
                         icon="List"
                         label="账本"
+                        position="fourth"
                     />
 
                     {/* 5. Settings */}
@@ -206,6 +211,7 @@ export const Layout: React.FC = () => {
                         onClick={() => setActiveTab('settings')}
                         icon="Settings"
                         label="设置"
+                        position="last"
                     />
                 </div>
             </nav>
@@ -213,33 +219,41 @@ export const Layout: React.FC = () => {
     );
 };
 
-const TabButton: React.FC<{ active: boolean; onClick: () => void; icon: string; label: string }> = ({ active, onClick, icon, label }) => (
+const TabButton: React.FC<{ active: boolean; onClick: () => void; icon: string; label: string; position?: 'first' | 'second' | 'middle' | 'fourth' | 'last' }> = ({ active, onClick, icon, label, position = 'middle' }) => (
     <button onClick={() => {
         if (!active) {
             feedback.play('click');
             feedback.vibrate('light');
         }
         onClick();
-    }} className="flex flex-col items-center justify-center w-[20%] h-full group relative">
-        {/* Active Pill Indicator */}
-        {active && (
-            <div className="absolute inset-x-1 inset-y-0 bg-ios-primary/10 dark:bg-ios-primary/20 rounded-2xl shadow-[0_0_15px_rgba(0,122,255,0.3)] border border-ios-primary/10 dark:border-ios-primary/20 animate-fade-in">
-                <div className="absolute inset-0 rounded-2xl border-t border-white/40 dark:border-white/20" />
-            </div>
-        )}
-
-        <div className="relative z-10 flex flex-col items-center gap-1">
+    }} className="flex flex-col items-center justify-center w-[20%] h-full group relative p-0.5">
+        <div className={clsx(
+            "relative z-10 flex flex-col items-center justify-center gap-0.5 transition-all duration-300 w-full h-full",
+            active ? "bg-gray-200 dark:bg-zinc-700 shadow-sm" : "bg-transparent",
+            // Shape & Position Logic for "Outward Pop" effect:
+            // Highlighting amplitude is now consistent (1 unit) across all tabs.
+            // 1. Home (First): mr-1 pulls background Left
+            // 2. Stats (Second): mr-1 pulls background Left
+            // 3. Add: Center
+            // 4. Ledgers (Third/Fourth): ml-1 pulls background Right
+            // 5. Settings (Last): ml-1 pulls background Right
+            position === 'first' && active ? "rounded-full mr-1" :
+                position === 'second' && active ? "rounded-full mr-1" :
+                    position === 'fourth' && active ? "rounded-full ml-1" :
+                        position === 'last' && active ? "rounded-full ml-1" :
+                            "rounded-full"
+        )}>
             <Icon
                 name={icon}
                 className={clsx(
-                    "w-6 h-6 transition-all duration-300",
-                    active ? "text-ios-primary scale-110 drop-shadow-sm" : "text-gray-400 dark:text-gray-500"
+                    "w-5 h-5 transition-all duration-300",
+                    active ? "text-ios-primary fill-current scale-105" : "text-gray-500 dark:text-gray-500"
                 )}
                 strokeWidth={active ? 2.5 : 2}
             />
             <span className={clsx(
-                "text-[10px] font-medium transition-colors duration-200",
-                active ? "text-ios-primary" : "text-gray-400 dark:text-gray-500"
+                "text-[10px] font-bold transition-colors duration-200",
+                active ? "text-ios-primary" : "text-gray-500 dark:text-gray-500"
             )}>
                 {label}
             </span>

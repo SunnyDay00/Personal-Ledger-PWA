@@ -218,7 +218,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     dbAPI.getCategories(),
                     dbAPI.getTransactions(),
                     dbAPI.getBackupLogs(),
-                    groupStoreAvailableRef.current ? db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order') : Promise.resolve([])
+                    groupStoreAvailableRef.current ? dbAPI.getCategoryGroups() : Promise.resolve([])
                 ]);
 
                 const loadedSettings = settings ? { ...DEFAULT_SETTINGS, ...settings } : DEFAULT_SETTINGS;
@@ -299,7 +299,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const syncGroupsToState = async () => {
             if (!isDBLoaded) return;
             try {
-                const groups = await db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order');
+                const groups = await dbAPI.getCategoryGroups();
                 if (groups.length > 0 && stateRef.current.categoryGroups.length === 0) {
                     dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groups } });
                 }
@@ -568,10 +568,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return true;
     };
 
-    // 从 IndexedDB 刷新分组到内存，保证界面能显示
     const reloadGroupsToState = useCallback(async () => {
         try {
-            const groups = await db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order');
+            const groups = await dbAPI.getCategoryGroups();
             dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groups } });
         } catch { }
     }, []);
@@ -659,7 +658,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             dbAPI.getLedgers(),
             dbAPI.getCategories(),
             dbAPI.getTransactions(),
-            hasGroupStore ? db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order') : Promise.resolve([]),
+            hasGroupStore ? dbAPI.getCategoryGroups() : Promise.resolve([]),
             db.settings.get('main')
         ]);
         dispatch({ type: 'RESTORE_DATA', payload: { ledgers: ledgersNew, categories: catsNew, categoryGroups: groupsNew, transactions: txsNew, settings: settingsRow?.value } });
@@ -771,7 +770,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             const pulled = await pullFromCloud(syncEndpoint, syncToken, syncUserId || 'default', sinceForPull);
             await mergeFromCloud(pulled);
             // 重新从本地 DB 取分组，确保 UI 状态刷新
-            const groupsReloaded = await db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order');
+            const groupsReloaded = await dbAPI.getCategoryGroups();
             dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groupsReloaded } });
             setSyncDirty(false);
             logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'success', file: 'D1 Sync', message: reason === 'manual' ? '手动同步成功' : '自动同步成功' });

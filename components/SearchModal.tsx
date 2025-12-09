@@ -22,11 +22,11 @@ export const SearchModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
 
     // Categories and groups for current ledger only
     const ledgerCategories = useMemo(() =>
-        state.categories.filter(c => c.ledgerId === state.currentLedgerId),
+        state.categories.filter(c => c.ledgerId === state.currentLedgerId && !c.isDeleted),
         [state.categories, state.currentLedgerId]
     );
     const ledgerGroups = useMemo(() =>
-        state.categoryGroups.filter(g => g.ledgerId === state.currentLedgerId),
+        state.categoryGroups.filter(g => g.ledgerId === state.currentLedgerId && !g.isDeleted),
         [state.categoryGroups, state.currentLedgerId]
     );
 

@@ -44,7 +44,7 @@ export const StatsView: React.FC = () => {
     // const [timeRange, setTimeRange] = useState<'week' | 'month' | 'year'>('month'); // Removed
     // const [currentDate, setCurrentDate] = useState(new Date()); // Removed
     const [chartType, setChartType] = useState<'pie' | 'bar' | 'line'>('pie');
-    const [pieType, setPieType] = useState<'expense' | 'income'>('expense');
+    const [dataType, setDataType] = useState<'expense' | 'income'>('expense');
     const [viewMode, setViewMode] = useState<'category' | 'group'>('category');
     const [showLedgerMenu, setShowLedgerMenu] = useState(false);
 
@@ -108,13 +108,18 @@ export const StatsView: React.FC = () => {
 
     // Chart Data Preparation
     const chartData = useMemo(() => {
+        // Common logic: Filter by dataType (Expense/Income)
+        const targetTxs = filteredData.filter(t => t.type === dataType);
+
+        // 1. Pie Chart Logic (unchanged concept, just updated variables)
         if (chartType === 'pie') {
-            // Group by Category based on selected pieType
             const map: Record<string, number> = {};
-            const targetTxs = filteredData.filter(t => t.type === pieType);
             if (viewMode === 'group') {
-                const groupMap: Record<string, string[]> = {};
-                state.categoryGroups.forEach(g => { groupMap[g.id] = g.categoryIds || []; });
+                state.categoryGroups.forEach(g => {
+                    if (g.ledgerId === currentLedgerId && !g.isDeleted) {
+                        // Init groups so empty ones might show? No, usually pie only shows positive
+                    }
+                });
                 targetTxs.forEach(t => {
                     const group = state.categoryGroups.find(g => g.categoryIds?.includes(t.categoryId) && !g.isDeleted && g.ledgerId === currentLedgerId);
                     const key = group ? group.name : '未分组';
@@ -129,44 +134,61 @@ export const StatsView: React.FC = () => {
             return Object.entries(map)
                 .map(([name, value]) => ({ name, value }))
                 .sort((a, b) => b.value - a.value);
-        } else {
-            // Time Series (Bar/Line) - Income vs Expense
-            const map: Record<string, { income: number; expense: number; label: string }> = {};
+        }
+
+        // 2. Bar/Line Logic - Single Series (Income OR Expense)
+        else {
+            // Time Series keys
+            let timeKeys: string[] = [];
+            const labelMap: Record<string, string> = {};
 
             if (timeRange === 'year') {
-                // Group by Month
                 for (let i = 0; i < 12; i++) {
-                    const label = `${i + 1}月`;
-                    map[i] = { income: 0, expense: 0, label };
+                    const k = `${i}`;
+                    timeKeys.push(k);
+                    labelMap[k] = `${i + 1}月`;
                 }
-                filteredData.forEach(t => {
-                    const month = getMonth(t.date);
-                    if (t.type === 'income') map[month].income += t.amount;
-                    else map[month].expense += t.amount;
-                });
             } else {
-                // Group by Day
-                // Init days
                 let curr = new Date(start);
                 while (curr <= end) {
-                    const key = format(curr, 'yyyy-MM-dd');
-                    const label = format(curr, 'dd');
-                    map[key] = { income: 0, expense: 0, label };
+                    const k = format(curr, 'yyyy-MM-dd');
+                    timeKeys.push(k);
+                    labelMap[k] = format(curr, 'dd');
                     curr.setDate(curr.getDate() + 1);
                 }
-                filteredData.forEach(t => {
-                    const key = format(t.date, 'yyyy-MM-dd');
-                    if (map[key]) {
-                        if (t.type === 'income') map[key].income += t.amount;
-                        else map[key].expense += t.amount;
-                    }
-                });
             }
-            return Object.values(map);
-        }
-    }, [filteredData, chartType, timeRange, start, end, categories, pieType, viewMode, state.categoryGroups]);
 
-    // Extreme Values - Explicitly typed to prevent "type 'never'" errors during build
+            // Initialize Data Structure: Array of { label, key, value }
+            const dataMap: Record<string, any> = {};
+            timeKeys.forEach(k => {
+                dataMap[k] = { label: labelMap[k], key: k, value: 0 };
+            });
+
+            // Fill Data - Use targetTxs which is already filtered by dataType
+            targetTxs.forEach(t => {
+                const timeKey = timeRange === 'year' ? `${getMonth(t.date)}` : format(t.date, 'yyyy-MM-dd');
+                if (dataMap[timeKey]) {
+                    dataMap[timeKey].value += t.amount;
+                }
+            });
+
+            return Object.values(dataMap);
+        }
+    }, [filteredData, chartType, timeRange, start, end, categories, dataType, viewMode, state.categoryGroups, currentLedgerId]);
+
+    // Derived: Get list of keys (Categories or Groups) present in the data for Stacked Bar / Multi Line
+    const dataKeys = useMemo(() => {
+        if (chartType === 'pie') return [];
+        const keys = new Set<string>();
+        chartData.forEach((d: any) => {
+            Object.keys(d).forEach(k => {
+                if (k !== 'label' && k !== 'key' && k !== 'total') keys.add(k);
+            });
+        });
+        return Array.from(keys);
+    }, [chartData, chartType]);
+
+    // Extreme Values
     const extremes = useMemo((): {
         maxExpTx: Transaction | null;
         maxIncTx: Transaction | null;
@@ -174,21 +196,16 @@ export const StatsView: React.FC = () => {
         maxIncPeriod: { date: string; amount: number } | null;
     } | null => {
         if (filteredData.length === 0) return null;
-
         let maxExpTx: Transaction | null = null;
         let maxIncTx: Transaction | null = null;
-
         const dayMap: Record<string, { inc: number, exp: number }> = {};
 
         filteredData.forEach(t => {
-            // Single Tx
             if (t.type === 'expense') {
-                if (!maxExpTx || t.amount > maxExpTx.amount) maxExpTx = t;
+                if (!maxExpTx || t.amount > (maxExpTx as Transaction).amount) maxExpTx = t;
             } else {
-                if (!maxIncTx || t.amount > maxIncTx.amount) maxIncTx = t;
+                if (!maxIncTx || t.amount > (maxIncTx as Transaction).amount) maxIncTx = t;
             }
-
-            // Grouping for Day/Month
             const key = timeRange === 'year' ? format(t.date, 'yyyy-MM') : format(t.date, 'yyyy-MM-dd');
             if (!dayMap[key]) dayMap[key] = { inc: 0, exp: 0 };
             if (t.type === 'income') dayMap[key].inc += t.amount;
@@ -208,14 +225,9 @@ export const StatsView: React.FC = () => {
 
     // Advanced Stats
     const advancedStats = useMemo(() => {
-        if (filteredData.length === 0) return { createdDate: Date.now(), topCat: null, avgDaily: 0, avgIncomeDaily: 0, avgTx: 0 };
+        if (filteredData.length === 0) return { topCat: null, avgDaily: 0, avgIncomeDaily: 0, avgTx: 0 };
 
-        // 1. Ledger Creation Info
-        let createdDate = Date.now();
-        const l = ledgers.find(l => l.id === currentLedgerId);
-        if (l) createdDate = l.createdAt;
-
-        // 2. Most Frequent Category
+        // Most Frequent Category
         const catCounts: Record<string, number> = {};
         filteredData.forEach(t => {
             const catName = categories.find(c => c.id === t.categoryId)?.name || '未知';
@@ -224,27 +236,27 @@ export const StatsView: React.FC = () => {
         const topCatEntry = Object.entries(catCounts).sort((a, b) => b[1] - a[1])[0];
         const topCat = topCatEntry ? { name: topCatEntry[0], count: topCatEntry[1] } : null;
 
-        // 3. Avg Daily Spending
+        // Avg Daily
         const totalExp = filteredData.reduce((acc, t) => t.type === 'expense' ? acc + t.amount : acc, 0);
         const totalInc = filteredData.reduce((acc, t) => t.type === 'income' ? acc + t.amount : acc, 0);
         const msPerDay = 1000 * 60 * 60 * 24;
-        // Calculate active days in range (or just total days in period? Usually total days in period is more meaningful for "Daily Budget")
-        const periodDays = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / msPerDay));
-        const avgDaily = totalExp / periodDays;
-        const avgIncomeDaily = totalInc / periodDays;
+        const daysDiff = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / msPerDay));
 
-        // 4. Avg Transaction Amount (General)
-        const totalAmount = filteredData.reduce((acc, t) => acc + t.amount, 0);
-        const avgTx = totalAmount / filteredData.length;
+        return {
+            topCat,
+            avgDaily: totalExp / daysDiff,
+            avgIncomeDaily: totalInc / daysDiff,
+            avgTx: (totalExp + totalInc) / filteredData.length
+        };
+    }, [filteredData, start, end, categories]);
 
-        return { createdDate, topCat, avgDaily, avgIncomeDaily, avgTx };
-    }, [filteredData, start, end, currentLedgerId, ledgers, categories]);
-
-    const COLORS = ['#007AFF', '#FF9500', '#34C759', '#AF52DE', '#FF2D55', '#5856D6', '#5AC8FA'];
+    const COLORS = ['#007AFF', '#FF9500', '#34C759', '#AF52DE', '#FF2D55', '#5856D6', '#5AC8FA', '#FFCC00', '#FF3B30', '#4CD964'];
 
     const selectedLedgerName = ledgers.find(l => l.id === currentLedgerId)?.name || '未知账本';
 
-    const currentPieTotal = pieType === 'expense' ? expense : income;
+    // Pie Total (now effectively "Current Chart Total" equivalent)
+    const currentPieTotal = dataType === 'expense' ? expense : income;
+
 
     return (
         <div className={clsx("h-full w-full bg-ios-bg", settings.enableAnimations && "animate-slide-up")}>
@@ -332,7 +344,7 @@ export const StatsView: React.FC = () => {
                     <div className="bg-white dark:bg-zinc-900 rounded-3xl p-5 shadow-sm border border-ios-border mb-6">
                         <div className="flex justify-between items-center mb-4">
                             <h3 className="text-xs font-semibold text-ios-subtext uppercase">
-                                {chartType === 'pie' ? (pieType === 'expense' ? '支出占比' : '收入占比') : chartType === 'bar' ? '收支对比' : '收支走势'}
+                                {chartType === 'pie' ? (dataType === 'expense' ? '支出占比' : '收入占比') : chartType === 'bar' ? '收支对比' : '收支走势'}
                             </h3>
                             <div className="flex bg-gray-100 dark:bg-zinc-800 rounded-lg p-0.5">
                                 <button onClick={() => setChartType('pie')} className={clsx("p-1.5 rounded-md", chartType === 'pie' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-primary" : "text-ios-subtext")}>
@@ -347,25 +359,26 @@ export const StatsView: React.FC = () => {
                             </div>
                         </div>
 
-                        {/* Pie Chart Type Toggle */}
-                        {chartType === 'pie' && (
-                            <div className="flex justify-between items-center mb-4 gap-3">
-                                <div className="flex bg-gray-100 dark:bg-zinc-800 p-0.5 rounded-lg">
-                                    <button onClick={() => setPieType('expense')} className={clsx("px-4 py-1 text-xs font-medium rounded-md transition-all", pieType === 'expense' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-text" : "text-ios-subtext")}>支出</button>
-                                    <button onClick={() => setPieType('income')} className={clsx("px-4 py-1 text-xs font-medium rounded-md transition-all", pieType === 'income' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-text" : "text-ios-subtext")}>收入</button>
-                                </div>
+                        <div className="flex justify-between items-center mb-4 gap-3">
+                            <div className="flex bg-gray-100 dark:bg-zinc-800 p-0.5 rounded-lg">
+                                <button onClick={() => setDataType('expense')} className={clsx("px-4 py-1 text-xs font-medium rounded-md transition-all", dataType === 'expense' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-text" : "text-ios-subtext")}>支出</button>
+                                <button onClick={() => setDataType('income')} className={clsx("px-4 py-1 text-xs font-medium rounded-md transition-all", dataType === 'income' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-text" : "text-ios-subtext")}>收入</button>
+                            </div>
+
+                            {/* Category/Group Toggle - Only for Pie Chart as breakdown is complex/not requested for others now */}
+                            {chartType === 'pie' && (
                                 <div className="flex bg-gray-100 dark:bg-zinc-800 p-0.5 rounded-lg">
                                     <button onClick={() => setViewMode('category')} className={clsx("px-3 py-1 text-xs font-medium rounded-md transition-all", viewMode === 'category' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-text" : "text-ios-subtext")}>按分类</button>
                                     <button onClick={() => setViewMode('group')} className={clsx("px-3 py-1 text-xs font-medium rounded-md transition-all", viewMode === 'group' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-text" : "text-ios-subtext")}>按分组</button>
                                 </div>
-                            </div>
-                        )}
+                            )}
+                        </div>
 
                         <div className="h-64 w-full">
                             <ResponsiveContainer width="100%" height="100%">
                                 {chartType === 'pie' ? (
                                     <PieChart>
-                                        <Pie data={chartData} innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value">
+                                        <Pie data={chartData} innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value" isAnimationActive={false}>
                                             {chartData.map((entry: any, index: number) => (
                                                 <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} stroke="none" />
                                             ))}
@@ -378,8 +391,14 @@ export const StatsView: React.FC = () => {
                                         <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
                                         <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
                                         <Tooltip cursor={{ fill: 'rgba(0,0,0,0.05)' }} content={<CustomTooltip />} />
-                                        <Bar dataKey="income" name="收入" fill="#34C759" radius={[4, 4, 0, 0]} maxBarSize={40} />
-                                        <Bar dataKey="expense" name="支出" fill="#FF3B30" radius={[4, 4, 0, 0]} maxBarSize={40} />
+                                        <Bar
+                                            dataKey="value"
+                                            name={dataType === 'income' ? "收入" : "支出"}
+                                            fill={dataType === 'income' ? "#34C759" : "#FF3B30"}
+                                            radius={[4, 4, 0, 0]}
+                                            maxBarSize={40}
+                                            isAnimationActive={false}
+                                        />
                                     </BarChart>
                                 ) : (
                                     <LineChart data={chartData} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
@@ -387,8 +406,15 @@ export const StatsView: React.FC = () => {
                                         <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
                                         <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
                                         <Tooltip content={<CustomTooltip />} />
-                                        <Line type="monotone" dataKey="income" name="收入" stroke="#34C759" strokeWidth={2} dot={false} />
-                                        <Line type="monotone" dataKey="expense" name="支出" stroke="#FF3B30" strokeWidth={2} dot={false} />
+                                        <Line
+                                            type="monotone"
+                                            dataKey="value"
+                                            name={dataType === 'income' ? "收入" : "支出"}
+                                            stroke={dataType === 'income' ? "#34C759" : "#FF3B30"}
+                                            strokeWidth={2}
+                                            dot={false}
+                                            isAnimationActive={false}
+                                        />
                                     </LineChart>
                                 )}
                             </ResponsiveContainer>
