@@ -3,7 +3,7 @@ import { KeyboardResize } from '@capacitor/keyboard';
 
 const config: CapacitorConfig = {
   appId: 'com.personal.ledger.pwa',
-  appName: 'Personal Ledger',
+  appName: '个人记账本',
   webDir: 'dist',
   plugins: {
     Keyboard: {

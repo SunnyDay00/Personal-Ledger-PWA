@@ -4,7 +4,7 @@ android {
     namespace "com.personal.ledger.pwa"
     compileSdk rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "个人记账本"
+        applicationId "com.personal.ledger.pwa"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 6
