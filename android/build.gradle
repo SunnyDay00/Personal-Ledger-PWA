@@ -39,10 +39,17 @@ subprojects {
         }
         
         // Force Kotlin to use Java 17
-        project.tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
-             kotlinOptions {
-                 jvmTarget = "17"
-             }
+        // Force Kotlin to use Java 17 (Dynamic Safe Mode)
+        project.tasks.configureEach { task ->
+            if (task.name.toLowerCase().contains("kotlin")) {
+                 try {
+                     task.kotlinOptions {
+                         jvmTarget = "17"
+                     }
+                 } catch (e) {
+                     // ignore
+                 }
+            }
         }
     }
 }
