@@ -2,6 +2,14 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '6.8.0',
+      date: '2025/12/09',
+      content: [
+          '修复IOS端导出数据（JSON）问题。',
+          '添加打包成安卓APK的配置。'
+      ]
+  },
+  {
       version: '6.7.0',
       date: '2025/12/09',
       content: [

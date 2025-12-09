@@ -4,6 +4,10 @@ import { twMerge } from 'tailwind-merge';
 import { AppState, Transaction, Category, Ledger } from './types';
 import { format } from 'date-fns';
 
+import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share';
+import { Capacitor } from '@capacitor/core';
+
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
@@ -25,14 +29,41 @@ export function generateId(): string {
   return Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
 }
 
-export function exportToJson(data: object, filename: string) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+export async function exportToJson(data: object, filename: string) {
+  if (Capacitor.isNativePlatform()) {
+    try {
+      await Filesystem.writeFile({
+        path: filename,
+        data: JSON.stringify(data, null, 2),
+        directory: Directory.Cache,
+        encoding: Encoding.UTF8,
+      });
+
+      const uriResult = await Filesystem.getUri({
+        directory: Directory.Cache,
+        path: filename,
+      });
+
+      await Share.share({
+        title: 'Export Backup',
+        text: 'Backup JSON file',
+        url: uriResult.uri,
+        dialogTitle: 'Export Backup',
+      });
+    } catch (e) {
+      console.error('Export failed', e);
+      alert('导出失败: ' + (e as any).message);
+    }
+  } else {
+    // Web Fallback
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 }
 
 // Robust CSV Generator including isDeleted
@@ -243,15 +274,44 @@ export async function readCsvFileWithEncoding(file: File): Promise<string> {
   return new TextDecoder('utf-8').decode(bytes);
 }
 
-export function exportToCsv(transactions: Transaction[], categories: Category[], ledgers: Ledger[], filename: string) {
+export async function exportToCsv(transactions: Transaction[], categories: Category[], ledgers: Ledger[], filename: string) {
   const csvContent = transactionsToCsv(transactions, categories, ledgers);
-  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+  
+  if (Capacitor.isNativePlatform()) {
+    try {
+      // Write with BOM for Excel compatibility
+      await Filesystem.writeFile({
+        path: filename,
+        data: '\uFEFF' + csvContent,
+        directory: Directory.Cache,
+        encoding: Encoding.UTF8,
+      });
+
+      const uriResult = await Filesystem.getUri({
+        directory: Directory.Cache,
+        path: filename,
+      });
+
+      await Share.share({
+        title: 'Export CSV',
+        text: 'Export CSV file',
+        url: uriResult.uri,
+        dialogTitle: 'Export CSV',
+      });
+    } catch (e) {
+      console.error('Export CSV failed', e);
+      alert('导出失败: ' + (e as any).message);
+    }
+  } else {
+    // Web Fallback
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 }
 
 export function readJsonFile(file: File): Promise<any> {
