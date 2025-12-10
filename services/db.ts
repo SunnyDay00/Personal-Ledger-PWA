@@ -3,7 +3,7 @@ import { Transaction, Ledger, Category, CategoryGroup, AppSettings, OperationLog
 import { loadState } from './storage';
 
 // 再次 bump DB 名称，彻底规避旧 schema 残留导致 objectStore not found。
-export const DB_NAME = 'FinanceDB_v8';
+export const DB_NAME = 'FinanceDB_v9';
 const LEGACY_DB_NAMES = ['FinanceDB_v7', 'FinanceDB_v6', 'FinanceDB_v5', 'FinanceDB_v4', 'FinanceDB_v3', 'FinanceDB'];
 
 export class FinanceDB extends Dexie {
@@ -14,6 +14,8 @@ export class FinanceDB extends Dexie {
   settings!: Table<{ key: string; value: AppSettings }>; // Singleton key='main'
   operationLogs!: Table<OperationLog>;
   backupLogs!: Table<BackupLog>;
+  images!: Table<{ key: string; blob: Blob; size: number; lastAccess: number }>;
+  pending_uploads!: Table<{ key: string; blob: Blob; createdAt: number }>;
 
   constructor() {
     super(DB_NAME);
@@ -26,7 +28,16 @@ export class FinanceDB extends Dexie {
       operationLogs: 'id, timestamp, type',
       backupLogs: 'id, timestamp',
     });
+    // Add Image Cache
+    (this as any).version(2).stores({
+        images: 'key, lastAccess, size'
+    });
+    // Add Offline Upload Queue
+    (this as any).version(3).stores({
+        pending_uploads: 'key, createdAt'
+    });
   }
+
 }
 
 export let db = new FinanceDB();

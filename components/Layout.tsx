@@ -13,6 +13,7 @@ import { useApp } from '../contexts/AppContext';
 import { clsx } from 'clsx';
 import { feedback } from '../services/feedback';
 import { App, URLOpenListenerEvent } from '@capacitor/app';
+import { Clipboard } from '@capacitor/clipboard';
 import { Transaction } from '../types';
 import { LiquidFilter } from './LiquidFilter';
 
@@ -24,6 +25,7 @@ export const Layout: React.FC = () => {
     const [showBudget, setShowBudget] = useState(false);
     const [showToast, setShowToast] = useState(false);
     const [initialAddData, setInitialAddData] = useState<Partial<Transaction> | undefined>(undefined);
+    const [clipboardImage, setClipboardImage] = useState<string | undefined>(undefined);
 
     // Handle Deep Links (URL Scheme)
     useEffect(() => {
@@ -75,6 +77,15 @@ export const Layout: React.FC = () => {
 
                 setShowAdd(true);
                 feedback.play('success');
+
+                // Check clipboard
+                Clipboard.read().then(({ type, value }) => {
+                    if (type === 'image' && value) {
+                        setClipboardImage(value);
+                    } else {
+                        setClipboardImage(undefined);
+                    }
+                }).catch(() => setClipboardImage(undefined));
             } catch (e) {
                 console.error('Error parsing URL:', e);
             }
@@ -126,7 +137,7 @@ export const Layout: React.FC = () => {
             </main>
 
             {/* Overlays */}
-            {showAdd && <AddView onClose={() => { setShowAdd(false); setInitialAddData(undefined); }} initialTransaction={initialAddData} />}
+            {showAdd && <AddView onClose={() => { setShowAdd(false); setInitialAddData(undefined); setClipboardImage(undefined); }} initialTransaction={initialAddData} initialClipboardImage={clipboardImage} />}
             {showSearch && <SearchModal onClose={() => setShowSearch(false)} />}
             {showBudget && <BudgetModal onClose={() => setShowBudget(false)} />}
 

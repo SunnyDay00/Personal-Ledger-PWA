@@ -7,6 +7,7 @@ import { db, initAndMigrateDB, dbAPI, resetDB, ensureStoresReady } from '../serv
 import { pushToCloud, pullFromCloud } from '../services/d1Sync';
 import { SyncService } from '../services/sync';
 import { feedback } from '../services/feedback';
+import { imageService } from '../services/imageService';
 
 const initialState: AppState = {
     ledgers: INITIAL_LEDGERS,
@@ -608,7 +609,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 const normalized: Transaction = {
                     id: t.id, ledgerId: t.ledger_id, amount: t.amount, type: t.type, categoryId: t.category_id,
                     date: t.date, note: t.note || '', createdAt: t.created_at || t.date || Date.now(),
-                    updatedAt: t.updated_at || t.date || Date.now(), isDeleted: !!t.is_deleted
+                    updatedAt: t.updated_at || t.date || Date.now(), isDeleted: !!t.is_deleted,
+                    attachments: t.attachments ? (Array.isArray(t.attachments) ? t.attachments : JSON.parse(t.attachments)) : []
                 };
                 const local = await db.transactions.get(normalized.id);
                 // 删除标记强制覆盖，保证跨设备删除生效
@@ -684,6 +686,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const hasGroupStore = true; // 始终尝试同步分组，避免误判跳过
         dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
         try {
+            // Priority: Sync pending images first
+            try {
+                await imageService.syncPendingImages();
+            } catch (e) {
+                console.warn('Image sync warning:', e);
+            }
+
             // 如果本地为空（常见于重置/首次恢复），强制全量 push/pull，避免 lastSyncVersion 过大导致云端数据未拉取
             let sinceForPush = reason === 'manual' ? 0 : (lastSyncVersion || 0);
             let sinceForPull = reason === 'manual' ? 0 : (lastSyncVersion || 0);
@@ -752,8 +761,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 category_id: t.categoryId || t.category_id,
                 date: t.date,
                 note: t.note || '',
+                attachments: t.attachments || [],
                 created_at: t.createdAt || t.created_at || t.date || Date.now(),
-                updated_at: t.updatedAt || t.updated_at || t.date || Date.now(),
+                updatedAt: t.updatedAt || t.updated_at || t.date || Date.now(),
                 is_deleted: !!t.isDeleted
             });
 

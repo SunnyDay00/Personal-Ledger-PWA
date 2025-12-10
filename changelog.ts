@@ -2,6 +2,13 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '7.0.0',
+      date: '2025/12/10',
+      content: [
+          '添加账目附带图片的功能，使用cloudflareR2数据库存储。'
+      ]
+  },
+  {
       version: '6.8.0',
       date: '2025/12/09',
       content: [

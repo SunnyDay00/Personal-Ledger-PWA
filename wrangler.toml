@@ -1,2 +1,7 @@
 name = "personalledger"
-pages_build_output_dir = "dist"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[[r2_buckets]]
+binding = "IMAGES_BUCKET"
+bucket_name = "ledger-images"

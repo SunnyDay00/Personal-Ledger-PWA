@@ -8,13 +8,23 @@ import { generateId } from '../utils';
 import { clsx } from 'clsx';
 import { format, addDays, isSameDay } from 'date-fns';
 import { Keyboard } from '@capacitor/keyboard';
+import { imageService } from '../services/imageService';
 
 interface AddViewProps {
     onClose: () => void;
     initialTransaction?: Partial<Transaction>;
+    initialClipboardImage?: string;
 }
 
-export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction }) => {
+// Helper for preview
+interface AttachmentItem {
+    id: string;
+    type: 'key' | 'blob';
+    val: string | Blob;
+    url: string;
+}
+
+export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, initialClipboardImage }) => {
     const { state, addTransaction, updateTransaction } = useApp();
     const [type, setType] = useState<TransactionType>('expense');
     const [amountStr, setAmountStr] = useState('0');
@@ -23,10 +33,13 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
     const [date, setDate] = useState(new Date());
     const [isNoteFocused, setIsNoteFocused] = useState(false);
     const noteInputRef = useRef<HTMLInputElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    // Attachment State
+    const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
+    const [isUploading, setIsUploading] = useState(false);
 
     // KEYBOARD STRATEGY: CAPACITOR PLUGIN EVENTS
-    // resize: 'none' in config.
-    // We listen for native keyboard height and apply it as padding-bottom.
     const [keyboardHeight, setKeyboardHeight] = useState(0);
 
     useEffect(() => {
@@ -35,11 +48,8 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
 
         const setupListeners = async () => {
             showListener = await Keyboard.addListener('keyboardWillShow', info => {
-                // Ensure we get the correct height. 
-                // Sometimes info.keyboardHeight is 0 or incorrect initially, but typically reliable on iOS.
                 if (info.keyboardHeight > 0) {
                     setKeyboardHeight(info.keyboardHeight);
-                    // Lock scroll to prevent bouncing
                     window.scrollTo(0, 0);
                 }
             });
@@ -74,6 +84,28 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
             if (initialTransaction.categoryId) setSelectedCategoryId(initialTransaction.categoryId);
             if (initialTransaction.note) setNote(initialTransaction.note);
             if (initialTransaction.date) setDate(new Date(initialTransaction.date));
+            if (initialTransaction.attachments && initialTransaction.attachments.length > 0) {
+                // For existing R2 keys, we just use the key as URL (imageService handles proxy if needed, or we assume key is enough for now)
+                // NOTE: To display R2 private images, we need to fetch distinct blob or use a proxy route.
+                // For simplicity in Phase 2, we assume we can build a URL.
+                // But wait, the Worker requires Auth for GET /image/:key. <img> tag won't send header.
+                // So we must fetch blobs for existing images OR use a signed token/cookie.
+                // We will async fetch blobs for existing keys.
+                const loadExisting = async () => {
+                    const items: AttachmentItem[] = [];
+                    for (const key of initialTransaction.attachments!) {
+                        try {
+                            const blob = await imageService.fetchImageBlob(key);
+                            const url = URL.createObjectURL(blob);
+                            items.push({ id: key, type: 'key', val: key, url: url });
+                        } catch (e) {
+                            console.warn("Failed to load image", key);
+                        }
+                    }
+                    setAttachments(items);
+                };
+                loadExisting();
+            }
         }
         if (categories.length > 0) {
             const isValid = selectedCategoryId && categories.some(c => c.id === selectedCategoryId);
@@ -83,10 +115,77 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
         }
     }, [type, categories, initialTransaction]);
 
+    // Handle Initial Clipboard Image (from Layout)
+    useEffect(() => {
+        if (initialClipboardImage) {
+            const processClipboard = async () => {
+                try {
+                    setIsUploading(true);
+                    const base64 = initialClipboardImage.startsWith('data:') ? initialClipboardImage : `data:image/png;base64,${initialClipboardImage}`;
+                    const res = await fetch(base64);
+                    const blob = await res.blob();
+                    const file = new File([blob], `clipboard_${Date.now()}.png`, { type: blob.type || 'image/png' });
+                    const key = await imageService.uploadImage(file);
+                    const url = URL.createObjectURL(blob);
+                    setAttachments(prev => [...prev, { id: key, type: 'key', val: key, url }]);
+                    feedback.play('success');
+                } catch (e) {
+                    console.error("Clipboard paste failed", e);
+                    feedback.play('error');
+                } finally {
+                    setIsUploading(false);
+                }
+            };
+            processClipboard();
+        }
+    }, [initialClipboardImage]);
+
     const quickNotes = useMemo(() => {
         if (!selectedCategoryId) return [];
         return state.settings.categoryNotes?.[selectedCategoryId] || [];
     }, [selectedCategoryId, state.settings.categoryNotes]);
+
+    // Handle Paste
+    useEffect(() => {
+        const handlePaste = (e: ClipboardEvent) => {
+            if (e.clipboardData?.items) {
+                for (const item of e.clipboardData.items) {
+                    if (item.type.indexOf('image') !== -1) {
+                        e.preventDefault();
+                        const blob = item.getAsFile();
+                        if (blob) addBlobAttachment(blob);
+                    }
+                }
+            }
+        };
+        // Listen globally to capture paste even if input not focused (sometimes helpful on mobile if window focused)
+        window.addEventListener('paste', handlePaste);
+        return () => window.removeEventListener('paste', handlePaste);
+    }, []);
+
+    const addBlobAttachment = (blob: Blob) => {
+        const url = URL.createObjectURL(blob);
+        setAttachments(prev => [...prev, {
+            id: generateId(),
+            type: 'blob',
+            val: blob,
+            url
+        }]);
+        feedback.play('success');
+    };
+
+    const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files.length > 0) {
+            Array.from(e.target.files).forEach(file => addBlobAttachment(file));
+        }
+        // reset
+        if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
+    const removeAttachment = (id: string) => {
+        if (!confirm("确定要删除这张图片吗？\n注意：保存账目后，该图片将从本地和云端永久删除，不可恢复。")) return;
+        setAttachments(prev => prev.filter(a => a.id !== id));
+    };
 
     const handleKeyPress = (key: string) => {
         if (key === 'backspace') {
@@ -106,31 +205,79 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
         }
     };
 
-    const handleSubmit = () => {
+    const handleSubmit = async () => {
         const amount = parseFloat(amountStr);
         if (amount <= 0 || !selectedCategoryId) return;
+        if (isUploading) return;
 
-        if (initialTransaction && initialTransaction.id) {
-            updateTransaction({
-                ...initialTransaction,
-                id: initialTransaction.id,
-                ledgerId: initialTransaction.ledgerId || state.currentLedgerId,
-                updatedAt: Date.now(),
-                amount, type, categoryId: selectedCategoryId, date: date.getTime(), note
-            } as Transaction);
-        } else {
-            addTransaction({
-                id: generateId(),
+        setIsUploading(true);
+        const finalKeys: string[] = [];
+        const removedKeys: string[] = [];
+
+        try {
+            // Process Attachments
+            for (const item of attachments) {
+                if (item.type === 'key') {
+                    finalKeys.push(item.val as string);
+                } else if (item.type === 'blob') {
+                    // Save locally first (returns key)
+                    const key = await imageService.saveLocalImage(item.val as Blob);
+                    finalKeys.push(key);
+                }
+            }
+
+            // Detect deleted remote images
+            if (initialTransaction && initialTransaction.attachments) {
+                const initialKeys = initialTransaction.attachments;
+                for (const k of initialKeys) {
+                    if (!finalKeys.includes(k)) {
+                        removedKeys.push(k);
+                    }
+                }
+            }
+
+            // Execute deletions (Fire and forget, don't block save)
+            if (removedKeys.length > 0) {
+                Promise.all(removedKeys.map(async (k) => {
+                    await imageService.deleteLocalImage(k);
+                    await imageService.deleteRemoteImage(k);
+                })).catch(e => console.warn("Deletion error:", e));
+            }
+
+            const txData = {
                 ledgerId: state.currentLedgerId,
                 amount, type, categoryId: selectedCategoryId, date: date.getTime(), note,
-                createdAt: Date.now(),
-            });
+                attachments: finalKeys,
+            };
+
+            if (initialTransaction && initialTransaction.id) {
+                updateTransaction({
+                    ...initialTransaction,
+                    ...txData,
+                    id: initialTransaction.id,
+                    updatedAt: Date.now(),
+                    createdAt: initialTransaction.createdAt || Date.now(),
+                    isDeleted: initialTransaction.isDeleted,
+                } as Transaction);
+            } else {
+                addTransaction({
+                    ...txData,
+                    id: generateId(),
+                    createdAt: Date.now(),
+                    isDeleted: false,
+                });
+            }
+            setAmountStr('0');
+            setNote('');
+            setAttachments([]);
+            feedback.play('success');
+            feedback.vibrate('success');
+            onClose();
+        } catch (e: any) {
+            alert("保存失败: " + e.message);
+        } finally {
+            setIsUploading(false);
         }
-        setAmountStr('0');
-        setNote('');
-        feedback.play('success');
-        feedback.vibrate('success');
-        onClose();
     };
 
     const displayAmount = useMemo(() => {
@@ -140,21 +287,13 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
     }, [amountStr]);
 
     return (
-        // Root Container:
-        // - fixed inset-0: Occupies full screen (behind status bar & home indicator)
-        // - bg-ios-bg: Background color
-        // - transition-all: Smooth padding change
-        // Padding Bottom Logic:
-        // - If keyboard open: Use exact keyboard height.
-        // - If keyboard closed: Use safe area inset (for iPhone X+ home bar) or 16px if 0.
         <div
             className={clsx(
                 "fixed inset-0 z-50 flex flex-col bg-ios-bg overflow-hidden w-full h-full",
                 state.settings.enableAnimations && "animate-slide-up",
-                "transition-[padding] duration-300 ease-out" // Smooth transition for padding
+                "transition-[padding] duration-300 ease-out"
             )}
             style={{
-                // Explicitly use pixel value for keyboard
                 paddingBottom: keyboardHeight > 0 ? `${keyboardHeight}px` : '0px'
             }}
         >
@@ -169,9 +308,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
                 <div className="w-10"></div>
             </div>
 
-            {/* 2. Content Area (Flex Grow + min-h-0) 
-                Shrinks when padding-bottom pushes the Footer up.
-            */}
+            {/* 2. Content Area */}
             <div className="flex-1 overflow-y-auto no-scrollbar relative min-h-0" onClick={() => { if (isNoteFocused) setIsNoteFocused(false); }}>
                 <div className="grid gap-y-6 p-4" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
                     {categories.map(cat => (
@@ -199,27 +336,47 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
                 </div>
             </div>
 
-            {/* 3. Footer (Input + Keypad) 
-                Pinned to bottom of the content box. 
-                Because we padded the ROOT container, this Footer sits ON TOP of the padding (i.e., on top of the keyboard).
-            */}
+            {/* 3. Footer */}
             <div className={clsx(
                 "bg-white dark:bg-zinc-900 rounded-t-3xl shadow-[0_-5px_20px_rgba(0,0,0,0.1)] border-t border-white/10 shrink-0",
-                // Removed transition-transform here, handled by padding
             )}>
+                {/* Pending Attachments Row */}
+                {attachments.length > 0 && (
+                    <div className="flex gap-3 overflow-x-auto no-scrollbar px-5 py-3 border-b border-ios-border bg-gray-50 dark:bg-zinc-900/50">
+                        {attachments.map((att) => (
+                            <div key={att.id} className="relative group shrink-0 w-16 h-16 rounded-lg overflow-hidden border border-gray-200 dark:border-zinc-700">
+                                <img src={att.url} className="w-full h-full object-cover" alt="attachment" />
+                                <button onClick={() => removeAttachment(att.id)} className="absolute top-0 right-0 p-1 bg-black/50 text-white rounded-bl-lg">
+                                    <Icon name="X" className="w-3 h-3" />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
                 {/* Note Input Row */}
                 <div className="px-5 py-3 border-b border-ios-border flex items-center gap-4 relative z-20">
-                    <div className="flex items-center gap-2 bg-gray-100 dark:bg-zinc-800 px-3 py-1.5 rounded-xl flex-1">
-                        <Icon name="Edit3" className="w-4 h-4 text-ios-subtext" />
+                    <div className="flex items-center gap-2 bg-gray-100 dark:bg-zinc-800 px-3 py-1.5 rounded-xl flex-1 focus-within:ring-2 focus-within:ring-ios-primary/20 transition-all">
+                        {/* Image Button */}
+                        <button onClick={() => fileInputRef.current?.click()} className="text-ios-subtext active:text-ios-primary active:scale-95 transition-all">
+                            <Icon name="Image" className="w-5 h-5" />
+                        </button>
+                        <input type="file" hidden ref={fileInputRef} accept="image/*" multiple onChange={handleFileSelect} />
+
                         <input
                             ref={noteInputRef}
                             type="text"
-                            placeholder="添加备注..."
+                            placeholder={attachments.length > 0 ? "添加备注..." : "点击粘贴图片或备注..."}
                             value={note}
                             onFocus={() => setIsNoteFocused(true)}
                             onBlur={() => setIsNoteFocused(false)}
                             onChange={(e) => setNote(e.target.value)}
-                            className="bg-transparent text-sm placeholder:text-ios-subtext focus:outline-none flex-1 text-ios-text"
+                            onPaste={(e) => {
+                                // Redundant if global listener works, but safer to keep default behavior for text
+                                // If image handled by global, stop propagation?
+                                // Let's rely on global or specific check.
+                            }}
+                            className="bg-transparent text-sm placeholder:text-ios-subtext focus:outline-none flex-1 text-ios-text min-w-0"
                         />
                     </div>
                     <div className={clsx(
@@ -266,7 +423,9 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction })
                         {['7', '8', '9'].map(k => <Key key={k} label={k} onClick={() => handleKeyPress(k)} />)}
                         <Key label="." onClick={() => handleKeyPress('.')} />
                         <Key label="0" onClick={() => handleKeyPress('0')} />
-                        <button onClick={handleSubmit} className="col-span-2 bg-ios-primary text-white text-lg font-medium active:bg-blue-600 transition-colors">{initialTransaction ? '保存' : '完成'}</button>
+                        <button onClick={handleSubmit} disabled={isUploading} className="col-span-2 bg-ios-primary text-white text-lg font-medium active:bg-blue-600 transition-colors disabled:opacity-50 flex items-center justify-center">
+                            {isUploading ? <Icon name="Loader" className="animate-spin w-5 h-5" /> : initialTransaction ? '保存' : '完成'}
+                        </button>
                     </div>
                 </div>
             </div>

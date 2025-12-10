@@ -7,6 +7,7 @@ import { formatCurrency, getWeekRange, getMonthRange, getYearRange } from '../ut
 import { format, isSameDay, addWeeks, addMonths, addYears, addDays } from 'date-fns';
 import { Transaction, Category } from '../types';
 import { AddView } from './AddView';
+import { ImagePreview } from './ImagePreview';
 import { clsx } from 'clsx';
 
 interface HomeViewProps {
@@ -26,6 +27,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
     const [showBatchEdit, setShowBatchEdit] = useState(false);
+    const [previewKeys, setPreviewKeys] = useState<string[] | null>(null);
 
     useEffect(() => {
         if (settings.budget.enabled) {
@@ -263,13 +265,36 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
                                                         <Icon name={category?.icon || 'Circle'} className="w-4 h-4" />
                                                     </div>
                                                     <div className="flex flex-col">
-                                                        <div className="text-sm font-medium text-ios-text">{category?.name}</div>
+                                                        <div className="text-sm font-medium text-ios-text flex items-center gap-1.5 align-middle">
+                                                            <span>{category?.name}</span>
+                                                            {t.attachments && t.attachments.length > 0 && (
+                                                                <button onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    feedback.play('click');
+                                                                    setPreviewKeys(t.attachments);
+                                                                }} className="flex items-center gap-0.5 ml-1 active:opacity-50 opacity-70 hover:opacity-100 transition-opacity">
+                                                                    <Icon
+                                                                        name="Image"
+                                                                        className="w-4 h-4 text-ios-primary"
+                                                                        strokeWidth={2.5}
+                                                                    />
+                                                                    {t.attachments.length > 1 && (
+                                                                        <span className="text-[10px] font-bold text-ios-primary">
+                                                                            {t.attachments.length}
+                                                                        </span>
+                                                                    )}
+                                                                </button>
+                                                            )}
+
+                                                        </div>
                                                         <div className="text-[10px] text-ios-subtext flex gap-1">
                                                             <span>{format(t.createdAt, 'HH:mm')}</span>
                                                             {t.note && <span>· {t.note}</span>}
                                                         </div>
                                                     </div>
                                                 </div>
+
+
                                                 <div className="flex items-center gap-3">
                                                     <div className={`font-semibold text-sm tabular-nums ${t.type === 'expense' ? 'text-ios-text' : 'text-green-500'}`}>
                                                         {t.type === 'expense' ? '-' : '+'}{formatCurrency(t.amount).replace('¥', '')}
@@ -296,19 +321,22 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
                 </div>
             </div>
 
-            {isSelectionMode && (
-                <div className="absolute bottom-0 left-0 right-0 p-4 bg-white/90 dark:bg-zinc-900/90 backdrop-blur-xl border-t border-gray-200 dark:border-zinc-800 flex justify-between items-center z-50 pb-[env(safe-area-inset-bottom)]">
-                    <span className="text-sm text-ios-subtext">已选 {selectedIds.size} 项</span>
-                    <div className="flex gap-3">
-                        <button onClick={() => setShowBatchEdit(true)} disabled={selectedIds.size === 0} className="px-4 py-2 bg-blue-500 text-white rounded-lg text-sm font-medium disabled:opacity-50">批量编辑</button>
-                        <button onClick={handleBatchDelete} disabled={selectedIds.size === 0} className="px-4 py-2 bg-red-500 text-white rounded-lg text-sm font-medium disabled:opacity-50">批量删除</button>
+            {
+                isSelectionMode && (
+                    <div className="absolute bottom-0 left-0 right-0 p-4 bg-white/90 dark:bg-zinc-900/90 backdrop-blur-xl border-t border-gray-200 dark:border-zinc-800 flex justify-between items-center z-50 pb-[env(safe-area-inset-bottom)]">
+                        <span className="text-sm text-ios-subtext">已选 {selectedIds.size} 项</span>
+                        <div className="flex gap-3">
+                            <button onClick={() => setShowBatchEdit(true)} disabled={selectedIds.size === 0} className="px-4 py-2 bg-blue-500 text-white rounded-lg text-sm font-medium disabled:opacity-50">批量编辑</button>
+                            <button onClick={handleBatchDelete} disabled={selectedIds.size === 0} className="px-4 py-2 bg-red-500 text-white rounded-lg text-sm font-medium disabled:opacity-50">批量删除</button>
+                        </div>
                     </div>
-                </div>
-            )}
+                )
+            }
 
             {showBatchEdit && <BatchEditModal categories={categories} onClose={() => setShowBatchEdit(false)} onSave={handleBatchUpdate} />}
-            {editingTransaction && <AddView onClose={() => setEditingTransaction(null)} initialTransaction={editingTransaction} />}
-        </div>
+            {editingTransaction && <AddView onClose={() => setEditingTransaction(null)} initialTransaction={editingTransaction || undefined} />}
+            {previewKeys && <ImagePreview keys={previewKeys} onClose={() => setPreviewKeys(null)} />}
+        </div >
     );
 };
 

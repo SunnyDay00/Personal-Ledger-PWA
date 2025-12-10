@@ -14,7 +14,10 @@ import { Ledger, Category } from '../types';
 import { feedback } from '../services/feedback';
 import { UsageStatsModal } from './UsageStatsModal';
 
-type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'history' | 'layout' | 'theme' | 'about';
+import { imageService } from '../services/imageService';
+
+type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'history' | 'layout' | 'theme' | 'about' | 'storage';
+
 
 const SettingsGroup: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
   <div className="flex flex-col mb-6">
@@ -97,6 +100,13 @@ export const SettingsView: React.FC = () => {
     name: '',
     categoryIds: [],
   });
+
+  const [cacheStats, setCacheStats] = useState({ count: 0, size: 0 });
+  useEffect(() => {
+    if (page === 'storage') {
+      imageService.getCacheStats().then(setCacheStats);
+    }
+  }, [page]);
 
   // Viewport management for iOS keyboard
   const [visualViewport, setVisualViewport] = useState({
@@ -449,6 +459,48 @@ export const SettingsView: React.FC = () => {
     dispatch({ type: 'REORDER_CATEGORIES', payload: normalized });
     setDragIndex(null);
   };
+
+
+  const renderStorage = () => (
+    <>
+      <div className="h-4"></div>
+      <SettingsGroup title="缓存管理">
+        <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-zinc-800/50">
+          <span className="text-sm font-medium text-ios-text">已缓存图片</span>
+          <span className="text-sm text-ios-subtext">{cacheStats.count} 张 ({(cacheStats.size / 1024 / 1024).toFixed(2)} MB)</span>
+        </div>
+        <div className="flex items-center justify-between p-4">
+          <span className="text-sm font-medium text-ios-text">缓存容量限制</span>
+          <select
+            value={state.settings.imageCacheLimit || 209715200}
+            onChange={(e) => {
+              const limit = Number(e.target.value);
+              dispatch({ type: 'UPDATE_SETTINGS', payload: { imageCacheLimit: limit } });
+            }}
+            className="bg-gray-100 dark:bg-zinc-800 text-sm rounded-lg p-2 outline-none"
+          >
+            <option value={52428800}>50 MB</option>
+            <option value={104857600}>100 MB</option>
+            <option value={209715200}>200 MB</option>
+            <option value={524288000}>500 MB</option>
+            <option value={1073741824}>1 GB</option>
+          </select>
+        </div>
+      </SettingsGroup>
+      <div className="px-4">
+        <button onClick={async () => {
+          if (window.confirm('确定清空所有图片缓存吗？下次查看图片需要重新下载。')) {
+            await imageService.clearCache();
+            imageService.getCacheStats().then(setCacheStats);
+            feedback.play('delete');
+          }
+        }} className="w-full py-3 bg-white dark:bg-zinc-900 text-red-500 font-medium rounded-xl shadow-sm border border-ios-border active:scale-95 transition-transform">
+          清空图片缓存
+        </button>
+      </div>
+    </>
+  );
+
   const renderMainContent = () => (
     <>
       <div className="h-4"></div>
@@ -466,6 +518,7 @@ export const SettingsView: React.FC = () => {
           onClick={() => setShowLedgerSelect(true)}
         />
         <SettingsItem icon="Grid" label="分类管理" onClick={() => setPage('categories')} />
+        <SettingsItem icon="Image" label="图片缓存" onClick={() => setPage('storage')} />
         <SettingsItem icon="ClipboardList" label="操作历史" onClick={() => setPage('history')} />
       </SettingsGroup>
 
@@ -682,7 +735,7 @@ export const SettingsView: React.FC = () => {
       <div className="bg-white dark:bg-zinc-900 rounded-2xl mx-4 shadow-sm border border-ios-border p-4 space-y-4">
         <div className="flex items-center justify-between">
           <div>
-            <div className="font-semibold">D1 + KV 云同步</div>
+            <div className="font-semibold">CloudFlare 云同步</div>
             <p className="text-xs text-ios-subtext">填写 Worker 地址和 AUTH_TOKEN，修改数据自动同步，也可手动同步。</p>
           </div>
           <span className="text-xs text-ios-subtext">{state.settings.syncEndpoint ? '已配置' : '未配置'}</span>
@@ -1707,6 +1760,8 @@ export const SettingsView: React.FC = () => {
         return '主题设置';
       case 'about':
         return '关于';
+      case 'storage':
+        return '存储空间';
       default:
         return '设置';
     }
@@ -1749,6 +1804,7 @@ export const SettingsView: React.FC = () => {
         {page === 'history' && renderHistory()}
         {page === 'layout' && renderLayout()}
         {page === 'theme' && renderTheme()}
+        {page === 'storage' && renderStorage()}
         {page === 'about' && renderAbout()}
       </div>
 

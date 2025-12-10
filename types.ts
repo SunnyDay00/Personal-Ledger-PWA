@@ -42,6 +42,7 @@ export interface Transaction {
   categoryId: string;
   date: number; // Timestamp
   note: string;
+  attachments: string[]; // R2 keys
   createdAt: number;
   updatedAt?: number; // Crucial for sync
   isDeleted?: boolean; // Soft delete
@@ -116,6 +117,10 @@ export interface AppSettings {
   // UI
   keypadHeight: number; // percentage (20-60)
   categoryRows: number; // items per row (4-6)
+  
+  // Image Cache
+  imageCacheLimit?: number; // bytes, default 200MB
+
   
   // Data
   categoryNotes: Record<string, string[]>; // Category ID -> List of recent notes
