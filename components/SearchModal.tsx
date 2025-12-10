@@ -1,11 +1,11 @@
-
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { formatCurrency } from '../utils';
 import { format } from 'date-fns';
+import { Transaction } from '../types';
 
-export const SearchModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transaction) => void }> = ({ onClose, onEdit }) => {
     const { state, dispatch } = useApp();
     const [query, setQuery] = useState('');
     const inputRef = useRef<HTMLInputElement>(null);
@@ -16,6 +16,7 @@ export const SearchModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     const [selectedCategoryId, setSelectedCategoryId] = useState<string>('');
     const [selectedGroupId, setSelectedGroupId] = useState<string>('');
     const [amountFilter, setAmountFilter] = useState<{ type: 'none' | 'gt' | 'lt'; value: string }>({ type: 'none', value: '' });
+    const [imageFilter, setImageFilter] = useState<'all' | 'has_image' | 'no_image'>('all');
     const [showFilters, setShowFilters] = useState(false);
 
     const history = state.settings.searchHistory;
@@ -71,7 +72,7 @@ export const SearchModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     }, []);
 
     // Check if any filter is active
-    const hasActiveFilters = dateRange.start || dateRange.end || selectedType !== 'all' || selectedCategoryId || selectedGroupId || (amountFilter.type !== 'none' && amountFilter.value);
+    const hasActiveFilters = dateRange.start || dateRange.end || selectedType !== 'all' || selectedCategoryId || selectedGroupId || (amountFilter.type !== 'none' && amountFilter.value) || imageFilter !== 'all';
 
     // Filter and search results
     const results = useMemo(() => {
@@ -118,6 +119,15 @@ export const SearchModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             }
         }
 
+        // Image filter
+        if (imageFilter !== 'all') {
+            if (imageFilter === 'has_image') {
+                filtered = filtered.filter(t => t.attachments && t.attachments.length > 0);
+            } else {
+                filtered = filtered.filter(t => !t.attachments || t.attachments.length === 0);
+            }
+        }
+
         // Text search (only if query is present, otherwise show all filtered)
         if (query) {
             const lowerQ = query.toLowerCase();
@@ -129,7 +139,7 @@ export const SearchModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         }
 
         return filtered.sort((a, b) => b.date - a.date);
-    }, [query, state.transactions, state.categories, state.categoryGroups, state.currentLedgerId, dateRange, selectedType, selectedCategoryId, selectedGroupId, amountFilter]);
+    }, [query, state.transactions, state.categories, state.categoryGroups, state.currentLedgerId, dateRange, selectedType, selectedCategoryId, selectedGroupId, amountFilter, imageFilter]);
 
     const handleSearch = (term: string) => {
         setQuery(term);
@@ -144,6 +154,7 @@ export const SearchModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         setSelectedCategoryId('');
         setSelectedGroupId('');
         setAmountFilter({ type: 'none', value: '' });
+        setImageFilter('all');
     };
 
     return (
@@ -190,7 +201,7 @@ export const SearchModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                         筛选
                         {hasActiveFilters && (
                             <span className="ml-1 bg-white/20 px-1.5 rounded-full">
-                                {[dateRange.start || dateRange.end, selectedType !== 'all', selectedCategoryId, selectedGroupId].filter(Boolean).length}
+                                {[dateRange.start || dateRange.end, selectedType !== 'all', selectedCategoryId, selectedGroupId, imageFilter !== 'all'].filter(Boolean).length}
                             </span>
                         )}
                     </button>
@@ -224,6 +235,11 @@ export const SearchModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                             {amountFilter.type !== 'none' && amountFilter.value && (
                                 <span className="shrink-0 px-2.5 py-1 rounded-full text-xs bg-pink-100 dark:bg-pink-900/30 text-pink-600 dark:text-pink-400">
                                     {amountFilter.type === 'gt' ? '>' : '<'} {amountFilter.value}元
+                                </span>
+                            )}
+                            {imageFilter !== 'all' && (
+                                <span className="shrink-0 px-2.5 py-1 rounded-full text-xs bg-teal-100 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400">
+                                    {imageFilter === 'has_image' ? '有图' : '无图'}
                                 </span>
                             )}
                             <button
@@ -306,6 +322,25 @@ export const SearchModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                                             }`}
                                     >
                                         {type === 'all' ? '全部' : type === 'expense' ? '支出' : '收入'}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Image Filter */}
+                        <div>
+                            <label className="text-xs text-ios-subtext mb-1.5 block">图片</label>
+                            <div className="flex gap-2">
+                                {(['all', 'has_image', 'no_image'] as const).map(type => (
+                                    <button
+                                        key={type}
+                                        onClick={() => setImageFilter(type)}
+                                        className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${imageFilter === type
+                                            ? 'bg-ios-primary text-white'
+                                            : 'bg-gray-100 dark:bg-zinc-800 text-ios-text'
+                                            }`}
+                                    >
+                                        {type === 'all' ? '全部' : type === 'has_image' ? '有图' : '无图'}
                                     </button>
                                 ))}
                             </div>
@@ -405,13 +440,20 @@ export const SearchModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                             const cat = state.categories.find(c => c.id === t.categoryId);
                             const ledger = state.ledgers.find(l => l.id === t.ledgerId);
                             return (
-                                <div key={t.id} className="bg-white dark:bg-zinc-800 rounded-xl p-3 flex items-center justify-between shadow-sm">
+                                <div
+                                    key={t.id}
+                                    onClick={() => onEdit?.(t)}
+                                    className="bg-white dark:bg-zinc-800 rounded-xl p-3 flex items-center justify-between shadow-sm active:opacity-70 active:scale-[0.99] transition-transform cursor-pointer"
+                                >
                                     <div className="flex items-center gap-3">
                                         <div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-zinc-700 flex items-center justify-center">
                                             <Icon name={cat?.icon || 'Circle'} className="w-4 h-4 text-ios-primary" />
                                         </div>
                                         <div>
-                                            <div className="text-sm font-medium">{cat?.name}</div>
+                                            <div className="flex items-center gap-1.5">
+                                                <div className="text-sm font-medium">{cat?.name}</div>
+                                                {t.attachments && t.attachments.length > 0 && <Icon name="Image" className="w-3 h-3 text-ios-primary" />}
+                                            </div>
                                             <div className="text-xs text-ios-subtext">{format(t.date, 'yyyy-MM-dd')} · {t.note || '无备注'} · {ledger?.name}</div>
                                         </div>
                                     </div>

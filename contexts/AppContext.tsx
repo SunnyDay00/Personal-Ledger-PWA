@@ -382,7 +382,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         // 1. Update UI
         dispatch({ type: 'ADD_TRANSACTION', payload: t });
         // 2. Write DB
-        db.transactions.put({ ...t, updatedAt: Date.now(), isDeleted: false });
+        // Ensure strictly monotonic time relative to last sync to prevent clock skew issues
+        const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
+        db.transactions.put({ ...t, updatedAt: now, isDeleted: false });
 
         // Logs & Notes
         if (t.note) dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: t.categoryId, note: t.note } });
@@ -392,7 +394,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const updateTransaction = (t: Transaction) => {
         dispatch({ type: 'UPDATE_TRANSACTION', payload: t });
-        db.transactions.put({ ...t, updatedAt: Date.now(), isDeleted: false });
+        const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
+        db.transactions.put({ ...t, updatedAt: now, isDeleted: false });
 
         if (t.note) dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: t.categoryId, note: t.note } });
         logOperation('edit', t.id, 'Update amount ' + t.amount);
@@ -404,7 +407,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (target) {
             dispatch({ type: 'DELETE_TRANSACTION', payload: id });
             // Soft Delete in DB
-            db.transactions.update(id, { isDeleted: true, updatedAt: Date.now() });
+            const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
+            db.transactions.update(id, { isDeleted: true, updatedAt: now });
 
             logOperation('delete', id, 'Delete ' + target.amount);
             setUndoStack({ type: 'restore_delete', data: target });
@@ -414,7 +418,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const undo = () => {
         if (!undoStack) return;
-        const now = Date.now();
+        // Robust timestamp
+        const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
         if (undoStack.type === 'restore_delete') {
             const restored = { ...undoStack.data, isDeleted: false, updatedAt: now };
             dispatch({ type: 'RESTORE_TRANSACTION', payload: restored });
@@ -439,52 +444,55 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             'ADD_CATEGORY_GROUP', 'UPDATE_CATEGORY_GROUP', 'DELETE_CATEGORY_GROUP', 'REORDER_CATEGORY_GROUPS',
             'UPDATE_SETTINGS', 'BATCH_DELETE_TRANSACTIONS', 'BATCH_UPDATE_TRANSACTIONS'
         ];
+
+        // Robust timestamp to prevent clock skew issues
+        const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
+
         // Handle DB writes for non-transaction entities
         switch (action.type) {
             case 'ADD_LEDGER':
-                db.ledgers.put({ ...action.payload, updatedAt: Date.now(), isDeleted: false });
+                db.ledgers.put({ ...action.payload, updatedAt: now, isDeleted: false });
                 break;
             case 'UPDATE_LEDGER':
-                db.ledgers.put({ ...action.payload, updatedAt: Date.now() });
+                db.ledgers.put({ ...action.payload, updatedAt: now });
                 break;
             case 'DELETE_LEDGER':
-                db.ledgers.update(action.payload, { isDeleted: true, updatedAt: Date.now() });
+                db.ledgers.update(action.payload, { isDeleted: true, updatedAt: now });
                 // Also soft delete txs
-                db.transactions.where('ledgerId').equals(action.payload).modify({ isDeleted: true, updatedAt: Date.now() });
+                db.transactions.where('ledgerId').equals(action.payload).modify({ isDeleted: true, updatedAt: now });
                 setSyncDirty(true);
                 break;
             case 'ADD_CATEGORY':
-                db.categories.put({ ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: Date.now(), isDeleted: false });
+                db.categories.put({ ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: now, isDeleted: false });
                 break;
             case 'UPDATE_CATEGORY':
-                db.categories.put({ ...action.payload, updatedAt: Date.now() });
+                db.categories.put({ ...action.payload, updatedAt: now });
                 break;
             case 'UPDATE_SETTINGS': // Note: Settings handled by useEffect, but could be here too
                 break;
             case 'DELETE_CATEGORY':
-                db.categories.update(action.payload, { isDeleted: true, updatedAt: Date.now() });
+                db.categories.update(action.payload, { isDeleted: true, updatedAt: now });
                 break;
             case 'REORDER_CATEGORIES':
-                db.categories.bulkPut(action.payload.map(c => ({ ...c, updatedAt: Date.now() })));
+                db.categories.bulkPut(action.payload.map(c => ({ ...c, updatedAt: now })));
                 break;
             case 'ADD_CATEGORY_GROUP':
-                db.categoryGroups.put({ ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: Date.now(), isDeleted: false });
+                db.categoryGroups.put({ ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: now, isDeleted: false });
                 break;
             case 'UPDATE_CATEGORY_GROUP':
-                db.categoryGroups.put({ ...action.payload, updatedAt: Date.now(), isDeleted: false });
+                db.categoryGroups.put({ ...action.payload, updatedAt: now, isDeleted: false });
                 break;
             case 'DELETE_CATEGORY_GROUP':
-                db.categoryGroups.update(action.payload, { isDeleted: true, updatedAt: Date.now() });
+                db.categoryGroups.update(action.payload, { isDeleted: true, updatedAt: now });
                 break;
             case 'REORDER_CATEGORY_GROUPS':
-                db.categoryGroups.bulkPut(action.payload.map(g => ({ ...g, updatedAt: Date.now() })));
+                db.categoryGroups.bulkPut(action.payload.map(g => ({ ...g, updatedAt: now })));
                 break;
             case 'BATCH_DELETE_TRANSACTIONS':
-                db.transactions.where('id').anyOf(action.payload).modify({ isDeleted: true, updatedAt: Date.now() });
+                db.transactions.where('id').anyOf(action.payload).modify(t => { t.isDeleted = true; t.updatedAt = now; });
                 break;
             case 'BATCH_UPDATE_TRANSACTIONS': {
                 const { ids, updates } = action.payload;
-                const now = Date.now();
                 const persistedUpdates: Partial<Transaction> = {};
                 (Object.entries(updates) as [keyof Transaction, any][]).forEach(([key, value]) => {
                     if (value !== undefined) (persistedUpdates as any)[key] = value;

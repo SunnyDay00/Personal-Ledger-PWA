@@ -138,7 +138,12 @@ export const Layout: React.FC = () => {
 
             {/* Overlays */}
             {showAdd && <AddView onClose={() => { setShowAdd(false); setInitialAddData(undefined); setClipboardImage(undefined); }} initialTransaction={initialAddData} initialClipboardImage={clipboardImage} />}
-            {showSearch && <SearchModal onClose={() => setShowSearch(false)} />}
+            {showSearch && <SearchModal onClose={() => setShowSearch(false)} onEdit={(t) => {
+                setShowSearch(false);
+                setInitialAddData(t);
+                // Also propagate clipboard image if needed? No, usually edit is just existing data.
+                setShowAdd(true);
+            }} />}
             {showBudget && <BudgetModal onClose={() => setShowBudget(false)} />}
 
             {/* Undo Toast */}
