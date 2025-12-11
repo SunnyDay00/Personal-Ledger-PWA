@@ -161,7 +161,8 @@ export const imageService = {
     try {
         const size = blob.size;
         await db.images.put({ key, blob, size, lastAccess: Date.now() });
-        await this.enforceCacheLimit();
+        // Don't enforce limit on every write to avoid blocking UI with heavy reads
+        // await this.enforceCacheLimit(); 
     } catch(e) {
         console.warn("Cache write failed", e);
     }

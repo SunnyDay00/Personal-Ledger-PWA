@@ -305,6 +305,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groups } });
                 }
             } catch { }
+
+            // Clean up image cache periodically (on startup)
+            setTimeout(() => {
+                imageService.enforceCacheLimit().catch(e => console.warn('Cache cleanup failed', e));
+            }, 10000);
         };
         syncGroupsToState();
     }, [isDBLoaded]);
