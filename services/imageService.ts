@@ -127,7 +127,7 @@ export const imageService = {
   async fetchImageBlob(key: string): Promise<Blob> {
     // 1. Check Cache
     const cached = await db.images.get(key);
-    if (cached) {
+    if (cached && cached.blob && cached.blob.size > 0) {
       // Async update lastAccess (don't await to block UI)
       db.images.update(key, { lastAccess: Date.now() }).catch(console.error);
       return cached.blob;
@@ -151,6 +151,8 @@ export const imageService = {
     if (!res.ok) throw new Error("Image download failed");
     const blob = await res.blob();
 
+    if (blob.size === 0) throw new Error("Fetched empty blob");
+
     // 3. Cache it
     await this.cacheImage(key, blob);
 
@@ -159,6 +161,7 @@ export const imageService = {
 
   async cacheImage(key: string, blob: Blob) {
     try {
+        if (!blob || blob.size === 0) return;
         const size = blob.size;
         await db.images.put({ key, blob, size, lastAccess: Date.now() });
         // Don't enforce limit on every write to avoid blocking UI with heavy reads
