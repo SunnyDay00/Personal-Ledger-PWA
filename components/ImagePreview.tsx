@@ -4,17 +4,24 @@ import { Icon } from './ui/Icon';
 import { imageService } from '../services/imageService';
 
 interface ImagePreviewProps {
-    keys: string[];
+    keys?: string[];
+    initialUrls?: string[];
     onClose: () => void;
 }
 
-export const ImagePreview: React.FC<ImagePreviewProps> = ({ keys, onClose }) => {
+export const ImagePreview: React.FC<ImagePreviewProps> = ({ keys = [], initialUrls, onClose }) => {
     const [currentIndex, setCurrentIndex] = useState(0);
     const [urls, setUrls] = useState<string[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
     useEffect(() => {
+        if (initialUrls && initialUrls.length > 0) {
+            setUrls(initialUrls);
+            setLoading(false);
+            return;
+        }
+
         let active = true;
         const loadImages = async () => {
             setLoading(true);
@@ -38,14 +45,14 @@ export const ImagePreview: React.FC<ImagePreviewProps> = ({ keys, onClose }) => 
         };
         loadImages();
         return () => { active = false; };
-    }, [keys]);
+    }, [keys, initialUrls]);
 
     const currentUrl = urls[currentIndex];
 
     return (
         <div className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-md flex flex-col animate-fade-in" onClick={onClose}>
             {/* Header */}
-            <div className="flex justify-between items-center p-4 text-white z-10">
+            <div className="flex justify-between items-center p-4 pt-[calc(env(safe-area-inset-top)+1rem)] text-white z-10">
                 <span className="text-sm font-medium">{currentIndex + 1} / {keys.length}</span>
                 <button onClick={onClose} className="p-2 bg-white/10 rounded-full"><Icon name="X" className="w-5 h-5" /></button>
             </div>

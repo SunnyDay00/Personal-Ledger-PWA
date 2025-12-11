@@ -2,6 +2,13 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '7.1.0',
+      date: '2025/12/11',
+      content: [
+          '修复账目图片显示问题。'
+      ]
+  },
+  {
       version: '7.0.0',
       date: '2025/12/10',
       content: [

@@ -9,6 +9,7 @@ import { clsx } from 'clsx';
 import { format, addDays, isSameDay } from 'date-fns';
 import { Keyboard } from '@capacitor/keyboard';
 import { imageService } from '../services/imageService';
+import { ImagePreview } from './ImagePreview';
 
 interface AddViewProps {
     onClose: () => void;
@@ -36,8 +37,10 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     // Attachment State
+    // Attachment State
     const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
     const [isUploading, setIsUploading] = useState(false);
+    const [showPreview, setShowPreview] = useState(false);
 
     // KEYBOARD STRATEGY: CAPACITOR PLUGIN EVENTS
     const [keyboardHeight, setKeyboardHeight] = useState(0);
@@ -345,7 +348,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                     <div className="flex gap-3 overflow-x-auto no-scrollbar px-5 py-3 border-b border-ios-border bg-gray-50 dark:bg-zinc-900/50">
                         {attachments.map((att) => (
                             <div key={att.id} className="relative group shrink-0 w-16 h-16 rounded-lg overflow-hidden border border-gray-200 dark:border-zinc-700">
-                                <img src={att.url} className="w-full h-full object-cover" alt="attachment" />
+                                <img src={att.url} className="w-full h-full object-cover" alt="attachment" onClick={() => setShowPreview(true)} />
                                 <button onClick={() => removeAttachment(att.id)} className="absolute top-0 right-0 p-1 bg-black/50 text-white rounded-bl-lg">
                                     <Icon name="X" className="w-3 h-3" />
                                 </button>
@@ -429,6 +432,13 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                     </div>
                 </div>
             </div>
+
+            {showPreview && (
+                <ImagePreview
+                    initialUrls={attachments.map(a => a.url)}
+                    onClose={() => setShowPreview(false)}
+                />
+            )}
         </div>
     );
 };

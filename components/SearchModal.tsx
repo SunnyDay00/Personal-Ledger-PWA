@@ -4,6 +4,7 @@ import { Icon } from './ui/Icon';
 import { formatCurrency } from '../utils';
 import { format } from 'date-fns';
 import { Transaction } from '../types';
+import { ImagePreview } from './ImagePreview';
 
 export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transaction) => void }> = ({ onClose, onEdit }) => {
     const { state, dispatch } = useApp();
@@ -18,6 +19,7 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
     const [amountFilter, setAmountFilter] = useState<{ type: 'none' | 'gt' | 'lt'; value: string }>({ type: 'none', value: '' });
     const [imageFilter, setImageFilter] = useState<'all' | 'has_image' | 'no_image'>('all');
     const [showFilters, setShowFilters] = useState(false);
+    const [previewKeys, setPreviewKeys] = useState<string[]>([]);
 
     const history = state.settings.searchHistory;
 
@@ -452,7 +454,11 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
                                         <div>
                                             <div className="flex items-center gap-1.5">
                                                 <div className="text-sm font-medium">{cat?.name}</div>
-                                                {t.attachments && t.attachments.length > 0 && <Icon name="Image" className="w-3 h-3 text-ios-primary" />}
+                                                {t.attachments && t.attachments.length > 0 && (
+                                                    <button onClick={(e) => { e.stopPropagation(); setPreviewKeys(t.attachments || []); }} className="p-1 -m-1 active:opacity-50">
+                                                        <Icon name="Image" className="w-3 h-3 text-ios-primary" />
+                                                    </button>
+                                                )}
                                             </div>
                                             <div className="text-xs text-ios-subtext">{format(t.date, 'yyyy-MM-dd')} · {t.note || '无备注'} · {ledger?.name}</div>
                                         </div>
@@ -469,6 +475,7 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
                     </div>
                 )}
             </div>
+            {previewKeys.length > 0 && <ImagePreview keys={previewKeys} onClose={() => setPreviewKeys([])} />}
         </div>
     );
 };
