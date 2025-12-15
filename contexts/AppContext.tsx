@@ -844,14 +844,32 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             if (versionCheckRunningRef.current) return;
             versionCheckRunningRef.current = true;
             try {
-                const res = await fetch(`${syncEndpoint.replace(/\/$/, '')}/sync/version?user_id=${encodeURIComponent(syncUserId || 'default')}`, {
-                    headers: { 'Authorization': `Bearer ${syncToken}` }
-                });
-                if (!res.ok) return;
-                const data = await res.json();
-                const remoteVersion = Number(data.version || 0);
+                // 1. Check Remote Version
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+
+                let remoteVersion = 0;
+                try {
+                    const res = await fetch(`${syncEndpoint.replace(/\/$/, '')}/sync/version?user_id=${encodeURIComponent(syncUserId || 'default')}`, {
+                        headers: { 'Authorization': `Bearer ${syncToken}` },
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+                    if (res.ok) {
+                        const data = await res.json();
+                        remoteVersion = Number(data.version || 0);
+                    }
+                } catch (e) {
+                    // network error, ignore
+                }
+
+                // 2. Check Local Unsynced Data
                 const localVersion = stateRef.current.settings.lastSyncVersion || 0;
-                if (remoteVersion > localVersion) {
+                const hasLocalChanges = await dbAPI.hasUnsyncedData(localVersion);
+
+                // 3. Trigger Sync if needed
+                if (remoteVersion > localVersion || hasLocalChanges) {
+                    console.log(`[AutoSync] Triggering sync. Remote: ${remoteVersion}, Local: ${localVersion}, HasChanges: ${hasLocalChanges}`);
                     await performCloudSync('auto');
                 }
             } catch (e) {

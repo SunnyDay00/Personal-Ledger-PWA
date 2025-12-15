@@ -241,6 +241,33 @@ export const SettingsView: React.FC = () => {
     }
   };
 
+  const handleTestD1Connection = async () => {
+    if (!d1Form.endpoint.trim() || !d1Form.token.trim()) {
+      window.alert('请先填写地址和 AUTH_TOKEN');
+      return;
+    }
+    setIsTestingConnection(true);
+    try {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 10000); // 10s timeout
+      const res = await fetch(`${d1Form.endpoint.trim().replace(/\/$/, '')}/sync/version?user_id=${encodeURIComponent(d1Form.userId || 'default')}`, {
+        headers: { 'Authorization': `Bearer ${d1Form.token.trim()}` },
+        signal: controller.signal
+      });
+      clearTimeout(id);
+      if (res.ok) {
+        const data = await res.json();
+        window.alert(`连接成功！服务器版本：${data.version}`);
+      } else {
+        window.alert(`连接失败：HTTP ${res.status}`);
+      }
+    } catch (e: any) {
+      window.alert(`连接出错：${e.message || '未知错误'}`);
+    } finally {
+      setIsTestingConnection(false);
+    }
+  };
+
   const handleSaveWebDav = () => {
     const { url, user, pass } = webdavForm;
     dispatch({
@@ -817,32 +844,33 @@ export const SettingsView: React.FC = () => {
               </button>
             </div>
           </div>
+          <div className="flex gap-3 pt-2">
+            <button
+              type="button"
+              disabled={isTestingConnection}
+              onClick={handleTestD1Connection}
+              className="flex-1 py-3 bg-gray-100 dark:bg-zinc-800 text-ios-text font-medium rounded-xl active:scale-95 transition-transform disabled:opacity-50"
+            >
+              {isTestingConnection ? '测试中...' : '测试连接'}
+            </button>
+            <CloudSyncButton className="!p-3 !bg-gray-100 dark:!bg-zinc-800 !rounded-xl !shadow-none !w-auto" />
+            <button
+              type="button"
+              disabled={isManualSyncing}
+              onClick={handleManualCloudSync}
+              className="flex-1 py-3 bg-gray-100 dark:bg-zinc-800 text-ios-text font-medium rounded-xl active:scale-95 transition-transform disabled:opacity-50"
+            >
+              {isManualSyncing ? '同步中...' : '立即同步'}
+            </button>
+            <button
+              type="button"
+              onClick={handleSaveD1}
+              className="flex-1 py-3 bg-ios-primary text-white font-medium rounded-xl active:scale-95 transition-transform shadow-lg shadow-ios-primary/20"
+            >
+              保存配置
+            </button>
+          </div>
         </form>
-
-        <div className="flex gap-3 pt-2">
-          <button
-            onClick={handleSaveD1}
-            type="button"
-            className="flex-1 py-2.5 bg-ios-primary text-white text-sm font-medium rounded-xl active:opacity-90 transition-opacity"
-          >
-            保存配置
-          </button>
-          <button
-            onClick={handleManualCloudSync}
-            type="button"
-            disabled={isManualSyncing}
-            className="flex-1 py-2.5 bg-emerald-500 text-white text-sm font-medium rounded-xl active:opacity-90 transition-opacity disabled:opacity-60"
-          >
-            {isManualSyncing ? '同步中…' : '手动同步'}
-          </button>
-          <button
-            onClick={() => setShowSyncLog(true)}
-            type="button"
-            className="flex-1 py-2.5 bg-gray-100 dark:bg-zinc-800 text-sm font-medium rounded-xl"
-          >
-            查看日志
-          </button>
-        </div>
       </div>
 
       <div className="bg-white dark:bg-zinc-900 rounded-2xl mx-4 mt-6 shadow-sm border border-ios-border p-4 space-y-4">

@@ -248,6 +248,18 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
                                         <span className="text-sm font-bold text-ios-text">{format(dateObj, 'dd')}</span>
                                         <span className="text-xs text-ios-subtext">{isToday ? '今天' : `${format(dateObj, 'MM月')} / ${new Intl.DateTimeFormat('zh-CN', { weekday: 'long' }).format(dateObj)}`}</span>
                                     </div>
+                                    <div className="flex gap-3 text-xs">
+                                        {(() => {
+                                            const dayIncome = groupedTransactions[dateKey].reduce((acc, t) => t.type === 'income' ? acc + t.amount : acc, 0);
+                                            const dayExpense = groupedTransactions[dateKey].reduce((acc, t) => t.type === 'expense' ? acc + t.amount : acc, 0);
+                                            return (
+                                                <>
+                                                    {dayIncome > 0 && <span className="text-green-500 font-medium">+{formatCurrency(dayIncome).replace('¥', '')}</span>}
+                                                    {dayExpense > 0 && <span className="text-ios-text/60 font-medium">-{formatCurrency(dayExpense).replace('¥', '')}</span>}
+                                                </>
+                                            )
+                                        })()}
+                                    </div>
                                 </div>
                                 <div className="bg-white/80 dark:bg-zinc-900/80 backdrop-blur-lg rounded-2xl overflow-hidden shadow-sm border border-white/40 dark:border-white/5">
                                     {groupedTransactions[dateKey].map((t, index) => {

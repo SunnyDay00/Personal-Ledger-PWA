@@ -229,4 +229,21 @@ export const dbAPI = {
   async saveCFConfig(config: any) {
     await db.settings.put({ key: 'cf_stats_config', value: config });
   },
+  async hasUnsyncedData(lastSyncVersion: number): Promise<boolean> {
+    const minTime = lastSyncVersion;
+    // Check if any entity has updatedAt > lastSyncVersion
+    const txCount = await db.transactions.where('updatedAt').above(minTime).count();
+    if (txCount > 0) return true;
+    
+    const ledgerCount = await db.ledgers.where('updatedAt').above(minTime).count();
+    if (ledgerCount > 0) return true;
+
+    const catCount = await db.categories.where('updatedAt').above(minTime).count();
+    if (catCount > 0) return true;
+
+    const groupCount = await db.categoryGroups.where('updatedAt').above(minTime).count();
+    if (groupCount > 0) return true;
+
+    return false;
+  },
 };

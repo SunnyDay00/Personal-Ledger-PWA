@@ -23,27 +23,54 @@ const buildHeaders = (token: string) => {
   return headers;
 };
 
-export async function pushToCloud(endpoint: string, token: string, userId: string, payload: D1SyncPayload) {
-  const res = await fetch(`${endpoint.replace(/\/$/, '')}/sync/push?user_id=${encodeURIComponent(userId)}`, {
-      method: 'POST',
-      headers: buildHeaders(token),
-      body: JSON.stringify(payload)
-  });
-  if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Push failed: ${res.status} ${text}`);
+
+export async function pushToCloud(endpoint: string, token: string, userId: string, payload: D1SyncPayload, timeoutMs: number = 15000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  
+  try {
+      const res = await fetch(`${endpoint.replace(/\/$/, '')}/sync/push?user_id=${encodeURIComponent(userId)}`, {
+          method: 'POST',
+          headers: buildHeaders(token),
+          body: JSON.stringify(payload),
+          signal: controller.signal
+      });
+      clearTimeout(id);
+      if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`Push failed: ${res.status} ${text}`);
+      }
+      return res.json();
+  } catch (e: any) {
+      clearTimeout(id);
+      if (e.name === 'AbortError') {
+          throw new Error(`Push timed out after ${timeoutMs}ms`);
+      }
+      throw e;
   }
-  return res.json();
 }
 
-export async function pullFromCloud(endpoint: string, token: string, userId: string, since: number): Promise<D1PullResponse> {
-  const res = await fetch(`${endpoint.replace(/\/$/, '')}/sync/pull?user_id=${encodeURIComponent(userId)}&since=${since}`, {
-      method: 'GET',
-      headers: buildHeaders(token)
-  });
-  if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Pull failed: ${res.status} ${text}`);
+export async function pullFromCloud(endpoint: string, token: string, userId: string, since: number, timeoutMs: number = 15000): Promise<D1PullResponse> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+      const res = await fetch(`${endpoint.replace(/\/$/, '')}/sync/pull?user_id=${encodeURIComponent(userId)}&since=${since}`, {
+          method: 'GET',
+          headers: buildHeaders(token),
+          signal: controller.signal
+      });
+      clearTimeout(id);
+      if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`Pull failed: ${res.status} ${text}`);
+      }
+      return res.json();
+  } catch (e: any) {
+      clearTimeout(id);
+      if (e.name === 'AbortError') {
+          throw new Error(`Pull timed out after ${timeoutMs}ms`);
+      }
+      throw e;
   }
-  return res.json();
 }
