@@ -13,6 +13,16 @@ import {
 import { clsx } from 'clsx';
 import { Transaction } from '../types';
 import { CloudSyncButton } from './CloudSyncButton';
+import { StatsBreakdownDetailView } from './StatsBreakdownDetailView';
+
+const UNGROUPED_GROUP_ID = '__ungrouped__';
+
+interface PieBreakdownItem {
+    id: string;
+    name: string;
+    value: number;
+    transactionCount: number;
+}
 
 const CustomTooltip = ({ active, payload, label }: any) => {
     if (active && payload && payload.length) {
@@ -34,7 +44,11 @@ const CustomTooltip = ({ active, payload, label }: any) => {
     return null;
 };
 
-export const StatsView: React.FC = () => {
+interface StatsViewProps {
+    onOpenHomeTransaction?: (transaction: Transaction) => void;
+}
+
+export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) => {
     const { state, dispatch } = useApp();
     const { transactions, ledgers, categories, settings, currentLedgerId, timeRange, currentDate: currentDateTs } = state;
     const currentDate = new Date(currentDateTs);
@@ -47,6 +61,13 @@ export const StatsView: React.FC = () => {
     const [dataType, setDataType] = useState<'expense' | 'income'>('expense');
     const [viewMode, setViewMode] = useState<'category' | 'group'>('category');
     const [showLedgerMenu, setShowLedgerMenu] = useState(false);
+    const [selectedBreakdown, setSelectedBreakdown] = useState<{
+        id: string;
+        name: string;
+        color: string;
+        mode: 'category' | 'group';
+        dataType: 'expense' | 'income';
+    } | null>(null);
 
     // Helper to get range
     // Stable memoization of start/end objects
@@ -94,6 +115,30 @@ export const StatsView: React.FC = () => {
         });
     }, [transactions, currentLedgerId, startTimestamp, endTimestamp]);
 
+    const categoriesById = useMemo(
+        () => new Map(categories.filter(category => !category.isDeleted).map(category => [category.id, category])),
+        [categories]
+    );
+
+    const activeCategoryGroups = useMemo(
+        () => state.categoryGroups.filter(group => group.ledgerId === currentLedgerId && !group.isDeleted),
+        [state.categoryGroups, currentLedgerId]
+    );
+
+    const categoryGroupByCategoryId = useMemo(() => {
+        const mapping = new Map<string, { id: string; name: string }>();
+
+        activeCategoryGroups.forEach(group => {
+            group.categoryIds.forEach(categoryId => {
+                if (!mapping.has(categoryId)) {
+                    mapping.set(categoryId, { id: group.id, name: group.name });
+                }
+            });
+        });
+
+        return mapping;
+    }, [activeCategoryGroups]);
+
 
 
     // Metrics
@@ -107,74 +152,80 @@ export const StatsView: React.FC = () => {
     }, [filteredData]);
 
     // Chart Data Preparation
-    const chartData = useMemo(() => {
-        // Common logic: Filter by dataType (Expense/Income)
+    const chartData = useMemo<any[]>(() => {
         const targetTxs = filteredData.filter(t => t.type === dataType);
 
-        // 1. Pie Chart Logic (unchanged concept, just updated variables)
         if (chartType === 'pie') {
-            const map: Record<string, number> = {};
+            const map = new Map<string, PieBreakdownItem>();
+
             if (viewMode === 'group') {
-                state.categoryGroups.forEach(g => {
-                    if (g.ledgerId === currentLedgerId && !g.isDeleted) {
-                        // Init groups so empty ones might show? No, usually pie only shows positive
-                    }
-                });
                 targetTxs.forEach(t => {
-                    const group = state.categoryGroups.find(g => g.categoryIds?.includes(t.categoryId) && !g.isDeleted && g.ledgerId === currentLedgerId);
-                    const key = group ? group.name : '未分组';
-                    map[key] = (map[key] || 0) + t.amount;
+                    const group = categoryGroupByCategoryId.get(t.categoryId);
+                    const key = group?.id || UNGROUPED_GROUP_ID;
+                    const existing = map.get(key) || {
+                        id: key,
+                        name: group?.name || '未分组',
+                        value: 0,
+                        transactionCount: 0,
+                    };
+
+                    existing.value += t.amount;
+                    existing.transactionCount += 1;
+                    map.set(key, existing);
                 });
             } else {
                 targetTxs.forEach(t => {
-                    const catName = categories.find(c => c.id === t.categoryId)?.name || '未知';
-                    map[catName] = (map[catName] || 0) + t.amount;
+                    const category = categoriesById.get(t.categoryId);
+                    const key = category?.id || `unknown:${t.categoryId}`;
+                    const existing = map.get(key) || {
+                        id: key,
+                        name: category?.name || '未知',
+                        value: 0,
+                        transactionCount: 0,
+                    };
+
+                    existing.value += t.amount;
+                    existing.transactionCount += 1;
+                    map.set(key, existing);
                 });
             }
-            return Object.entries(map)
-                .map(([name, value]) => ({ name, value }))
-                .sort((a, b) => b.value - a.value);
+
+            return Array.from(map.values()).sort((a, b) => b.value - a.value);
         }
 
-        // 2. Bar/Line Logic - Single Series (Income OR Expense)
-        else {
-            // Time Series keys
-            let timeKeys: string[] = [];
-            const labelMap: Record<string, string> = {};
+        let timeKeys: string[] = [];
+        const labelMap: Record<string, string> = {};
 
-            if (timeRange === 'year') {
-                for (let i = 0; i < 12; i++) {
-                    const k = `${i}`;
-                    timeKeys.push(k);
-                    labelMap[k] = `${i + 1}月`;
-                }
-            } else {
-                let curr = new Date(start);
-                while (curr <= end) {
-                    const k = format(curr, 'yyyy-MM-dd');
-                    timeKeys.push(k);
-                    labelMap[k] = format(curr, 'dd');
-                    curr.setDate(curr.getDate() + 1);
-                }
+        if (timeRange === 'year') {
+            for (let i = 0; i < 12; i++) {
+                const k = `${i}`;
+                timeKeys.push(k);
+                labelMap[k] = `${i + 1}月`;
             }
-
-            // Initialize Data Structure: Array of { label, key, value }
-            const dataMap: Record<string, any> = {};
-            timeKeys.forEach(k => {
-                dataMap[k] = { label: labelMap[k], key: k, value: 0 };
-            });
-
-            // Fill Data - Use targetTxs which is already filtered by dataType
-            targetTxs.forEach(t => {
-                const timeKey = timeRange === 'year' ? `${getMonth(t.date)}` : format(t.date, 'yyyy-MM-dd');
-                if (dataMap[timeKey]) {
-                    dataMap[timeKey].value += t.amount;
-                }
-            });
-
-            return Object.values(dataMap);
+        } else {
+            let curr = new Date(start);
+            while (curr <= end) {
+                const k = format(curr, 'yyyy-MM-dd');
+                timeKeys.push(k);
+                labelMap[k] = format(curr, 'dd');
+                curr.setDate(curr.getDate() + 1);
+            }
         }
-    }, [filteredData, chartType, timeRange, start, end, categories, dataType, viewMode, state.categoryGroups, currentLedgerId]);
+
+        const dataMap: Record<string, any> = {};
+        timeKeys.forEach(k => {
+            dataMap[k] = { label: labelMap[k], key: k, value: 0 };
+        });
+
+        targetTxs.forEach(t => {
+            const timeKey = timeRange === 'year' ? `${getMonth(t.date)}` : format(t.date, 'yyyy-MM-dd');
+            if (dataMap[timeKey]) {
+                dataMap[timeKey].value += t.amount;
+            }
+        });
+
+        return Object.values(dataMap);
+    }, [filteredData, chartType, timeRange, start, end, dataType, viewMode, categoryGroupByCategoryId, categoriesById]);
 
     // Derived: Get list of keys (Categories or Groups) present in the data for Stacked Bar / Multi Line
     const dataKeys = useMemo(() => {
@@ -256,6 +307,44 @@ export const StatsView: React.FC = () => {
 
     // Pie Total (now effectively "Current Chart Total" equivalent)
     const currentPieTotal = dataType === 'expense' ? expense : income;
+
+
+    const selectedBreakdownTransactions = useMemo(() => {
+        if (!selectedBreakdown) return [];
+
+        return filteredData
+            .filter(transaction => transaction.type === selectedBreakdown.dataType)
+            .filter(transaction => {
+                if (selectedBreakdown.mode === 'category') {
+                    const rawCategoryId = selectedBreakdown.id.startsWith('unknown:')
+                        ? selectedBreakdown.id.slice('unknown:'.length)
+                        : selectedBreakdown.id;
+                    return transaction.categoryId === rawCategoryId;
+                }
+
+                if (selectedBreakdown.id === UNGROUPED_GROUP_ID) {
+                    return !categoryGroupByCategoryId.has(transaction.categoryId);
+                }
+
+                return categoryGroupByCategoryId.get(transaction.categoryId)?.id === selectedBreakdown.id;
+            })
+            .sort((a, b) => b.date - a.date || (b.createdAt || 0) - (a.createdAt || 0));
+    }, [selectedBreakdown, filteredData, categoryGroupByCategoryId]);
+
+    const openBreakdownDetail = (item: PieBreakdownItem, index: number) => {
+        setSelectedBreakdown({
+            id: item.id,
+            name: item.name,
+            color: COLORS[index % COLORS.length],
+            mode: viewMode,
+            dataType,
+        });
+    };
+
+    const handleOpenHomeTransaction = (transaction: Transaction) => {
+        setSelectedBreakdown(null);
+        onOpenHomeTransaction?.(transaction);
+    };
 
 
     return (
@@ -374,67 +463,97 @@ export const StatsView: React.FC = () => {
                             )}
                         </div>
 
-                        <div className="h-64 w-full">
-                            <ResponsiveContainer width="100%" height="100%">
-                                {chartType === 'pie' ? (
+                        {chartType === 'pie' ? (
+                            <div className="h-[18rem] w-full">
+                                <ResponsiveContainer width="100%" height="100%">
                                     <PieChart>
-                                        <Pie data={chartData} innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value" isAnimationActive={false}>
+                                        <Pie
+                                            data={chartData}
+                                            cx="50%"
+                                            cy="50%"
+                                            innerRadius={58}
+                                            outerRadius={78}
+                                            paddingAngle={5}
+                                            dataKey="value"
+                                            isAnimationActive={false}
+                                        >
                                             {chartData.map((entry: any, index: number) => (
-                                                <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} stroke="none" />
+                                                <Cell
+                                                    key={`cell-${entry.id || index}`}
+                                                    fill={COLORS[index % COLORS.length]}
+                                                    stroke="none"
+                                                    style={{ cursor: 'pointer' }}
+                                                    onClick={() => openBreakdownDetail(entry as PieBreakdownItem, index)}
+                                                />
                                             ))}
                                         </Pie>
                                         <Tooltip content={<CustomTooltip />} />
                                     </PieChart>
-                                ) : chartType === 'bar' ? (
-                                    <BarChart data={chartData} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
-                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border-color)" />
-                                        <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
-                                        <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
-                                        <Tooltip cursor={{ fill: 'rgba(0,0,0,0.05)' }} content={<CustomTooltip />} />
-                                        <Bar
-                                            dataKey="value"
-                                            name={dataType === 'income' ? "收入" : "支出"}
-                                            fill={dataType === 'income' ? "#34C759" : "#FF3B30"}
-                                            radius={[4, 4, 0, 0]}
-                                            maxBarSize={40}
-                                            isAnimationActive={false}
-                                        />
-                                    </BarChart>
-                                ) : (
-                                    <LineChart data={chartData} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
-                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border-color)" />
-                                        <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
-                                        <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
-                                        <Tooltip content={<CustomTooltip />} />
-                                        <Line
-                                            type="monotone"
-                                            dataKey="value"
-                                            name={dataType === 'income' ? "收入" : "支出"}
-                                            stroke={dataType === 'income' ? "#34C759" : "#FF3B30"}
-                                            strokeWidth={2}
-                                            dot={false}
-                                            isAnimationActive={false}
-                                        />
-                                    </LineChart>
-                                )}
-                            </ResponsiveContainer>
-                        </div>
+                                </ResponsiveContainer>
+                            </div>
+                        ) : (
+                            <div className="h-64 w-full">
+                                <ResponsiveContainer width="100%" height="100%">
+                                    {chartType === 'bar' ? (
+                                        <BarChart data={chartData} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
+                                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border-color)" />
+                                            <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
+                                            <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
+                                            <Tooltip cursor={{ fill: 'rgba(0,0,0,0.05)' }} content={<CustomTooltip />} />
+                                            <Bar
+                                                dataKey="value"
+                                                name={dataType === 'income' ? "收入" : "支出"}
+                                                fill={dataType === 'income' ? "#34C759" : "#FF3B30"}
+                                                radius={[4, 4, 0, 0]}
+                                                maxBarSize={40}
+                                                isAnimationActive={false}
+                                            />
+                                        </BarChart>
+                                    ) : (
+                                        <LineChart data={chartData} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
+                                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border-color)" />
+                                            <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
+                                            <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
+                                            <Tooltip content={<CustomTooltip />} />
+                                            <Line
+                                                type="monotone"
+                                                dataKey="value"
+                                                name={dataType === 'income' ? "收入" : "支出"}
+                                                stroke={dataType === 'income' ? "#34C759" : "#FF3B30"}
+                                                strokeWidth={2}
+                                                dot={false}
+                                                isAnimationActive={false}
+                                            />
+                                        </LineChart>
+                                    )}
+                                </ResponsiveContainer>
+                            </div>
+                        )}
 
                         {/* Category List below Pie Chart */}
                         {chartType === 'pie' && (
-                            <div className="mt-4 space-y-3">
+                            <div className="mt-4 space-y-1.5">
                                 {chartData.length === 0 && <div className="text-center text-xs text-ios-subtext py-4">暂无数据</div>}
                                 {chartData.map((item: any, idx: number) => (
-                                    <div key={idx} className="flex items-center justify-between text-sm">
-                                        <div className="flex items-center gap-2">
-                                            <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: COLORS[idx % COLORS.length] }}></div>
-                                            <span>{item.name}</span>
+                                    <button
+                                        key={item.id || idx}
+                                        type="button"
+                                        onClick={() => openBreakdownDetail(item as PieBreakdownItem, idx)}
+                                        className="w-full flex items-center justify-between gap-3 text-sm text-left rounded-2xl px-2 py-1.5 active:bg-gray-50 dark:active:bg-zinc-800 transition-colors"
+                                    >
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: COLORS[idx % COLORS.length] }}></div>
+                                            <div className="min-w-0 leading-tight">
+                                                <span className="block truncate font-medium text-ios-text">{item.name}</span>
+                                                <span className="block text-[10px] text-ios-subtext mt-0.5">{item.transactionCount} 笔记录</span>
+                                            </div>
                                         </div>
-                                        <div className="flex items-center gap-3">
+                                        <div className="flex items-center gap-2 shrink-0">
                                             <span className="text-xs text-ios-subtext">{currentPieTotal > 0 ? Math.round((item.value / currentPieTotal) * 100) : 0}%</span>
-                                            <span className="font-medium tabular-nums">{formatCurrency(item.value)}</span>
+                                            <span className="font-medium tabular-nums text-ios-text">{formatCurrency(item.value)}</span>
+                                            <Icon name="ChevronRight" className="w-4 h-4 text-ios-subtext" />
                                         </div>
-                                    </div>
+                                    </button>
                                 ))}
                             </div>
                         )}
@@ -518,6 +637,19 @@ export const StatsView: React.FC = () => {
                     )}
                 </div>
             </div>
+
+            {selectedBreakdown && (
+                <StatsBreakdownDetailView
+                    breakdownLabel={selectedBreakdown.mode === 'group' ? '分组' : '分类'}
+                    name={selectedBreakdown.name}
+                    subtitle={`${selectedLedgerName} · ${displayDate} · ${selectedBreakdown.dataType === 'expense' ? '支出' : '收入'}`}
+                    dataType={selectedBreakdown.dataType}
+                    accentColor={selectedBreakdown.color}
+                    transactions={selectedBreakdownTransactions}
+                    onClose={() => setSelectedBreakdown(null)}
+                    onOpenHomeTransaction={handleOpenHomeTransaction}
+                />
+            )}
         </div>
     );
 };
@@ -534,4 +666,3 @@ const ExtremeCard: React.FC<{ title: string; amount?: number; desc: string; icon
         {amount !== undefined && <div className="text-[10px] text-ios-subtext truncate">{desc}</div>}
     </div>
 );
-

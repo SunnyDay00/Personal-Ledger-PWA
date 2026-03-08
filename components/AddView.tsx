@@ -462,7 +462,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     return (
         <div
             className={clsx(
-                'fixed inset-0 z-50 flex flex-col bg-ios-bg overflow-hidden w-full h-full',
+                'fixed inset-0 z-[70] flex flex-col bg-ios-bg overflow-hidden w-full h-full',
                 state.settings.enableAnimations && 'animate-slide-up',
                 'transition-[padding] duration-300 ease-out'
             )}

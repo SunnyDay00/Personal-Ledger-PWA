@@ -17,8 +17,13 @@ import { Clipboard } from '@capacitor/clipboard';
 import { Transaction } from '../types';
 import { LiquidFilter } from './LiquidFilter';
 
+type HomeJumpTarget = {
+    transactionId: string;
+    nonce: number;
+};
+
 export const Layout: React.FC = () => {
-    const { state, canUndo, undo } = useApp();
+    const { state, dispatch, canUndo, undo } = useApp();
     const [activeTab, setActiveTab] = useState<'home' | 'stats' | 'ledgers' | 'settings'>('home');
     const [showAdd, setShowAdd] = useState(false);
     const [showSearch, setShowSearch] = useState(false);
@@ -26,6 +31,7 @@ export const Layout: React.FC = () => {
     const [showToast, setShowToast] = useState(false);
     const [initialAddData, setInitialAddData] = useState<Partial<Transaction> | undefined>(undefined);
     const [clipboardImage, setClipboardImage] = useState<string | undefined>(undefined);
+    const [homeJumpTarget, setHomeJumpTarget] = useState<HomeJumpTarget | null>(null);
 
     // Handle Deep Links (URL Scheme)
     useEffect(() => {
@@ -119,6 +125,13 @@ export const Layout: React.FC = () => {
         };
     }, []);
 
+    const handleOpenHomeTransaction = (transaction: Transaction) => {
+        dispatch({ type: 'SET_LEDGER', payload: transaction.ledgerId });
+        dispatch({ type: 'SET_CURRENT_DATE', payload: transaction.date });
+        setHomeJumpTarget({ transactionId: transaction.id, nonce: Date.now() });
+        setActiveTab('home');
+    };
+
     if (state.settings.isFirstRun) {
         return <OnboardingView />;
     }
@@ -130,8 +143,8 @@ export const Layout: React.FC = () => {
             {/* Main Content Area */}
             {/* Main takes full height, navigation floats on top at bottom */}
             <main className="h-full w-full overflow-hidden relative">
-                {activeTab === 'home' && <HomeView onOpenSearch={() => setShowSearch(true)} onOpenBudget={() => setShowBudget(true)} />}
-                {activeTab === 'stats' && <StatsView />}
+                {activeTab === 'home' && <HomeView onOpenSearch={() => setShowSearch(true)} onOpenBudget={() => setShowBudget(true)} jumpTarget={homeJumpTarget} onJumpTargetHandled={() => setHomeJumpTarget(null)} />}
+                {activeTab === 'stats' && <StatsView onOpenHomeTransaction={handleOpenHomeTransaction} />}
                 {activeTab === 'ledgers' && <LedgerManageView />}
                 {activeTab === 'settings' && <SettingsView />}
             </main>

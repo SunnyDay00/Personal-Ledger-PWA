@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { feedback } from '../services/feedback';
@@ -13,9 +13,11 @@ import { clsx } from 'clsx';
 interface HomeViewProps {
     onOpenSearch: () => void;
     onOpenBudget: () => void;
+    jumpTarget?: { transactionId: string; nonce: number } | null;
+    onJumpTargetHandled?: () => void;
 }
 
-export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }) => {
+export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, jumpTarget, onJumpTargetHandled }) => {
     const { state, deleteTransaction, dispatch, batchDeleteTransactions, batchUpdateTransactions } = useApp();
     const { currentLedgerId, transactions, categories, ledgers, settings, timeRange, currentDate: currentDateTs } = state;
     const currentLedger = ledgers.find(l => l.id === currentLedgerId) || ledgers[0];
@@ -28,6 +30,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
     const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
     const [showBatchEdit, setShowBatchEdit] = useState(false);
     const [previewKeys, setPreviewKeys] = useState<string[] | null>(null);
+    const [highlightedTransactionId, setHighlightedTransactionId] = useState<string | null>(null);
+    const transactionRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
     useEffect(() => {
         if (settings.budget.enabled) {
@@ -76,6 +80,38 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
             .filter(t => t.ledgerId === currentLedgerId && t.date >= startTime && t.date <= endTime)
             .sort((a, b) => b.date - a.date);
     }, [transactions, currentLedgerId, startTime, endTime]);
+
+    useEffect(() => {
+        if (!jumpTarget) return;
+        if (!filteredTransactions.some(transaction => transaction.id === jumpTarget.transactionId)) {
+            onJumpTargetHandled?.();
+            return;
+        }
+
+        let frame2: number | null = null;
+        let highlightTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const frame1 = window.requestAnimationFrame(() => {
+            frame2 = window.requestAnimationFrame(() => {
+                const element = transactionRefs.current[jumpTarget.transactionId];
+                if (element) {
+                    element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    setHighlightedTransactionId(jumpTarget.transactionId);
+                    highlightTimer = setTimeout(() => {
+                        setHighlightedTransactionId(current => current === jumpTarget.transactionId ? null : current);
+                    }, 2200);
+                }
+
+                onJumpTargetHandled?.();
+            });
+        });
+
+        return () => {
+            window.cancelAnimationFrame(frame1);
+            if (frame2 !== null) window.cancelAnimationFrame(frame2);
+            if (highlightTimer) clearTimeout(highlightTimer);
+        };
+    }, [jumpTarget, filteredTransactions, onJumpTargetHandled]);
 
     const groupedTransactions = useMemo(() => {
         const groups: { [key: string]: typeof transactions } = {};
@@ -265,8 +301,21 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
                                     {groupedTransactions[dateKey].map((t, index) => {
                                         const category = categories.find(c => c.id === t.categoryId);
                                         const isSelected = selectedIds.has(t.id);
+                                        const isHighlighted = highlightedTransactionId === t.id;
                                         return (
-                                            <div key={t.id} onClick={() => { if (isSelectionMode) toggleSelection(t.id); else setEditingTransaction(t); }} className={`group relative flex items-center justify-between p-3.5 active:bg-gray-50 dark:active:bg-zinc-800 transition-colors ${index !== groupedTransactions[dateKey].length - 1 ? 'border-b border-gray-100 dark:border-zinc-800/50' : ''}`}>
+                                            <div
+                                                key={t.id}
+                                                ref={(node) => {
+                                                    if (node) transactionRefs.current[t.id] = node;
+                                                    else delete transactionRefs.current[t.id];
+                                                }}
+                                                onClick={() => { if (isSelectionMode) toggleSelection(t.id); else setEditingTransaction(t); }}
+                                                className={clsx(
+                                                    'group relative flex items-center justify-between p-3.5 transition-[background-color,box-shadow] duration-300 scroll-mt-28 active:bg-gray-50 dark:active:bg-zinc-800',
+                                                    isHighlighted && 'bg-ios-primary/10 ring-2 ring-ios-primary/20 ring-inset shadow-[0_0_0_1px_rgba(0,122,255,0.08)]',
+                                                    index !== groupedTransactions[dateKey].length - 1 && 'border-b border-gray-100 dark:border-zinc-800/50'
+                                                )}
+                                            >
                                                 <div className="flex items-center gap-3">
                                                     {isSelectionMode && (
                                                         <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-colors ${isSelected ? 'bg-ios-primary border-ios-primary' : 'border-gray-300 dark:border-zinc-600'}`}>
@@ -280,7 +329,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget }
                                                         <div className="text-sm font-medium text-ios-text flex items-center gap-1.5 align-middle">
                                                             <span>{category?.name}</span>
                                                             {t.attachments && t.attachments.length > 0 && (
-                                                                <button onClick={(e) => {
+                                                                <button onPointerDown={(e) => e.stopPropagation()} onClick={(e) => {
                                                                     e.stopPropagation();
                                                                     feedback.play('click');
                                                                     setPreviewKeys(t.attachments);
