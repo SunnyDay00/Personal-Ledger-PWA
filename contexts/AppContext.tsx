@@ -148,9 +148,11 @@ function appReducer(state: AppState, action: AppAction): AppState {
             return { ...state, categories: state.categories.filter(c => c.id !== action.payload) };
         case 'REORDER_CATEGORIES':
             if (action.payload.length === 0) return state;
-            const type = action.payload[0].type;
-            const otherCategories = state.categories.filter(c => c.type !== type);
-            return { ...state, categories: [...otherCategories, ...action.payload] };
+            const reorderedMap = new Map(action.payload.map(category => [category.id, category]));
+            return {
+                ...state,
+                categories: state.categories.map(category => reorderedMap.get(category.id) ?? category)
+            };
         case 'ADD_CATEGORY_GROUP':
             return { ...state, categoryGroups: [...state.categoryGroups, { ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId }] };
         case 'UPDATE_CATEGORY_GROUP':
@@ -213,11 +215,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 }
 
                 // Load data from DB to Memory for UI (ViewModel)
-                const [settings, ledgers, categories, transactions, backupLogs, groups] = await Promise.all([
+                const [settings, ledgers, categories, transactions, operationLogs, backupLogs, groups] = await Promise.all([
                     dbAPI.getSettings(),
                     dbAPI.getLedgers(),
                     dbAPI.getCategories(),
                     dbAPI.getTransactions(),
+                    dbAPI.getOperationLogs(),
                     dbAPI.getBackupLogs(),
                     groupStoreAvailableRef.current ? dbAPI.getCategoryGroups() : Promise.resolve([])
                 ]);
@@ -245,6 +248,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     categories: categories || [],
                     categoryGroups: groups || [],
                     transactions: transactions || [],
+                    operationLogs: operationLogs || [],
                     backupLogs: backupLogs || [],
                     currentLedgerId: initialLedgerId,
                     syncStatus: 'idle',
@@ -457,41 +461,64 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         switch (action.type) {
             case 'ADD_LEDGER':
                 db.ledgers.put({ ...action.payload, updatedAt: now, isDeleted: false });
+                logOperation('add', action.payload.id, `新增账本：${action.payload.name}`);
                 break;
-            case 'UPDATE_LEDGER':
+            case 'UPDATE_LEDGER': {
+                const previousLedger = state.ledgers.find(ledger => ledger.id === action.payload.id);
                 db.ledgers.put({ ...action.payload, updatedAt: now });
+                logOperation('edit', action.payload.id, `编辑账本：${previousLedger?.name || action.payload.name}`);
                 break;
-            case 'DELETE_LEDGER':
+            }
+            case 'DELETE_LEDGER': {
+                const targetLedger = state.ledgers.find(ledger => ledger.id === action.payload);
                 db.ledgers.update(action.payload, { isDeleted: true, updatedAt: now });
                 // Also soft delete txs
                 db.transactions.where('ledgerId').equals(action.payload).modify({ isDeleted: true, updatedAt: now });
+                logOperation('delete', action.payload, `删除账本：${targetLedger?.name || action.payload}`);
                 setSyncDirty(true);
                 break;
+            }
             case 'ADD_CATEGORY':
                 db.categories.put({ ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: now, isDeleted: false });
+                logOperation('add', action.payload.id, `新增${action.payload.type === 'income' ? '收入' : '支出'}分类：${action.payload.name}`);
                 break;
-            case 'UPDATE_CATEGORY':
+            case 'UPDATE_CATEGORY': {
+                const previousCategory = state.categories.find(category => category.id === action.payload.id);
                 db.categories.put({ ...action.payload, updatedAt: now });
+                logOperation('edit', action.payload.id, `编辑分类：${previousCategory?.name || action.payload.name}`);
                 break;
+            }
             case 'UPDATE_SETTINGS': // Note: Settings handled by useEffect, but could be here too
                 break;
-            case 'DELETE_CATEGORY':
+            case 'DELETE_CATEGORY': {
+                const targetCategory = state.categories.find(category => category.id === action.payload);
                 db.categories.update(action.payload, { isDeleted: true, updatedAt: now });
+                logOperation('delete', action.payload, `删除分类：${targetCategory?.name || action.payload}`);
                 break;
-            case 'REORDER_CATEGORIES':
+            }
+            case 'REORDER_CATEGORIES': {
+                const typeLabel = action.payload[0]?.type === 'income' ? '收入' : '支出';
                 db.categories.bulkPut(action.payload.map(c => ({ ...c, updatedAt: now })));
+                logOperation('edit', `category-order:${action.payload[0]?.ledgerId || state.currentLedgerId}:${action.payload[0]?.type || 'expense'}`, `调整${typeLabel}分类排序，共 ${action.payload.length} 项`);
                 break;
+            }
             case 'ADD_CATEGORY_GROUP':
                 db.categoryGroups.put({ ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: now, isDeleted: false });
+                logOperation('add', action.payload.id, `新增分类组：${action.payload.name}`);
                 break;
             case 'UPDATE_CATEGORY_GROUP':
                 db.categoryGroups.put({ ...action.payload, updatedAt: now, isDeleted: false });
+                logOperation('edit', action.payload.id, `编辑分类组：${action.payload.name}`);
                 break;
-            case 'DELETE_CATEGORY_GROUP':
+            case 'DELETE_CATEGORY_GROUP': {
+                const targetGroup = state.categoryGroups.find(group => group.id === action.payload);
                 db.categoryGroups.update(action.payload, { isDeleted: true, updatedAt: now });
+                logOperation('delete', action.payload, `删除分类组：${targetGroup?.name || action.payload}`);
                 break;
+            }
             case 'REORDER_CATEGORY_GROUPS':
                 db.categoryGroups.bulkPut(action.payload.map(g => ({ ...g, updatedAt: now })));
+                logOperation('edit', `category-group-order:${state.currentLedgerId}`, `调整分类组排序，共 ${action.payload.length} 项`);
                 break;
             case 'BATCH_DELETE_TRANSACTIONS':
                 db.transactions.where('id').anyOf(action.payload).modify(t => { t.isDeleted = true; t.updatedAt = now; });

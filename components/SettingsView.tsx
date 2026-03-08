@@ -93,7 +93,8 @@ export const SettingsView: React.FC = () => {
   const [newCatName, setNewCatName] = useState('');
   const [newCatIcon, setNewCatIcon] = useState('Circle');
   const [isReordering, setIsReordering] = useState(false);
-  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragCategoryId, setDragCategoryId] = useState<string | null>(null);
+  const [dragOverCategoryId, setDragOverCategoryId] = useState<string | null>(null);
   const [groupModal, setGroupModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; categoryIds: string[] }>({
     isOpen: false,
     mode: 'create',
@@ -187,9 +188,9 @@ export const SettingsView: React.FC = () => {
 
   const sortedCategories = useMemo(() => {
     return state.categories
-      .filter(c => !c.isDeleted && c.ledgerId === selectedLedgerId)
+      .filter(c => !c.isDeleted && c.ledgerId === selectedLedgerId && c.type === catType)
       .sort((a, b) => a.order - b.order);
-  }, [state.categories, selectedLedgerId]);
+  }, [state.categories, selectedLedgerId, catType]);
 
   const sortedGroups = useMemo(() => {
     return (state.categoryGroups || [])
@@ -465,28 +466,102 @@ export const SettingsView: React.FC = () => {
     });
   };
 
-  const moveCategory = (index: number, direction: 'left' | 'right') => {
-    const list = [...sortedCategories];
-    const swapIndex = direction === 'left' ? index - 1 : index + 1;
-    if (swapIndex < 0 || swapIndex >= list.length) return;
-    [list[index], list[swapIndex]] = [list[swapIndex], list[index]];
-    const normalized = list.map((c, i) => ({ ...c, order: i, updatedAt: Date.now() }));
-    dispatch({ type: 'REORDER_CATEGORIES', payload: normalized });
+  useEffect(() => {
+    setDragCategoryId(null);
+    setDragOverCategoryId(null);
+  }, [catType, selectedLedgerId, isReordering]);
+
+  const reorderCategoriesById = (list: Category[], activeId: string, overId: string) => {
+    const activeIndex = list.findIndex(category => category.id === activeId);
+    const overIndex = list.findIndex(category => category.id === overId);
+    if (activeIndex === -1 || overIndex === -1 || activeIndex === overIndex) return list;
+
+    const next = [...list];
+    const [moved] = next.splice(activeIndex, 1);
+    next.splice(overIndex, 0, moved);
+    return next;
   };
 
-  const handleDragStart = (idx: number) => setDragIndex(idx);
-  const handleDragOver = (e: React.DragEvent) => e.preventDefault();
-  const handleDragEnd = () => setDragIndex(null);
-  const handleDrop = (idx: number) => {
-    if (dragIndex === null) return;
-    const list = [...sortedCategories];
-    const [item] = list.splice(dragIndex, 1);
-    list.splice(idx, 0, item);
-    const normalized = list.map((c, i) => ({ ...c, order: i, updatedAt: Date.now() }));
-    dispatch({ type: 'REORDER_CATEGORIES', payload: normalized });
-    setDragIndex(null);
+  const commitCategoryOrder = (list: Category[]) => {
+    if (list.length === 0) return;
+    const timestamp = Date.now();
+    dispatch({
+      type: 'REORDER_CATEGORIES',
+      payload: list.map((category, index) => ({
+        ...category,
+        order: index,
+        updatedAt: timestamp,
+      })),
+    });
+    feedback.play('switch');
+    feedback.vibrate('light');
   };
 
+  const previewCategories = useMemo(() => {
+    if (!dragCategoryId || !dragOverCategoryId || dragCategoryId === dragOverCategoryId) {
+      return sortedCategories;
+    }
+    return reorderCategoriesById(sortedCategories, dragCategoryId, dragOverCategoryId);
+  }, [sortedCategories, dragCategoryId, dragOverCategoryId]);
+
+  const getCategoryIdFromPoint = (clientX: number, clientY: number) => {
+    const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+    const card = element?.closest('[data-category-card="true"]') as HTMLElement | null;
+    return card?.dataset.categoryId || null;
+  };
+
+  const maybeAutoScrollCategories = (clientY: number) => {
+    const container = scrollRef.current;
+    if (!container) return;
+
+    const rect = container.getBoundingClientRect();
+    const threshold = 96;
+    if (clientY < rect.top + threshold) {
+      container.scrollTop -= 18;
+    } else if (clientY > rect.bottom - threshold) {
+      container.scrollTop += 18;
+    }
+  };
+
+  const handleCategoryPointerDown = (categoryId: string, event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isReordering) return;
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragCategoryId(categoryId);
+    setDragOverCategoryId(categoryId);
+  };
+
+  const handleCategoryPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isReordering || !dragCategoryId) return;
+
+    event.preventDefault();
+    maybeAutoScrollCategories(event.clientY);
+
+    const targetCategoryId = getCategoryIdFromPoint(event.clientX, event.clientY);
+    if (targetCategoryId) {
+      setDragOverCategoryId(targetCategoryId);
+    }
+  };
+
+  const finishCategoryDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    if (dragCategoryId && dragOverCategoryId && dragCategoryId !== dragOverCategoryId) {
+      commitCategoryOrder(reorderCategoriesById(sortedCategories, dragCategoryId, dragOverCategoryId));
+    }
+
+    setDragCategoryId(null);
+    setDragOverCategoryId(null);
+  };
+
+  const cancelCategoryDrag = () => {
+    setDragCategoryId(null);
+    setDragOverCategoryId(null);
+  };
 
   const renderStorage = () => (
     <>
@@ -1381,75 +1456,76 @@ export const SettingsView: React.FC = () => {
           {isReordering ? '完成' : '排序'}
         </button>
       </div>
-      {isReordering && <p className="text-[11px] text-ios-subtext px-4 -mt-2 mb-2">拖动或点击箭头调整顺序</p>}
+      {isReordering && <p className="text-[11px] text-ios-subtext px-4 -mt-2 mb-2">按住分类卡片拖动排序</p>}
 
       <div className="px-4">
         <div className="grid grid-cols-4 gap-3">
-          {sortedCategories.map((c, index) => (
-            <div
-              key={c.id}
-              draggable={isReordering}
-              onDragStart={() => handleDragStart(index)}
-              onDragOver={handleDragOver}
-              onDrop={() => handleDrop(index)}
-              onDragEnd={handleDragEnd}
-              className={cn(
-                'relative group bg-white dark:bg-zinc-900 rounded-xl p-3 flex flex-col items-center justify-center gap-2 shadow-sm border border-ios-border aspect-square animate-fade-in',
-                isReordering && 'cursor-move select-none',
-                dragIndex === index && isReordering ? 'ring-2 ring-ios-primary/50' : ''
-              )}
-              onClick={() => {
-                if (!isReordering) openEditCategory(c);
-              }}
-            >
-              <div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-zinc-800 flex items-center justify-center text-ios-primary">
-                <Icon name={c.icon} className="w-4 h-4" />
-              </div>
-              <span className="text-xs text-center truncate w-full">{c.name}</span>
+          {previewCategories.map((c, index) => {
+            const isDraggingCard = dragCategoryId === c.id;
+            const isDropTarget = dragOverCategoryId === c.id && dragCategoryId !== c.id;
 
-              {isReordering ? (
-                <>
-                  <button
-                    onClick={() => moveCategory(index, 'left')}
-                    disabled={index === 0}
-                    className="absolute left-0.5 top-1/2 -translate-y-1/2 p-1 text-ios-subtext disabled:opacity-20 hover:text-ios-primary active:scale-90 transition-transform"
-                  >
-                    <Icon name="ChevronLeft" className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => moveCategory(index, 'right')}
-                    disabled={index === sortedCategories.length - 1}
-                    className="absolute right-0.5 top-1/2 -translate-y-1/2 p-1 text-ios-subtext disabled:opacity-20 hover:text-ios-primary active:scale-90 transition-transform"
-                  >
-                    <Icon name="ChevronRight" className="w-4 h-4" />
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDeleteCategory(c.id);
-                    }}
-                    className="absolute -top-2 -right-2 w-7 h-7 bg-red-500 text-white rounded-full flex items-center justify-center shadow-md z-20 active:scale-90 transition-transform"
-                  >
-                    <Icon name="X" className="w-3.5 h-3.5 pointer-events-none" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      openEditCategory(c);
-                    }}
-                    className="absolute -bottom-2 left-1/2 -translate-x-1/2 px-2 py-1 text-[10px] bg-ios-primary text-white rounded-full shadow-md"
-                  >
-                    编辑
-                  </button>
-                </>
-              )}
-            </div>
-          ))}
+            return (
+              <div
+                key={c.id}
+                data-category-card="true"
+                data-category-id={c.id}
+                onPointerDown={isReordering ? (event) => handleCategoryPointerDown(c.id, event) : undefined}
+                onPointerMove={isReordering ? handleCategoryPointerMove : undefined}
+                onPointerUp={isReordering ? finishCategoryDrag : undefined}
+                onPointerCancel={isReordering ? cancelCategoryDrag : undefined}
+                className={cn(
+                  'relative group bg-white dark:bg-zinc-900 rounded-xl p-3 flex flex-col items-center justify-center gap-2 shadow-sm border border-ios-border aspect-square animate-fade-in transition-transform duration-150',
+                  isReordering && 'cursor-grab select-none touch-none',
+                  isDraggingCard && 'z-10 scale-95 opacity-70 shadow-lg ring-2 ring-ios-primary/60',
+                  isDropTarget && 'ring-2 ring-ios-primary/40 -translate-y-1'
+                )}
+                onClick={() => {
+                  if (!isReordering) openEditCategory(c);
+                }}
+              >
+                {isReordering && (
+                  <div className="absolute top-2 right-2 flex items-center gap-1 rounded-full bg-ios-primary/10 px-2 py-0.5 text-[10px] text-ios-primary">
+                    <Icon name="GripVertical" className="w-3 h-3" />
+                    <span>拖动</span>
+                  </div>
+                )}
+
+                <div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-zinc-800 flex items-center justify-center text-ios-primary">
+                  <Icon name={c.icon} className="w-4 h-4" />
+                </div>
+                <span className="text-xs text-center truncate w-full">{c.name}</span>
+
+                {isReordering ? (
+                  <div className="absolute top-2 left-2 min-w-6 h-6 px-1 rounded-full bg-gray-100 dark:bg-zinc-800 text-[10px] font-medium text-ios-subtext flex items-center justify-center">
+                    {index + 1}
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteCategory(c.id);
+                      }}
+                      className="absolute -top-2 -right-2 w-7 h-7 bg-red-500 text-white rounded-full flex items-center justify-center shadow-md z-20 active:scale-90 transition-transform"
+                    >
+                      <Icon name="X" className="w-3.5 h-3.5 pointer-events-none" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openEditCategory(c);
+                      }}
+                      className="absolute -bottom-2 left-1/2 -translate-x-1/2 px-2 py-1 text-[10px] bg-ios-primary text-white rounded-full shadow-md"
+                    >
+                      编辑
+                    </button>
+                  </>
+                )}
+              </div>
+            );
+          })}
 
           {!isReordering && (
             <button
@@ -1471,15 +1547,15 @@ export const SettingsView: React.FC = () => {
             top: visualViewport.offsetTop
           }}
         >
-          <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-6 animate-slide-up h-[70vh] flex flex-col">
+          <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-5 animate-slide-up h-[78%] max-h-[680px] flex flex-col overflow-hidden">
             <div className="flex justify-between items-center mb-6">
               <button onClick={() => setIsAddingCat(false)} className="text-ios-subtext">取消</button>
               <h3 className="font-bold text-lg">添加{catType === 'expense' ? '支出' : '收入'}分类</h3>
               <button onClick={handleAddCategory} className="text-ios-primary font-bold">完成</button>
             </div>
 
-            <div className="flex items-center gap-4 mb-6 bg-gray-50 dark:bg-zinc-800 p-4 rounded-2xl">
-              <div className="w-12 h-12 rounded-full bg-white dark:bg-zinc-700 shadow-sm flex items-center justify-center text-ios-primary">
+            <div className="flex items-center gap-3 mb-4 bg-gray-50 dark:bg-zinc-800 p-3 rounded-2xl">
+              <div className="w-11 h-11 rounded-full bg-white dark:bg-zinc-700 shadow-sm flex items-center justify-center text-ios-primary shrink-0">
                 <Icon name={newCatIcon} className="w-6 h-6" />
               </div>
               <input
@@ -1487,25 +1563,25 @@ export const SettingsView: React.FC = () => {
                 placeholder="分类名称"
                 value={newCatName}
                 onChange={(e) => setNewCatName(e.target.value)}
-                className="flex-1 bg-transparent text-lg outline-none placeholder:text-gray-400"
+                className="flex-1 bg-transparent text-base outline-none placeholder:text-gray-400 min-w-0"
                 autoFocus
                 autoComplete="off"
                 name="categoryName"
               />
             </div>
 
-            <div className="flex-1 overflow-y-auto no-scrollbar">
-              <div className="grid grid-cols-6 gap-4 pb-10">
+            <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
+              <div className="grid grid-cols-6 gap-3 pb-[calc(env(safe-area-inset-bottom)+1rem)]">
                 {AVAILABLE_ICONS.map((icon) => (
                   <button
                     key={icon}
                     onClick={() => setNewCatIcon(icon)}
                     className={cn(
-                      'aspect-square rounded-xl flex items-center justify-center transition-all',
-                      newCatIcon === icon ? 'bg-ios-primary text-white shadow-lg scale-110' : 'bg-gray-50 dark:bg-zinc-800 text-ios-subtext'
+                      'min-h-[52px] rounded-2xl border border-transparent flex items-center justify-center transition-all',
+                      newCatIcon === icon ? 'bg-ios-primary text-white shadow-lg scale-105 border-ios-primary/20' : 'bg-gray-50 dark:bg-zinc-800 text-ios-subtext border-gray-100 dark:border-zinc-700/70'
                     )}
                   >
-                    <Icon name={icon} className="w-5 h-5" />
+                    <Icon name={icon} className="w-6 h-6" />
                   </button>
                 ))}
               </div>
@@ -1522,7 +1598,7 @@ export const SettingsView: React.FC = () => {
             top: visualViewport.offsetTop
           }}
         >
-          <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-6 animate-slide-up h-[70vh] flex flex-col">
+          <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-5 animate-slide-up h-[78%] max-h-[680px] flex flex-col overflow-hidden">
             <div className="flex justify-between items-center mb-6">
               <button
                 onClick={() => {
@@ -1538,8 +1614,8 @@ export const SettingsView: React.FC = () => {
               <button onClick={saveEditCategory} className="text-ios-primary font-bold">保存</button>
             </div>
 
-            <div className="flex items-center gap-4 mb-6 bg-gray-50 dark:bg-zinc-800 p-4 rounded-2xl">
-              <div className="w-12 h-12 rounded-full bg-white dark:bg-zinc-700 shadow-sm flex items-center justify-center text-ios-primary">
+            <div className="flex items-center gap-3 mb-4 bg-gray-50 dark:bg-zinc-800 p-3 rounded-2xl">
+              <div className="w-11 h-11 rounded-full bg-white dark:bg-zinc-700 shadow-sm flex items-center justify-center text-ios-primary shrink-0">
                 <Icon name={newCatIcon} className="w-6 h-6" />
               </div>
               <input
@@ -1547,25 +1623,25 @@ export const SettingsView: React.FC = () => {
                 placeholder="分类名称"
                 value={newCatName}
                 onChange={(e) => setNewCatName(e.target.value)}
-                className="flex-1 bg-transparent text-lg outline-none placeholder:text-gray-400"
+                className="flex-1 bg-transparent text-base outline-none placeholder:text-gray-400 min-w-0"
                 autoFocus
                 autoComplete="off"
                 name="editCategoryName"
               />
             </div>
 
-            <div className="flex-1 overflow-y-auto no-scrollbar">
-              <div className="grid grid-cols-6 gap-4 pb-10">
+            <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
+              <div className="grid grid-cols-6 gap-3 pb-[calc(env(safe-area-inset-bottom)+1rem)]">
                 {AVAILABLE_ICONS.map((icon) => (
                   <button
                     key={icon}
                     onClick={() => setNewCatIcon(icon)}
                     className={cn(
-                      'aspect-square rounded-xl flex items-center justify-center transition-all',
-                      newCatIcon === icon ? 'bg-ios-primary text-white shadow-lg scale-110' : 'bg-gray-50 dark:bg-zinc-800 text-ios-subtext'
+                      'min-h-[52px] rounded-2xl border border-transparent flex items-center justify-center transition-all',
+                      newCatIcon === icon ? 'bg-ios-primary text-white shadow-lg scale-105 border-ios-primary/20' : 'bg-gray-50 dark:bg-zinc-800 text-ios-subtext border-gray-100 dark:border-zinc-700/70'
                     )}
                   >
-                    <Icon name={icon} className="w-5 h-5" />
+                    <Icon name={icon} className="w-6 h-6" />
                   </button>
                 ))}
               </div>
@@ -1582,7 +1658,7 @@ export const SettingsView: React.FC = () => {
             top: visualViewport.offsetTop
           }}
         >
-          <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-6 animate-slide-up h-[70vh] flex flex-col">
+          <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-5 animate-slide-up h-[78%] max-h-[680px] flex flex-col overflow-hidden">
             <div className="flex justify-between items-center mb-4">
               <button onClick={() => setGroupModal({ isOpen: false, mode: 'create', name: '', categoryIds: [] })} className="text-ios-subtext">取消</button>
               <h3 className="font-bold text-lg">{groupModal.mode === 'create' ? '新建分类组' : '编辑分类组'}</h3>

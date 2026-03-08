@@ -219,6 +219,9 @@ export const dbAPI = {
       return [];
     }
   },
+  async getOperationLogs() {
+    return await db.operationLogs.orderBy('timestamp').reverse().toArray();
+  },
   async getBackupLogs() {
     return await db.backupLogs.orderBy('timestamp').reverse().toArray();
   },
