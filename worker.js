@@ -9,8 +9,8 @@ function makeCorsHeaders(origin) {
   const allowed = origin && ALLOW_ORIGINS.includes(origin) ? origin : DEFAULT_ALLOW_ORIGIN;
   return {
     'Access-Control-Allow-Origin': allowed || '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-CF-Account-ID, X-CF-API-Token, X-CF-KV-Namespace-ID',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-CF-Account-ID, X-CF-API-Token, X-CF-KV-Namespace-ID, X-Image-Key',
     'Access-Control-Max-Age': '86400',
   };
 }
@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   category_id TEXT,
   date INTEGER,
   note TEXT,
+  attachments TEXT,
   created_at INTEGER,
   updated_at INTEGER,
   is_deleted INTEGER
@@ -171,15 +172,75 @@ export default {
       }, 200, origin);
     }
 
+    // ---- R2 Image Upload ----
+    if (url.pathname === '/upload/image' && request.method === 'POST') {
+      const contentType = request.headers.get('Content-Type') || 'application/octet-stream';
+      // Allow client to specify key for offline-first support
+      const clientKey = request.headers.get('X-Image-Key');
+      const key = clientKey || crypto.randomUUID();
+      try {
+        await env.IMAGES_BUCKET.put(key, request.body, {
+          httpMetadata: { contentType }
+        });
+        return json({ key }, 201, origin);
+      } catch (e) {
+        return json({ error: e.message }, 500, origin);
+      }
+    }
+
+    // ---- R2 Image Get ----
+    if (url.pathname.startsWith('/image/') && request.method === 'GET') {
+      const key = url.pathname.replace('/image/', '');
+      if (!key) return text('Missing key', 400, origin);
+
+      try {
+        const object = await env.IMAGES_BUCKET.get(key);
+        if (!object) return text('Not found', 404, origin);
+
+        const headers = new Headers();
+        object.writeHttpMetadata(headers);
+        headers.set('etag', object.httpEtag);
+        // CORS headers manually since we construct raw Response
+        const cors = makeCorsHeaders(origin);
+        Object.entries(cors).forEach(([k,v]) => headers.set(k, v));
+        headers.set('Cache-Control', 'public, max-age=31536000');
+
+        return new Response(object.body, { headers });
+      } catch (e) {
+        return text('Error fetching image', 500, origin);
+      }
+    }
+
+    // ---- R2 Image Delete ----
+    if (url.pathname.startsWith('/image/') && request.method === 'DELETE') {
+      const key = url.pathname.replace('/image/', '');
+      if (!key) return json({ error: 'Missing key' }, 400, origin);
+
+      try {
+        await env.IMAGES_BUCKET.delete(key);
+        return json({ success: true }, 200, origin);
+      } catch (e) {
+        return json({ error: e.message }, 500, origin);
+      }
+    }
+
+    // ---- Push Sync (D1) ----
+    if (url.pathname === '/sync/push' && request.method === 'POST') {
+      return pushHandler(request, env, origin, ctx);
+    }
+    
+    // ---- Pull Sync (D1) ----
+    if (url.pathname === '/sync/pull' && request.method === 'GET') {
+      return pullHandler(url, env, origin, ctx);
+    }
+
     return text('Not found', 404, origin);
-  },
+  }
 };
 
 // ---- 辅助：确保表存在 ----
 async function ensureTables(env) {
     const stmts = CREATE_SQL.split(';').map(s => s.trim()).filter(Boolean);
-    // 简单优化：并发执行，虽然 D1 内部可能是串行，但减少 await 往返
-    // 注意：usage_stats 表也包含在 CREATE_SQL 中
     for (const sql of stmts) await env.DB.prepare(sql).run();
 }
 
@@ -352,8 +413,8 @@ async function pushHandler(request, url, env, origin, ctx) {
   // Transactions
   if (Array.isArray(payload.transactions) && payload.transactions.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO transactions (id,user_id,ledger_id,amount,type,category_id,date,note,created_at,updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO transactions (id,user_id,ledger_id,amount,type,category_id,date,note,attachments,created_at,updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET 
          ledger_id=excluded.ledger_id, 
          amount=excluded.amount, 
@@ -361,6 +422,7 @@ async function pushHandler(request, url, env, origin, ctx) {
          category_id=excluded.category_id, 
          date=excluded.date, 
          note=excluded.note, 
+         attachments=excluded.attachments,
          created_at=excluded.created_at, 
          updated_at=excluded.updated_at, 
          is_deleted=excluded.is_deleted, 
@@ -380,6 +442,7 @@ async function pushHandler(request, url, env, origin, ctx) {
         t.categoryId || t.category_id || '',
         t.date || now,
         t.note || '',
+        JSON.stringify(t.attachments || []),
         createdAt,
         updatedAt,
         isDel ? 1 : 0

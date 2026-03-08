@@ -6,19 +6,91 @@ import { AddView } from './AddView';
 import { OnboardingView } from './OnboardingView';
 import { SearchModal } from './SearchModal';
 import { BudgetModal } from './BudgetModal';
+import { LedgerManageView } from './LedgerManageView';
 import { Icon } from './ui/Icon';
 import { Toast } from './ui/Toast';
 import { useApp } from '../contexts/AppContext';
 import { clsx } from 'clsx';
 import { feedback } from '../services/feedback';
+import { App, URLOpenListenerEvent } from '@capacitor/app';
+import { Clipboard } from '@capacitor/clipboard';
+import { Transaction } from '../types';
+import { LiquidFilter } from './LiquidFilter';
 
 export const Layout: React.FC = () => {
     const { state, canUndo, undo } = useApp();
-    const [activeTab, setActiveTab] = useState<'home' | 'stats' | 'settings'>('home');
+    const [activeTab, setActiveTab] = useState<'home' | 'stats' | 'ledgers' | 'settings'>('home');
     const [showAdd, setShowAdd] = useState(false);
     const [showSearch, setShowSearch] = useState(false);
     const [showBudget, setShowBudget] = useState(false);
     const [showToast, setShowToast] = useState(false);
+    const [initialAddData, setInitialAddData] = useState<Partial<Transaction> | undefined>(undefined);
+    const [clipboardImage, setClipboardImage] = useState<string | undefined>(undefined);
+
+    // Handle Deep Links (URL Scheme)
+    useEffect(() => {
+        App.addListener('appUrlOpen', (event: URLOpenListenerEvent) => {
+            try {
+                // Example: personalledger://add?amount=100&note=Lunch&type=expense&category=Food
+                const urlStr = event.url;
+                if (!urlStr.includes('add')) return;
+
+                const url = new URL(urlStr);
+                const params = url.searchParams;
+
+                const amount = parseFloat(params.get('amount') || '0');
+                const note = params.get('note') ? decodeURIComponent(params.get('note')!) : '';
+                const typeParam = params.get('type');
+                const type = (typeParam === 'income' || typeParam === 'expense') ? typeParam : 'expense';
+
+                const categoryName = params.get('category') ? decodeURIComponent(params.get('category')!) : null;
+                const ledgerName = params.get('ledger') ? decodeURIComponent(params.get('ledger')!) : null;
+
+                let categoryId: string | undefined;
+                let ledgerId: string | undefined;
+
+                // Find Ledger
+                if (ledgerName) {
+                    const ledger = state.ledgers.find(l => l.name === ledgerName);
+                    if (ledger) ledgerId = ledger.id;
+                }
+
+                // Find Category (in target ledger or current)
+                const targetLedgerId = ledgerId || state.currentLedgerId;
+                if (categoryName) {
+                    const category = state.categories.find(c =>
+                        c.name === categoryName &&
+                        c.ledgerId === targetLedgerId &&
+                        c.type === type
+                    );
+                    if (category) categoryId = category.id;
+                }
+
+                setInitialAddData({
+                    amount: amount > 0 ? amount : undefined,
+                    note: note || undefined,
+                    type,
+                    categoryId,
+                    ledgerId,
+                    date: Date.now() // Default to now
+                });
+
+                setShowAdd(true);
+                feedback.play('success');
+
+                // Check clipboard
+                Clipboard.read().then(({ type, value }) => {
+                    if (type === 'image' && value) {
+                        setClipboardImage(value);
+                    } else {
+                        setClipboardImage(undefined);
+                    }
+                }).catch(() => setClipboardImage(undefined));
+            } catch (e) {
+                console.error('Error parsing URL:', e);
+            }
+        });
+    }, [state.ledgers, state.categories, state.currentLedgerId]);
 
     // Show toast when canUndo becomes true
     useEffect(() => {
@@ -53,18 +125,26 @@ export const Layout: React.FC = () => {
 
     return (
         <div className="h-full w-full flex flex-col bg-ios-bg text-ios-text overflow-hidden font-sans">
+            <LiquidFilter />
 
             {/* Main Content Area */}
             {/* Main takes full height, navigation floats on top at bottom */}
             <main className="h-full w-full overflow-hidden relative">
                 {activeTab === 'home' && <HomeView onOpenSearch={() => setShowSearch(true)} onOpenBudget={() => setShowBudget(true)} />}
                 {activeTab === 'stats' && <StatsView />}
+                {activeTab === 'ledgers' && <LedgerManageView />}
                 {activeTab === 'settings' && <SettingsView />}
             </main>
 
             {/* Overlays */}
-            {showAdd && <AddView onClose={() => setShowAdd(false)} />}
-            {showSearch && <SearchModal onClose={() => setShowSearch(false)} />}
+            {/* Overlays */}
+            {showSearch && <SearchModal onClose={() => setShowSearch(false)} onEdit={(t) => {
+                // Keep search modal open so we return to it after editing
+                setInitialAddData(t);
+                // Also propagate clipboard image if needed? No, usually edit is just existing data.
+                setShowAdd(true);
+            }} />}
+            {showAdd && <AddView onClose={() => { setShowAdd(false); setInitialAddData(undefined); setClipboardImage(undefined); }} initialTransaction={initialAddData} initialClipboardImage={clipboardImage} />}
             {showBudget && <BudgetModal onClose={() => setShowBudget(false)} />}
 
             {/* Undo Toast */}
@@ -80,75 +160,120 @@ export const Layout: React.FC = () => {
                 />
             )}
 
-            {/* Tab Bar - Absolute Positioning for Glass Effect overlaying content */}
-            <nav className="absolute bottom-0 left-0 right-0 z-40 pb-[env(safe-area-inset-bottom)] bg-white/60 dark:bg-zinc-900/60 backdrop-blur-xl border-t border-black/5 dark:border-white/10 shadow-[0_-1px_10px_rgba(0,0,0,0.02)]">
-                <div className="flex items-center justify-around h-16 px-2">
+            {/* Tab Bar - Floating Capsule Design */}
+            <nav
+                className="absolute bottom-6 left-4 right-4 z-40 h-16"
+            >
+                {/* Floating Capsule Background */}
+                <div className="absolute inset-0 overflow-hidden rounded-full bg-white/60 dark:bg-[#1c1c1e]/60 backdrop-blur-md border border-white/20 dark:border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.12)]">
+                    {/* Glossy Reflection Overlay */}
+                    <div
+                        className="absolute inset-0 pointer-events-none opacity-40 mix-blend-overlay"
+                        style={{
+                            background: 'linear-gradient(180deg, rgba(255,255,255,0.4) 0%, rgba(255,255,255,0.05) 50%, rgba(255,255,255,0) 100%)'
+                        }}
+                    />
+                </div>
 
+                <div className="flex items-center justify-between h-full px-1.5 relative z-10 text-[10px] font-bold">
+
+                    {/* 1. Home */}
                     <TabButton
                         active={activeTab === 'home'}
                         onClick={() => setActiveTab('home')}
-                        icon="Book"
-                        label="账本"
+                        icon="Home"
+                        label="首页"
+                        position="first"
                     />
 
+                    {/* 2. Stats */}
                     <TabButton
                         active={activeTab === 'stats'}
                         onClick={() => setActiveTab('stats')}
-                        icon="PieChart"
+                        icon="BarChart3"
                         label="统计"
+                        position="second"
                     />
 
-                    {/* Add Button (Floating Center) */}
-                    <div className="relative -top-6">
+                    {/* 3. Add (Center Green Button) */}
+                    <div className="flex justify-center items-center w-[20%]">
                         <button
                             onClick={() => {
                                 feedback.play('success');
                                 feedback.vibrate('light');
                                 setShowAdd(true);
                             }}
-                            className="w-16 h-16 rounded-full bg-ios-primary text-white shadow-lg shadow-blue-500/30 flex items-center justify-center transform transition-transform active:scale-95 border-4 border-ios-bg"
+                            className="w-14 h-10 rounded-[20px] bg-[#34C759] text-white shadow-[0_4px_15px_rgba(52,199,89,0.4)] flex items-center justify-center transform transition-all hover:scale-105 active:scale-95 relative overflow-hidden group"
                         >
-                            <Icon name="Plus" className="w-8 h-8" />
+                            {/* Glass Shine */}
+                            <div className="absolute inset-0 bg-gradient-to-b from-white/20 to-transparent pointer-events-none" />
+                            <div className="absolute bottom-0 inset-x-0 h-1/2 bg-gradient-to-t from-black/10 to-transparent pointer-events-none" />
+
+                            <Icon name="Plus" className="w-6 h-6 z-10 drop-shadow-sm" strokeWidth={3} />
                         </button>
                     </div>
 
+                    {/* 4. Ledgers (New) */}
+                    <TabButton
+                        active={activeTab === 'ledgers'}
+                        onClick={() => setActiveTab('ledgers')}
+                        icon="List"
+                        label="账本"
+                        position="fourth"
+                    />
+
+                    {/* 5. Settings */}
                     <TabButton
                         active={activeTab === 'settings'}
                         onClick={() => setActiveTab('settings')}
                         icon="Settings"
                         label="设置"
+                        position="last"
                     />
-
-                    {/* Symmetrical Spacer for layout balance */}
-                    <div className="w-0"></div>
                 </div>
             </nav>
         </div>
     );
 };
 
-const TabButton: React.FC<{ active: boolean; onClick: () => void; icon: string; label: string }> = ({ active, onClick, icon, label }) => (
+const TabButton: React.FC<{ active: boolean; onClick: () => void; icon: string; label: string; position?: 'first' | 'second' | 'middle' | 'fourth' | 'last' }> = ({ active, onClick, icon, label, position = 'middle' }) => (
     <button onClick={() => {
         if (!active) {
             feedback.play('click');
             feedback.vibrate('light');
         }
         onClick();
-    }} className="flex flex-col items-center justify-center w-20 gap-1 group py-1">
-        <Icon
-            name={icon}
-            className={clsx(
-                "w-6 h-6 transition-colors duration-200",
-                active ? "text-ios-primary fill-current" : "text-gray-400 dark:text-gray-500"
-            )}
-            fill={active ? "currentColor" : "none"}
-            strokeWidth={active ? 0 : 2}
-        />
-        <span className={clsx(
-            "text-[10px] font-medium transition-colors duration-200",
-            active ? "text-ios-primary" : "text-gray-400 dark:text-gray-500"
+    }} className="flex flex-col items-center justify-center w-[20%] h-full group relative p-0.5">
+        <div className={clsx(
+            "relative z-10 flex flex-col items-center justify-center gap-0.5 transition-all duration-300 w-full h-full",
+            active ? "bg-gray-200 dark:bg-zinc-700 shadow-sm" : "bg-transparent",
+            // Shape & Position Logic for "Outward Pop" effect:
+            // Highlighting amplitude is now consistent (1 unit) across all tabs.
+            // 1. Home (First): mr-1 pulls background Left
+            // 2. Stats (Second): mr-1 pulls background Left
+            // 3. Add: Center
+            // 4. Ledgers (Third/Fourth): ml-1 pulls background Right
+            // 5. Settings (Last): ml-1 pulls background Right
+            position === 'first' && active ? "rounded-full mr-1" :
+                position === 'second' && active ? "rounded-full mr-1" :
+                    position === 'fourth' && active ? "rounded-full ml-1" :
+                        position === 'last' && active ? "rounded-full ml-1" :
+                            "rounded-full"
         )}>
-            {label}
-        </span>
+            <Icon
+                name={icon}
+                className={clsx(
+                    "w-5 h-5 transition-all duration-300",
+                    active ? "text-ios-primary fill-current scale-105" : "text-gray-500 dark:text-gray-500"
+                )}
+                strokeWidth={active ? 2.5 : 2}
+            />
+            <span className={clsx(
+                "text-[10px] font-bold transition-colors duration-200",
+                active ? "text-ios-primary" : "text-gray-500 dark:text-gray-500"
+            )}>
+                {label}
+            </span>
+        </div>
     </button>
 );

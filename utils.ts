@@ -4,6 +4,10 @@ import { twMerge } from 'tailwind-merge';
 import { AppState, Transaction, Category, Ledger } from './types';
 import { format } from 'date-fns';
 
+import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share';
+import { Capacitor } from '@capacitor/core';
+
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
@@ -25,21 +29,48 @@ export function generateId(): string {
   return Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
 }
 
-export function exportToJson(data: object, filename: string) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+export async function exportToJson(data: object, filename: string) {
+  if (Capacitor.isNativePlatform()) {
+    try {
+      await Filesystem.writeFile({
+        path: filename,
+        data: JSON.stringify(data, null, 2),
+        directory: Directory.Cache,
+        encoding: Encoding.UTF8,
+      });
+
+      const uriResult = await Filesystem.getUri({
+        directory: Directory.Cache,
+        path: filename,
+      });
+
+      await Share.share({
+        title: 'Export Backup',
+        text: 'Backup JSON file',
+        url: uriResult.uri,
+        dialogTitle: 'Export Backup',
+      });
+    } catch (e) {
+      console.error('Export failed', e);
+      alert('导出失败: ' + (e as any).message);
+    }
+  } else {
+    // Web Fallback
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 }
 
 // Robust CSV Generator including isDeleted
 export function transactionsToCsv(transactions: Transaction[], categories: Category[] = [], ledgers: Ledger[] = []): string {
     const headers = [
         'Time', 'Category', 'Amount', 'Type', 'Note', 'Ledger',
-        'id', 'ledgerId', 'categoryId', 'rawType', 'dateTs', 'createdAtTs', 'updatedAtTs', 'isDeleted'
+        'id', 'ledgerId', 'categoryId', 'rawType', 'dateTs', 'createdAtTs', 'updatedAtTs', 'isDeleted', 'attachments'
     ];
     
     const rows = transactions.map(t => {
@@ -66,7 +97,8 @@ export function transactionsToCsv(transactions: Transaction[], categories: Categ
             t.date,
             t.createdAt,
             t.updatedAt || '',
-            t.isDeleted ? '1' : '0'
+            t.isDeleted ? '1' : '0',
+            t.attachments ? `"${JSON.stringify(t.attachments).replace(/"/g, '""')}"` : '[]'
         ].join(',');
     });
     
@@ -77,10 +109,23 @@ const parseCsvLine = (text: string, delimiter: ',' | '\t' = ',') => {
     const cols: string[] = [];
     let inQuote = false;
     let buffer = '';
-    for (let char of text) {
-        if (char === '"') { inQuote = !inQuote; }
-        else if (char === delimiter && !inQuote) { cols.push(buffer); buffer = ''; }
-        else { buffer += char; }
+    for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        if (char === '"') {
+            if (inQuote && text[i+1] === '"') {
+                buffer += '"';
+                i++; // skip next quote
+            } else {
+                inQuote = !inQuote;
+            }
+        }
+        else if (char === delimiter && !inQuote) {
+            cols.push(buffer);
+            buffer = '';
+        }
+        else {
+            buffer += char;
+        }
     }
     cols.push(buffer);
     return cols;
@@ -148,7 +193,7 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
 
     let idx = {
         id: 0, ledgerId: 1, amount: 2, type: 3, categoryId: 4, date: 5, note: 6, createdAt: 7, updatedAt: 8,
-        timeStr: -1, isDeleted: -1, catName: -1, ledgerName: -1
+        timeStr: -1, isDeleted: -1, catName: -1, ledgerName: -1, attachments: -1
     };
 
     if (headers.includes('id') && (headers.includes('dateTs') || headers.includes('Time'))) {
@@ -165,7 +210,8 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
             timeStr: headers.indexOf('Time'),
             isDeleted: headers.indexOf('isDeleted'),
             catName: headers.indexOf('Category'),
-            ledgerName: headers.indexOf('Ledger')
+            ledgerName: headers.indexOf('Ledger'),
+            attachments: headers.indexOf('attachments')
         };
     }
 
@@ -202,8 +248,8 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
             }
 
             let note = (idx.note !== -1) ? cols[idx.note] : '';
-            if(note && note.startsWith('"') && note.endsWith('"')) note = note.slice(1, -1).replace(/""/g, '"');
-
+            // Parser handles quoting, so we use raw value
+            
             const isDeleted = idx.isDeleted !== -1 && cols[idx.isDeleted] === '1';
             const catName = idx.catName !== -1 ? cols[idx.catName]?.trim() : '';
             const ledgerName = idx.ledgerName !== -1 ? cols[idx.ledgerName]?.trim() : '';
@@ -222,7 +268,8 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
                 note: note || '',
                 createdAt: (idx.createdAt !== -1 && parseInt(cols[idx.createdAt])) || Date.now(),
                 updatedAt: (idx.updatedAt !== -1 && parseInt(cols[idx.updatedAt])) ? parseInt(cols[idx.updatedAt]) : Date.now(),
-                isDeleted
+                isDeleted,
+                attachments: (idx.attachments !== -1 && cols[idx.attachments]) ? JSON.parse(cols[idx.attachments]) : []
             });
         } catch (e) { continue; }
     }
@@ -243,15 +290,44 @@ export async function readCsvFileWithEncoding(file: File): Promise<string> {
   return new TextDecoder('utf-8').decode(bytes);
 }
 
-export function exportToCsv(transactions: Transaction[], categories: Category[], ledgers: Ledger[], filename: string) {
+export async function exportToCsv(transactions: Transaction[], categories: Category[], ledgers: Ledger[], filename: string) {
   const csvContent = transactionsToCsv(transactions, categories, ledgers);
-  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+  
+  if (Capacitor.isNativePlatform()) {
+    try {
+      // Write with BOM for Excel compatibility
+      await Filesystem.writeFile({
+        path: filename,
+        data: '\uFEFF' + csvContent,
+        directory: Directory.Cache,
+        encoding: Encoding.UTF8,
+      });
+
+      const uriResult = await Filesystem.getUri({
+        directory: Directory.Cache,
+        path: filename,
+      });
+
+      await Share.share({
+        title: 'Export CSV',
+        text: 'Export CSV file',
+        url: uriResult.uri,
+        dialogTitle: 'Export CSV',
+      });
+    } catch (e) {
+      console.error('Export CSV failed', e);
+      alert('导出失败: ' + (e as any).message);
+    }
+  } else {
+    // Web Fallback
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 }
 
 export function readJsonFile(file: File): Promise<any> {

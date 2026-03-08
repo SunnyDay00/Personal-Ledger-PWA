@@ -7,6 +7,7 @@ import { db, initAndMigrateDB, dbAPI, resetDB, ensureStoresReady } from '../serv
 import { pushToCloud, pullFromCloud } from '../services/d1Sync';
 import { SyncService } from '../services/sync';
 import { feedback } from '../services/feedback';
+import { imageService } from '../services/imageService';
 
 const initialState: AppState = {
     ledgers: INITIAL_LEDGERS,
@@ -42,6 +43,7 @@ interface AppContextType {
     resetApp: () => Promise<void>;
     restoreFromD1: () => Promise<void>;
     addLedger: (ledger: Ledger) => Promise<void>;
+    triggerCloudSync: () => void;
 }
 
 const AppContext = createContext<AppContextType>({
@@ -62,6 +64,7 @@ const AppContext = createContext<AppContextType>({
     resetApp: async () => { },
     restoreFromD1: async () => { },
     addLedger: async () => { },
+    triggerCloudSync: () => { },
 });
 
 function appReducer(state: AppState, action: AppAction): AppState {
@@ -177,6 +180,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const [isDBLoaded, setIsDBLoaded] = useState(false);
     const [syncDirty, setSyncDirty] = useState(false);
     const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const isRestoringRef = useRef(false); // Guard against auto-sync immediately after restore
+    const [isRestoring, setIsRestoring] = useState(false);
     const versionCheckTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const versionCheckRunningRef = useRef(false);
     const autoBackupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -214,7 +219,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     dbAPI.getCategories(),
                     dbAPI.getTransactions(),
                     dbAPI.getBackupLogs(),
-                    groupStoreAvailableRef.current ? db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order') : Promise.resolve([])
+                    groupStoreAvailableRef.current ? dbAPI.getCategoryGroups() : Promise.resolve([])
                 ]);
 
                 const loadedSettings = settings ? { ...DEFAULT_SETTINGS, ...settings } : DEFAULT_SETTINGS;
@@ -266,9 +271,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // Persist Changes to DB (Write-Behind / Side-Effects)
     // We use this useEffect to save Settings whenever they change
+    const prevSettingsRef = useRef<string | null>(null);
     useEffect(() => {
         if (isDBLoaded) {
             dbAPI.saveSettings(state.settings);
+            // Trigger sync when settings change (excluding lastSyncVersion to prevent infinite loop)
+            const settingsWithoutVersion = { ...state.settings, lastSyncVersion: undefined };
+            const currentHash = JSON.stringify(settingsWithoutVersion);
+            if (prevSettingsRef.current !== null && prevSettingsRef.current !== currentHash) {
+                setSyncDirty(true);
+            }
+            prevSettingsRef.current = currentHash;
         }
     }, [state.settings, isDBLoaded]);
 
@@ -287,11 +300,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const syncGroupsToState = async () => {
             if (!isDBLoaded) return;
             try {
-                const groups = await db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order');
+                const groups = await dbAPI.getCategoryGroups();
                 if (groups.length > 0 && stateRef.current.categoryGroups.length === 0) {
                     dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groups } });
                 }
             } catch { }
+
+            // Clean up image cache periodically (on startup)
+            setTimeout(() => {
+                imageService.enforceCacheLimit().catch(e => console.warn('Cache cleanup failed', e));
+            }, 10000);
         };
         syncGroupsToState();
     }, [isDBLoaded]);
@@ -369,7 +387,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         // 1. Update UI
         dispatch({ type: 'ADD_TRANSACTION', payload: t });
         // 2. Write DB
-        db.transactions.put({ ...t, updatedAt: Date.now(), isDeleted: false });
+        // Ensure strictly monotonic time relative to last sync to prevent clock skew issues
+        const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
+        db.transactions.put({ ...t, updatedAt: now, isDeleted: false });
 
         // Logs & Notes
         if (t.note) dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: t.categoryId, note: t.note } });
@@ -379,7 +399,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const updateTransaction = (t: Transaction) => {
         dispatch({ type: 'UPDATE_TRANSACTION', payload: t });
-        db.transactions.put({ ...t, updatedAt: Date.now(), isDeleted: false });
+        const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
+        db.transactions.put({ ...t, updatedAt: now, isDeleted: false });
 
         if (t.note) dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: t.categoryId, note: t.note } });
         logOperation('edit', t.id, 'Update amount ' + t.amount);
@@ -391,7 +412,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (target) {
             dispatch({ type: 'DELETE_TRANSACTION', payload: id });
             // Soft Delete in DB
-            db.transactions.update(id, { isDeleted: true, updatedAt: Date.now() });
+            const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
+            db.transactions.update(id, { isDeleted: true, updatedAt: now });
 
             logOperation('delete', id, 'Delete ' + target.amount);
             setUndoStack({ type: 'restore_delete', data: target });
@@ -401,7 +423,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const undo = () => {
         if (!undoStack) return;
-        const now = Date.now();
+        // Robust timestamp
+        const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
         if (undoStack.type === 'restore_delete') {
             const restored = { ...undoStack.data, isDeleted: false, updatedAt: now };
             dispatch({ type: 'RESTORE_TRANSACTION', payload: restored });
@@ -426,52 +449,55 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             'ADD_CATEGORY_GROUP', 'UPDATE_CATEGORY_GROUP', 'DELETE_CATEGORY_GROUP', 'REORDER_CATEGORY_GROUPS',
             'UPDATE_SETTINGS', 'BATCH_DELETE_TRANSACTIONS', 'BATCH_UPDATE_TRANSACTIONS'
         ];
+
+        // Robust timestamp to prevent clock skew issues
+        const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
+
         // Handle DB writes for non-transaction entities
         switch (action.type) {
             case 'ADD_LEDGER':
-                db.ledgers.put({ ...action.payload, updatedAt: Date.now(), isDeleted: false });
+                db.ledgers.put({ ...action.payload, updatedAt: now, isDeleted: false });
                 break;
             case 'UPDATE_LEDGER':
-                db.ledgers.put({ ...action.payload, updatedAt: Date.now() });
+                db.ledgers.put({ ...action.payload, updatedAt: now });
                 break;
             case 'DELETE_LEDGER':
-                db.ledgers.update(action.payload, { isDeleted: true, updatedAt: Date.now() });
+                db.ledgers.update(action.payload, { isDeleted: true, updatedAt: now });
                 // Also soft delete txs
-                db.transactions.where('ledgerId').equals(action.payload).modify({ isDeleted: true, updatedAt: Date.now() });
+                db.transactions.where('ledgerId').equals(action.payload).modify({ isDeleted: true, updatedAt: now });
                 setSyncDirty(true);
                 break;
             case 'ADD_CATEGORY':
-                db.categories.put({ ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: Date.now(), isDeleted: false });
+                db.categories.put({ ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: now, isDeleted: false });
                 break;
             case 'UPDATE_CATEGORY':
-                db.categories.put({ ...action.payload, updatedAt: Date.now() });
+                db.categories.put({ ...action.payload, updatedAt: now });
                 break;
             case 'UPDATE_SETTINGS': // Note: Settings handled by useEffect, but could be here too
                 break;
             case 'DELETE_CATEGORY':
-                db.categories.update(action.payload, { isDeleted: true, updatedAt: Date.now() });
+                db.categories.update(action.payload, { isDeleted: true, updatedAt: now });
                 break;
             case 'REORDER_CATEGORIES':
-                db.categories.bulkPut(action.payload.map(c => ({ ...c, updatedAt: Date.now() })));
+                db.categories.bulkPut(action.payload.map(c => ({ ...c, updatedAt: now })));
                 break;
             case 'ADD_CATEGORY_GROUP':
-                db.categoryGroups.put({ ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: Date.now(), isDeleted: false });
+                db.categoryGroups.put({ ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: now, isDeleted: false });
                 break;
             case 'UPDATE_CATEGORY_GROUP':
-                db.categoryGroups.put({ ...action.payload, updatedAt: Date.now(), isDeleted: false });
+                db.categoryGroups.put({ ...action.payload, updatedAt: now, isDeleted: false });
                 break;
             case 'DELETE_CATEGORY_GROUP':
-                db.categoryGroups.update(action.payload, { isDeleted: true, updatedAt: Date.now() });
+                db.categoryGroups.update(action.payload, { isDeleted: true, updatedAt: now });
                 break;
             case 'REORDER_CATEGORY_GROUPS':
-                db.categoryGroups.bulkPut(action.payload.map(g => ({ ...g, updatedAt: Date.now() })));
+                db.categoryGroups.bulkPut(action.payload.map(g => ({ ...g, updatedAt: now })));
                 break;
             case 'BATCH_DELETE_TRANSACTIONS':
-                db.transactions.where('id').anyOf(action.payload).modify({ isDeleted: true, updatedAt: Date.now() });
+                db.transactions.where('id').anyOf(action.payload).modify(t => { t.isDeleted = true; t.updatedAt = now; });
                 break;
             case 'BATCH_UPDATE_TRANSACTIONS': {
                 const { ids, updates } = action.payload;
-                const now = Date.now();
                 const persistedUpdates: Partial<Transaction> = {};
                 (Object.entries(updates) as [keyof Transaction, any][]).forEach(([key, value]) => {
                     if (value !== undefined) (persistedUpdates as any)[key] = value;
@@ -556,16 +582,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return true;
     };
 
-    // 从 IndexedDB 刷新分组到内存，保证界面能显示
     const reloadGroupsToState = useCallback(async () => {
         try {
-            const groups = await db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order');
+            const groups = await dbAPI.getCategoryGroups();
             dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groups } });
         } catch { }
     }, []);
 
-    const mergeFromCloud = useCallback(async (payload: { ledgers: any[]; categories: any[]; groups?: any[]; transactions: any[]; settings: any; version: number }) => {
-        const { ledgers = [], categories = [], groups = [], transactions = [], settings, version } = payload;
+    const mergeFromCloud = useCallback(async (payload: { ledgers: any[]; categories: any[]; groups?: any[]; transactions: any[]; settings: any; cfConfig?: any; version: number }) => {
+        const { ledgers = [], categories = [], groups = [], transactions = [], settings, cfConfig, version } = payload;
         const hasGroupStore = hasGroupStoreNow();
 
         await (db as any).transaction('rw', db.ledgers, db.categories, db.transactions, db.settings, hasGroupStore ? db.categoryGroups : undefined, async () => {
@@ -597,7 +622,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 const normalized: Transaction = {
                     id: t.id, ledgerId: t.ledger_id, amount: t.amount, type: t.type, categoryId: t.category_id,
                     date: t.date, note: t.note || '', createdAt: t.created_at || t.date || Date.now(),
-                    updatedAt: t.updated_at || t.date || Date.now(), isDeleted: !!t.is_deleted
+                    updatedAt: t.updated_at || t.date || Date.now(), isDeleted: !!t.is_deleted,
+                    attachments: t.attachments ? (Array.isArray(t.attachments) ? t.attachments : JSON.parse(t.attachments)) : []
                 };
                 const local = await db.transactions.get(normalized.id);
                 // 删除标记强制覆盖，保证跨设备删除生效
@@ -605,21 +631,40 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     await db.transactions.put(normalized);
                 }
             }
+
+            // cfConfig is now part of settings.data, no separate handling needed
+
             if (settings) {
-                const dataObj = typeof settings.data === 'string' ? (() => { try { return JSON.parse(settings.data); } catch { return {}; } })() : (settings.data || {});
-                // Preserve local isFirstRun if it's false (user has completed onboarding)
-                // Cloud settings should NOT overwrite this critical local state
-                const localIsFirstRun = stateRef.current.settings.isFirstRun;
+                const dataObj = typeof settings.data === 'string'
+                    ? (() => { try { return JSON.parse(settings.data); } catch { return {}; } })()
+                    : (settings.data || settings);
+
+                // CRITICAL FIX: Merge Logic to Prefer Cloud Settings but Preserve Connection
+                const dbSettingsRow = await db.settings.get('main');
+                const localSettings = { ...(dbSettingsRow?.value || DEFAULT_SETTINGS), ...stateRef.current.settings };
+
+                const newSettings = {
+                    ...localSettings, // Start with local structure
+                    ...dataObj,       // Overlay Cloud Settings (Wins for preferences, ledgers, etc.)
+
+                    // RE-APPLY Local Connection Settings to ensure they are not lost if cloud data is missing them
+                    // RE-APPLY Local Connection Settings to ensure they are not lost if cloud data is missing them
+                    // Logic: If cloud has valid non-empty string, use it. Otherwise, keep local.
+                    webdavUrl: (dataObj.webdavUrl && String(dataObj.webdavUrl).trim() !== '') ? dataObj.webdavUrl : localSettings.webdavUrl,
+                    webdavUser: (dataObj.webdavUser && String(dataObj.webdavUser).trim() !== '') ? dataObj.webdavUser : localSettings.webdavUser,
+                    webdavPass: (dataObj.webdavPass && String(dataObj.webdavPass).trim() !== '') ? dataObj.webdavPass : localSettings.webdavPass,
+                    syncEndpoint: (dataObj.syncEndpoint && String(dataObj.syncEndpoint).trim() !== '') ? dataObj.syncEndpoint : localSettings.syncEndpoint,
+                    syncToken: (dataObj.syncToken && String(dataObj.syncToken).trim() !== '') ? dataObj.syncToken : localSettings.syncToken,
+                    syncUserId: (dataObj.syncUserId && String(dataObj.syncUserId).trim() !== '') ? dataObj.syncUserId : localSettings.syncUserId,
+
+                    // PRESERVE Local First Run state if false
+                    isFirstRun: localSettings.isFirstRun === false ? false : (dataObj.isFirstRun ?? DEFAULT_SETTINGS.isFirstRun),
+                    lastSyncVersion: settings.updated_at || Date.now()
+                };
+
                 await db.settings.put({
                     key: 'main',
-                    value: {
-                        ...DEFAULT_SETTINGS,
-                        ...stateRef.current.settings,
-                        ...dataObj,
-                        // CRITICAL: Preserve local isFirstRun value if user completed onboarding
-                        isFirstRun: localIsFirstRun === false ? false : (dataObj.isFirstRun ?? DEFAULT_SETTINGS.isFirstRun),
-                        lastSyncVersion: settings.updated_at || Date.now()
-                    }
+                    value: newSettings
                 });
             }
         });
@@ -628,7 +673,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             dbAPI.getLedgers(),
             dbAPI.getCategories(),
             dbAPI.getTransactions(),
-            hasGroupStore ? db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order') : Promise.resolve([]),
+            hasGroupStore ? dbAPI.getCategoryGroups() : Promise.resolve([]),
             db.settings.get('main')
         ]);
         dispatch({ type: 'RESTORE_DATA', payload: { ledgers: ledgersNew, categories: catsNew, categoryGroups: groupsNew, transactions: txsNew, settings: settingsRow?.value } });
@@ -637,6 +682,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const performCloudSync = useCallback(async (reason: 'auto' | 'manual' = 'auto') => {
         const { syncEndpoint, syncToken, syncUserId, lastSyncVersion } = stateRef.current.settings;
+
+        // Skip auto-sync if we just restored to prevent overwriting cloud with local state
+        if (reason === 'auto' && isRestoringRef.current) {
+            return;
+        }
+
         if (!syncEndpoint || !syncToken || !isDBLoaded || !stateRef.current.isOnline) return;
         const ready = await ensureStoresReady();
         if (!ready) {
@@ -648,6 +699,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const hasGroupStore = true; // 始终尝试同步分组，避免误判跳过
         dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
         try {
+            // Priority: Sync pending images first
+            try {
+                await imageService.syncPendingImages();
+            } catch (e) {
+                console.warn('Image sync warning:', e);
+            }
+
             // 如果本地为空（常见于重置/首次恢复），强制全量 push/pull，避免 lastSyncVersion 过大导致云端数据未拉取
             let sinceForPush = reason === 'manual' ? 0 : (lastSyncVersion || 0);
             let sinceForPull = reason === 'manual' ? 0 : (lastSyncVersion || 0);
@@ -716,11 +774,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 category_id: t.categoryId || t.category_id,
                 date: t.date,
                 note: t.note || '',
+                attachments: t.attachments || [],
                 created_at: t.createdAt || t.created_at || t.date || Date.now(),
-                updated_at: t.updatedAt || t.updated_at || t.date || Date.now(),
+                updatedAt: t.updatedAt || t.updated_at || t.date || Date.now(),
                 is_deleted: !!t.isDeleted
             });
 
+            // cfConfig is now part of settings, no separate field needed
             const payload = {
                 ledgers: ledgersFiltered.map(mapLedger),
                 categories: catsFiltered.map(mapCategory),
@@ -733,7 +793,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             const pulled = await pullFromCloud(syncEndpoint, syncToken, syncUserId || 'default', sinceForPull);
             await mergeFromCloud(pulled);
             // 重新从本地 DB 取分组，确保 UI 状态刷新
-            const groupsReloaded = await db.categoryGroups.where('isDeleted').notEqual(1).sortBy('order');
+            const groupsReloaded = await dbAPI.getCategoryGroups();
             dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groupsReloaded } });
             setSyncDirty(false);
             logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'success', file: 'D1 Sync', message: reason === 'manual' ? '手动同步成功' : '自动同步成功' });
@@ -750,8 +810,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     useEffect(() => {
         if (!syncDirty) return;
-        const { syncEndpoint, syncToken, webdavUrl } = state.settings;
-        if (!state.isOnline) return;
+        // Use stateRef to avoid infinite loop caused by state.settings changes
+        const { syncEndpoint, syncToken, webdavUrl, syncDebounceSeconds } = stateRef.current.settings;
+        if (!stateRef.current.isOnline) return;
 
         const hasD1 = syncEndpoint && syncToken;
         const hasWebDAV = webdavUrl;
@@ -759,7 +820,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (!hasD1 && !hasWebDAV) return;
 
         if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
-        const delaySec = state.settings.syncDebounceSeconds ?? 3;
+        const delaySec = syncDebounceSeconds ?? 3;
 
         syncTimerRef.current = setTimeout(async () => {
             if (hasD1) await performCloudSync('auto');
@@ -768,7 +829,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }, Math.max(1000, delaySec * 1000));
 
         return () => { if (syncTimerRef.current) clearTimeout(syncTimerRef.current); };
-    }, [syncDirty, state.settings, state.isOnline, performCloudSync, performUpload]);
+    }, [syncDirty, performCloudSync, performUpload]);
 
     // Version lightweight polling
     useEffect(() => {
@@ -783,14 +844,32 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             if (versionCheckRunningRef.current) return;
             versionCheckRunningRef.current = true;
             try {
-                const res = await fetch(`${syncEndpoint.replace(/\/$/, '')}/sync/version?user_id=${encodeURIComponent(syncUserId || 'default')}`, {
-                    headers: { 'Authorization': `Bearer ${syncToken}` }
-                });
-                if (!res.ok) return;
-                const data = await res.json();
-                const remoteVersion = Number(data.version || 0);
+                // 1. Check Remote Version
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+
+                let remoteVersion = 0;
+                try {
+                    const res = await fetch(`${syncEndpoint.replace(/\/$/, '')}/sync/version?user_id=${encodeURIComponent(syncUserId || 'default')}`, {
+                        headers: { 'Authorization': `Bearer ${syncToken}` },
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+                    if (res.ok) {
+                        const data = await res.json();
+                        remoteVersion = Number(data.version || 0);
+                    }
+                } catch (e) {
+                    // network error, ignore
+                }
+
+                // 2. Check Local Unsynced Data
                 const localVersion = stateRef.current.settings.lastSyncVersion || 0;
-                if (remoteVersion > localVersion) {
+                const hasLocalChanges = await dbAPI.hasUnsyncedData(localVersion);
+
+                // 3. Trigger Sync if needed
+                if (remoteVersion > localVersion || hasLocalChanges) {
+                    console.log(`[AutoSync] Triggering sync. Remote: ${remoteVersion}, Local: ${localVersion}, HasChanges: ${hasLocalChanges}`);
                     await performCloudSync('auto');
                 }
             } catch (e) {
@@ -899,6 +978,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (data.transactions) db.transactions.bulkPut(data.transactions.map(t => ({ ...t, isDeleted: false, updatedAt: Date.now() })));
         if (data.ledgers) db.ledgers.bulkPut(data.ledgers.map(l => ({ ...l, isDeleted: false, updatedAt: Date.now() })));
         if (data.categories) db.categories.bulkPut(data.categories.map(c => ({ ...c, isDeleted: false, updatedAt: Date.now() })));
+        if (data.categoryGroups) db.categoryGroups.bulkPut(data.categoryGroups.map(g => ({ ...g, isDeleted: false, updatedAt: Date.now() })));
+        if (data.settings) db.settings.put({ key: 'main', value: { ...DEFAULT_SETTINGS, ...data.settings } });
         setSyncDirty(true);
     };
 
@@ -969,17 +1050,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     // D1/KV 只拉取恢复（不会推送本地），适合首次“恢复数据”
-    const restoreFromD1 = async () => {
+    const restoreFromD1 = useCallback(async () => {
+        setIsRestoring(true);
+        isRestoringRef.current = true; // Block auto-sync
+
         const { syncEndpoint, syncToken, syncUserId } = stateRef.current.settings;
         if (!syncEndpoint || !syncToken) {
+            isRestoringRef.current = false;
+            setIsRestoring(false);
             throw new Error('请先在设置里填写同步地址和 AUTH_TOKEN');
         }
+
         const ready = await ensureStoresReady();
         if (!ready) {
             setIsDBLoaded(false);
             window.location.reload();
             return;
         }
+
         dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
         try {
             const pulled = await pullFromCloud(syncEndpoint, syncToken, syncUserId || 'default', 0);
@@ -988,13 +1076,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'download', status: 'success', file: 'D1 Sync', message: '仅拉取恢复成功' });
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'success' });
             setTimeout(() => dispatch({ type: 'SET_SYNC_STATUS', payload: 'idle' }), 2000);
+
+            // Cooldown for auto-sync blockage
+            setTimeout(() => { isRestoringRef.current = false; }, 10000);
         } catch (e: any) {
+            isRestoringRef.current = false;
             logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'download', status: 'failure', file: 'D1 Sync', message: e?.message || '恢复失败' });
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
             setSyncDirty(true);
             throw e;
+        } finally {
+            setIsRestoring(false);
         }
-    };
+    }, [mergeFromCloud]);
 
     const addLedger = async (ledger: Ledger) => {
         dispatch({ type: 'ADD_LEDGER', payload: ledger });
@@ -1049,10 +1143,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
     };
 
+    const triggerCloudSync = () => {
+        setSyncDirty(true);
+    };
+
     if (!isDBLoaded) return null; // Or loading spinner
 
     return (
-        <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, batchDeleteTransactions, batchUpdateTransactions, undo, canUndo: !!undoStack, manualBackup, manualCloudSync, importData, smartImportCsv, restoreFromCloud, resetApp, restoreFromD1, addLedger }}>
+        <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, batchDeleteTransactions, batchUpdateTransactions, undo, canUndo: !!undoStack, manualBackup, manualCloudSync, importData, smartImportCsv, restoreFromCloud, resetApp, restoreFromD1, addLedger, triggerCloudSync }}>
             {children}
         </AppContext.Provider>
     );

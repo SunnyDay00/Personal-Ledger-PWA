@@ -14,7 +14,10 @@ import { Ledger, Category } from '../types';
 import { feedback } from '../services/feedback';
 import { UsageStatsModal } from './UsageStatsModal';
 
-type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'history' | 'layout' | 'theme' | 'about';
+import { imageService } from '../services/imageService';
+
+type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'history' | 'layout' | 'theme' | 'about' | 'storage';
+
 
 const SettingsGroup: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
   <div className="flex flex-col mb-6">
@@ -79,6 +82,7 @@ export const SettingsView: React.FC = () => {
 
   const [showSyncLog, setShowSyncLog] = useState(false);
   const [showUsageStats, setShowUsageStats] = useState(false);
+  const [showLedgerSelect, setShowLedgerSelect] = useState(false);
   const [ledgerModal, setLedgerModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; color: string }>(
     { isOpen: false, mode: 'create', name: '', color: '#007AFF' }
   );
@@ -97,6 +101,53 @@ export const SettingsView: React.FC = () => {
     categoryIds: [],
   });
 
+  const [cacheStats, setCacheStats] = useState({ count: 0, size: 0 });
+  useEffect(() => {
+    if (page === 'storage') {
+      imageService.getCacheStats().then(setCacheStats);
+    }
+  }, [page]);
+
+  // Viewport management for iOS keyboard
+  const [visualViewport, setVisualViewport] = useState({
+    height: typeof window !== 'undefined' ? window.innerHeight : 800,
+    offsetTop: 0
+  });
+
+  useEffect(() => {
+    const handleResize = () => {
+      const vv = (window as any).visualViewport;
+      if (vv) {
+        setVisualViewport({
+          height: vv.height,
+          offsetTop: vv.offsetTop
+        });
+      } else {
+        setVisualViewport({
+          height: window.innerHeight,
+          offsetTop: 0
+        });
+      }
+    };
+
+    if ((window as any).visualViewport) {
+      (window as any).visualViewport.addEventListener('resize', handleResize);
+      (window as any).visualViewport.addEventListener('scroll', handleResize);
+      handleResize(); // Init
+    } else {
+      window.addEventListener('resize', handleResize);
+    }
+
+    return () => {
+      if ((window as any).visualViewport) {
+        (window as any).visualViewport.removeEventListener('resize', handleResize);
+        (window as any).visualViewport.removeEventListener('scroll', handleResize);
+      } else {
+        window.removeEventListener('resize', handleResize);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   }, [page]);
@@ -108,6 +159,11 @@ export const SettingsView: React.FC = () => {
         user: state.settings.webdavUser || '',
         pass: state.settings.webdavPass || '',
       });
+      setReminderDays(state.settings.backupReminderDays ?? 7);
+      setAutoBackupEnabled(state.settings.backupAutoEnabled ?? false);
+      setAutoBackupDays(state.settings.backupIntervalDays ?? 7);
+      setExportStart(state.settings.exportStartDate || '');
+      setExportEnd(state.settings.exportEndDate || '');
     }
     setD1Form({
       endpoint: state.settings.syncEndpoint || '',
@@ -117,12 +173,17 @@ export const SettingsView: React.FC = () => {
       versionCheckIntervalFg: state.settings.versionCheckIntervalFg ?? 10,
       versionCheckIntervalBg: state.settings.versionCheckIntervalBg ?? 20,
     });
-    setReminderDays(state.settings.backupReminderDays ?? 7);
-    setAutoBackupEnabled(state.settings.backupAutoEnabled ?? false);
-    setAutoBackupDays(state.settings.backupIntervalDays ?? 7);
-    setExportStart(state.settings.exportStartDate || '');
-    setExportEnd(state.settings.exportEndDate || '');
   }, [state.settings, isWebDavEditing]);
+
+  const handleWebDavChange = (key: keyof typeof webdavForm, value: string) => {
+    setIsWebDavEditing(true);
+    setWebdavForm(prev => ({ ...prev, [key]: value }));
+  };
+
+  const handleAutoBackupToggle = (checked: boolean) => {
+    setIsWebDavEditing(true);
+    setAutoBackupEnabled(checked);
+  }
 
   const sortedCategories = useMemo(() => {
     return state.categories
@@ -177,6 +238,33 @@ export const SettingsView: React.FC = () => {
       window.alert(e?.message || '同步失败');
     } finally {
       setIsManualSyncing(false);
+    }
+  };
+
+  const handleTestD1Connection = async () => {
+    if (!d1Form.endpoint.trim() || !d1Form.token.trim()) {
+      window.alert('请先填写地址和 AUTH_TOKEN');
+      return;
+    }
+    setIsTestingConnection(true);
+    try {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 10000); // 10s timeout
+      const res = await fetch(`${d1Form.endpoint.trim().replace(/\/$/, '')}/sync/version?user_id=${encodeURIComponent(d1Form.userId || 'default')}`, {
+        headers: { 'Authorization': `Bearer ${d1Form.token.trim()}` },
+        signal: controller.signal
+      });
+      clearTimeout(id);
+      if (res.ok) {
+        const data = await res.json();
+        window.alert(`连接成功！服务器版本：${data.version}`);
+      } else {
+        window.alert(`连接失败：HTTP ${res.status}`);
+      }
+    } catch (e: any) {
+      window.alert(`连接出错：${e.message || '未知错误'}`);
+    } finally {
+      setIsTestingConnection(false);
     }
   };
 
@@ -398,23 +486,145 @@ export const SettingsView: React.FC = () => {
     dispatch({ type: 'REORDER_CATEGORIES', payload: normalized });
     setDragIndex(null);
   };
+
+
+  const renderStorage = () => (
+    <>
+      <div className="h-4"></div>
+      <SettingsGroup title="缓存管理">
+        <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-zinc-800/50">
+          <span className="text-sm font-medium text-ios-text">已缓存图片</span>
+          <span className="text-sm text-ios-subtext">{cacheStats.count} 张 ({(cacheStats.size / 1024 / 1024).toFixed(2)} MB)</span>
+        </div>
+        <div className="flex items-center justify-between p-4">
+          <span className="text-sm font-medium text-ios-text">缓存容量限制</span>
+          <select
+            value={state.settings.imageCacheLimit || 209715200}
+            onChange={(e) => {
+              const limit = Number(e.target.value);
+              dispatch({ type: 'UPDATE_SETTINGS', payload: { imageCacheLimit: limit } });
+            }}
+            className="bg-gray-100 dark:bg-zinc-800 text-sm rounded-lg p-2 outline-none"
+          >
+            <option value={52428800}>50 MB</option>
+            <option value={104857600}>100 MB</option>
+            <option value={209715200}>200 MB</option>
+            <option value={524288000}>500 MB</option>
+            <option value={1073741824}>1 GB</option>
+          </select>
+        </div>
+      </SettingsGroup>
+      <div className="px-4">
+        <button onClick={async () => {
+          if (window.confirm('确定清空所有图片缓存吗？下次查看图片需要重新下载。')) {
+            await imageService.clearCache();
+            imageService.getCacheStats().then(setCacheStats);
+            feedback.play('delete');
+          }
+        }} className="w-full py-3 bg-white dark:bg-zinc-900 text-red-500 font-medium rounded-xl shadow-sm border border-ios-border active:scale-95 transition-transform">
+          清空图片缓存
+        </button>
+      </div>
+    </>
+  );
+
   const renderMainContent = () => (
     <>
       <div className="h-4"></div>
       <SettingsGroup title="同步与备份">
-        <SettingsItem icon="Cloud" label="D1+KV 云同步" value={state.settings.syncEndpoint ? '已配置' : '未配置'} onClick={() => setPage('security')} />
-        <SettingsItem icon="RefreshCw" label={isManualSyncing ? '正在同步…' : '立即手动同步'} onClick={handleManualCloudSync} />
+        <SettingsItem icon="Cloud" label="云同步与备份" value={state.settings.syncEndpoint ? '已配置' : '未配置'} onClick={() => setPage('security')} />
         <SettingsItem icon="FileText" label="同步日志" onClick={() => setShowSyncLog(true)} isLast />
       </SettingsGroup>
 
       <SettingsGroup title="管理">
         <SettingsItem icon="Book" label="多账本管理" value={`${state.ledgers.length}个`} onClick={() => setPage('ledgers')} />
+        <SettingsItem
+          icon="Bookmark"
+          label="默认账本"
+          value={state.ledgers.find(l => l.id === state.settings.defaultLedgerId)?.name || '上次使用'}
+          onClick={() => setShowLedgerSelect(true)}
+        />
         <SettingsItem icon="Grid" label="分类管理" onClick={() => setPage('categories')} />
+        <SettingsItem icon="Image" label="图片缓存" onClick={() => setPage('storage')} />
         <SettingsItem icon="ClipboardList" label="操作历史" onClick={() => setPage('history')} />
       </SettingsGroup>
 
       <SettingsGroup title="个性化">
         <SettingsItem icon="Palette" label="主题设置" value={state.settings.themeMode === 'auto' ? '跟随系统' : state.settings.themeMode === 'dark' ? '深色' : '浅色'} onClick={() => setPage('theme')} />
+
+        {/* Haptic Settings with Slider */}
+        <div className="bg-white dark:bg-zinc-900 border-b border-gray-100 dark:border-zinc-800/50">
+          <div className="flex items-center justify-between p-4">
+            <div className="flex items-center gap-3">
+              <div className="w-7 h-7 rounded-lg bg-ios-primary/10 flex items-center justify-center text-ios-primary">
+                <Icon name="Smartphone" className="w-4 h-4" />
+              </div>
+              <span className="font-medium text-sm text-ios-text">震动反馈</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={(state.settings as any).enableHaptics ?? true}
+              onChange={(e) => {
+                const enabled = e.target.checked;
+                dispatch({ type: 'UPDATE_SETTINGS', payload: { enableHaptics: enabled, hapticStrength: enabled ? state.settings.hapticStrength || 2 : 2 } as any });
+                feedback.updateSettings((state.settings as any).enableSound ?? true, enabled, state.settings.hapticStrength || 2);
+                if (enabled) feedback.vibrate('medium');
+              }}
+              className="toggle-checkbox"
+            />
+          </div>
+
+          {/* Slider for Haptic Strength */}
+          {((state.settings as any).enableHaptics ?? true) && (
+            <div className="px-4 pb-4 pt-0">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] text-ios-subtext">强度</span>
+                <span className="text-[10px] font-medium text-ios-primary">
+                  {(state.settings.hapticStrength || 2) === 1 ? '弱' : (state.settings.hapticStrength || 2) === 2 ? '中' : '强'}
+                </span>
+              </div>
+              <input
+                type="range"
+                min="1"
+                max="3"
+                step="1"
+                value={state.settings.hapticStrength || 2}
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  dispatch({ type: 'UPDATE_SETTINGS', payload: { hapticStrength: val } as any });
+                  feedback.updateSettings((state.settings as any).enableSound ?? true, true, val);
+                  feedback.vibrate(val === 1 ? 'light' : val === 2 ? 'medium' : 'heavy');
+                }}
+                className="w-full h-1 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer accent-ios-primary"
+              />
+              <div className="flex justify-between text-[10px] text-gray-400 mt-1 px-1">
+                <span>弱</span><span>中</span><span>强</span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-zinc-800/50">
+          <div className="flex items-center gap-3">
+            <div className="w-7 h-7 rounded-lg bg-ios-primary/10 flex items-center justify-center text-ios-primary">
+              <Icon name="Type" className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="font-medium text-sm text-ios-text">字体增强</div>
+              <div className="text-[10px] text-ios-subtext">加深文字颜色，提高对比度</div>
+            </div>
+          </div>
+          <input
+            type="checkbox"
+            checked={(state.settings.fontContrast === 'high')}
+            onChange={(e) => {
+              const enabled = e.target.checked;
+              dispatch({ type: 'UPDATE_SETTINGS', payload: { fontContrast: enabled ? 'high' : 'normal' } });
+            }}
+            className="toggle-checkbox"
+          />
+        </div>
+
         <SettingsItem icon="Layout" label="界面布局" value="键盘/网格" onClick={() => setPage('layout')} />
         <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-zinc-800/50">
           <div className="flex items-center gap-3">
@@ -436,25 +646,7 @@ export const SettingsView: React.FC = () => {
             className="toggle-checkbox"
           />
         </div>
-        <div className="flex items-center justify-between p-4">
-          <div className="flex items-center gap-3">
-            <div className="w-7 h-7 rounded-lg bg-ios-primary/10 flex items-center justify-center text-ios-primary">
-              <Icon name="Smartphone" className="w-4 h-4" />
-            </div>
-            <span className="font-medium text-sm text-ios-text">震动反馈</span>
-          </div>
-          <input
-            type="checkbox"
-            checked={(state.settings as any).enableHaptics ?? true}
-            onChange={(e) => {
-              const enabled = e.target.checked;
-              dispatch({ type: 'UPDATE_SETTINGS', payload: { enableHaptics: enabled } as any });
-              feedback.updateSettings((state.settings as any).enableSound ?? true, enabled);
-              if (enabled) feedback.vibrate('medium');
-            }}
-            className="toggle-checkbox"
-          />
-        </div>
+        {/* Old Haptics Section Removed in favor of merged section above */}
       </SettingsGroup>
 
       <SettingsGroup title="其他">
@@ -497,6 +689,69 @@ export const SettingsView: React.FC = () => {
           </button>
         </div>
       </SettingsGroup>
+
+      {/* Ledger Selection Modal */}
+      {showLedgerSelect && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 animate-in fade-in duration-200" onClick={() => setShowLedgerSelect(false)}>
+          <div className="w-full max-w-sm bg-white dark:bg-zinc-900 rounded-2xl overflow-hidden shadow-2xl scale-100" onClick={e => e.stopPropagation()}>
+            <div className="p-4 border-b border-gray-100 dark:border-white/5 flex justify-between items-center bg-gray-50/50 dark:bg-white/5">
+              <span className="font-semibold text-ios-text">选择默认账本</span>
+              <button onClick={() => setShowLedgerSelect(false)} className="p-1 rounded-full active:bg-gray-200 dark:active:bg-white/10">
+                <Icon name="X" className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="max-h-[60vh] overflow-y-auto p-2">
+              <button
+                onClick={() => {
+                  dispatch({ type: 'UPDATE_SETTINGS', payload: { defaultLedgerId: '' } });
+                  setShowLedgerSelect(false);
+                  feedback.play('click');
+                }}
+                className={cn(
+                  "w-full flex items-center justify-between p-3 rounded-xl mb-1 transition-colors",
+                  !state.settings.defaultLedgerId
+                    ? "bg-ios-primary/10 text-ios-primary font-medium"
+                    : "hover:bg-gray-50 dark:hover:bg-white/5 text-ios-text"
+                )}
+              >
+                <div className="flex items-center gap-3">
+                  <Icon name="Clock" className="w-5 h-5" />
+                  <span>上次使用 (自动)</span>
+                </div>
+                {!state.settings.defaultLedgerId && <Icon name="Check" className="w-4 h-4" />}
+              </button>
+
+              <div className="h-px bg-gray-100 dark:bg-white/5 my-2 mx-2"></div>
+
+              {state.ledgers.map(ledger => {
+                const isSelected = state.settings.defaultLedgerId === ledger.id;
+                return (
+                  <button
+                    key={ledger.id}
+                    onClick={() => {
+                      dispatch({ type: 'UPDATE_SETTINGS', payload: { defaultLedgerId: ledger.id } });
+                      setShowLedgerSelect(false);
+                      feedback.play('click');
+                    }}
+                    className={cn(
+                      "w-full flex items-center justify-between p-3 rounded-xl mb-1 transition-colors",
+                      isSelected
+                        ? "bg-ios-primary/10 text-ios-primary font-medium"
+                        : "hover:bg-gray-50 dark:hover:bg-white/5 text-ios-text"
+                    )}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-3 h-3 rounded-full" style={{ backgroundColor: ledger.themeColor }}></div>
+                      <span>{ledger.name}</span>
+                    </div>
+                    {isSelected && <Icon name="Check" className="w-4 h-4" />}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 
@@ -507,17 +762,18 @@ export const SettingsView: React.FC = () => {
       <div className="bg-white dark:bg-zinc-900 rounded-2xl mx-4 shadow-sm border border-ios-border p-4 space-y-4">
         <div className="flex items-center justify-between">
           <div>
-            <div className="font-semibold">D1 + KV 云同步</div>
+            <div className="font-semibold">CloudFlare 云同步</div>
             <p className="text-xs text-ios-subtext">填写 Worker 地址和 AUTH_TOKEN，修改数据自动同步，也可手动同步。</p>
           </div>
           <span className="text-xs text-ios-subtext">{state.settings.syncEndpoint ? '已配置' : '未配置'}</span>
         </div>
 
-        <div className="space-y-3">
+        <form onSubmit={(e) => e.preventDefault()} className="space-y-3">
           <div>
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">同步地址</label>
             <input
               type="text"
+              name="d1-endpoint"
               placeholder="https://sync.xxx.workers.dev"
               className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
               value={d1Form.endpoint}
@@ -528,6 +784,7 @@ export const SettingsView: React.FC = () => {
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">AUTH_TOKEN</label>
             <input
               type="password"
+              name="d1-token"
               placeholder="云端设置的密钥"
               className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
               value={d1Form.token}
@@ -538,6 +795,7 @@ export const SettingsView: React.FC = () => {
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">用户标识（多设备保持一致）</label>
             <input
               type="text"
+              name="d1-user"
               placeholder="default"
               className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
               value={d1Form.userId}
@@ -586,32 +844,33 @@ export const SettingsView: React.FC = () => {
               </button>
             </div>
           </div>
-        </div>
-
-        <div className="flex gap-3 pt-2">
-          <button
-            onClick={handleSaveD1}
-            type="button"
-            className="flex-1 py-2.5 bg-ios-primary text-white text-sm font-medium rounded-xl active:opacity-90 transition-opacity"
-          >
-            保存配置
-          </button>
-          <button
-            onClick={handleManualCloudSync}
-            type="button"
-            disabled={isManualSyncing}
-            className="flex-1 py-2.5 bg-emerald-500 text-white text-sm font-medium rounded-xl active:opacity-90 transition-opacity disabled:opacity-60"
-          >
-            {isManualSyncing ? '同步中…' : '手动同步'}
-          </button>
-          <button
-            onClick={() => setShowSyncLog(true)}
-            type="button"
-            className="flex-1 py-2.5 bg-gray-100 dark:bg-zinc-800 text-sm font-medium rounded-xl"
-          >
-            查看日志
-          </button>
-        </div>
+          <div className="flex gap-3 pt-2">
+            <button
+              type="button"
+              disabled={isTestingConnection}
+              onClick={handleTestD1Connection}
+              className="flex-1 py-3 bg-gray-100 dark:bg-zinc-800 text-ios-text font-medium rounded-xl active:scale-95 transition-transform disabled:opacity-50"
+            >
+              {isTestingConnection ? '测试中...' : '测试连接'}
+            </button>
+            <CloudSyncButton className="!p-3 !bg-gray-100 dark:!bg-zinc-800 !rounded-xl !shadow-none !w-auto" />
+            <button
+              type="button"
+              disabled={isManualSyncing}
+              onClick={handleManualCloudSync}
+              className="flex-1 py-3 bg-gray-100 dark:bg-zinc-800 text-ios-text font-medium rounded-xl active:scale-95 transition-transform disabled:opacity-50"
+            >
+              {isManualSyncing ? '同步中...' : '立即同步'}
+            </button>
+            <button
+              type="button"
+              onClick={handleSaveD1}
+              className="flex-1 py-3 bg-ios-primary text-white font-medium rounded-xl active:scale-95 transition-transform shadow-lg shadow-ios-primary/20"
+            >
+              保存配置
+            </button>
+          </div>
+        </form>
       </div>
 
       <div className="bg-white dark:bg-zinc-900 rounded-2xl mx-4 mt-6 shadow-sm border border-ios-border p-4 space-y-4">
@@ -622,33 +881,36 @@ export const SettingsView: React.FC = () => {
           </div>
         </div>
 
-        <div className="space-y-3">
+        <form onSubmit={(e) => e.preventDefault()} className="space-y-3">
           <div>
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">服务器地址 (URL)</label>
             <input
               type="text"
+              name="webdav-url"
               placeholder="https://dav.example.com/remote.php/webdav"
               className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
               value={webdavForm.url}
-              onChange={(e) => { setWebdavForm({ ...webdavForm, url: e.target.value }); setIsWebDavEditing(true); }}
+              onChange={(e) => handleWebDavChange('url', e.target.value)}
             />
           </div>
           <div>
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">账号 (User)</label>
             <input
               type="text"
+              name="webdav-user"
               className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
               value={webdavForm.user}
-              onChange={(e) => { setWebdavForm({ ...webdavForm, user: e.target.value }); setIsWebDavEditing(true); }}
+              onChange={(e) => handleWebDavChange('user', e.target.value)}
             />
           </div>
           <div>
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">密码 / 应用密钥</label>
             <input
               type="password"
+              name="webdav-password"
               className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
               value={webdavForm.pass}
-              onChange={(e) => { setWebdavForm({ ...webdavForm, pass: e.target.value }); setIsWebDavEditing(true); }}
+              onChange={(e) => handleWebDavChange('pass', e.target.value)}
             />
           </div>
           <div>
@@ -670,7 +932,7 @@ export const SettingsView: React.FC = () => {
             <input
               type="checkbox"
               checked={autoBackupEnabled}
-              onChange={(e) => { setAutoBackupEnabled(e.target.checked); setIsWebDavEditing(true); }}
+              onChange={(e) => handleAutoBackupToggle(e.target.checked)}
             />
           </div>
           <div>
@@ -685,7 +947,7 @@ export const SettingsView: React.FC = () => {
               onChange={(e) => { const v = Math.max(1, Math.min(60, Number(e.target.value) || 1)); setAutoBackupDays(v); setIsWebDavEditing(true); }}
             />
           </div>
-        </div>
+        </form>
 
         <div className="flex gap-3 pt-2">
           <button
@@ -773,12 +1035,12 @@ export const SettingsView: React.FC = () => {
     <>
       <div className="h-4"></div>
       <div className="bg-white dark:bg-zinc-900 rounded-2xl mx-4 shadow-sm border border-ios-border p-4 space-y-3">
-        <div className="grid grid-cols-2 gap-3">
+        <div className="flex flex-col gap-3">
           <div>
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">导出开始日期（可选）</label>
             <input
               type="date"
-              className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
+              className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20 appearance-none min-h-[44px]"
               value={exportStart}
               onChange={(e) => setExportStart(e.target.value)}
             />
@@ -787,7 +1049,7 @@ export const SettingsView: React.FC = () => {
             <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">导出结束日期（可选）</label>
             <input
               type="date"
-              className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
+              className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20 appearance-none min-h-[44px]"
               value={exportEnd}
               onChange={(e) => setExportEnd(e.target.value)}
             />
@@ -863,7 +1125,13 @@ export const SettingsView: React.FC = () => {
       </div>
 
       {ledgerModal.isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm p-4">
+        <div
+          className="fixed left-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm p-4 w-full"
+          style={{
+            height: visualViewport.height,
+            top: visualViewport.offsetTop
+          }}
+        >
           <div className="bg-white dark:bg-zinc-900 w-full max-w-xs rounded-2xl p-5 shadow-2xl animate-fade-in">
             <h3 className="font-bold text-lg mb-4 text-center">{ledgerModal.mode === 'create' ? '新建账本' : '编辑账本'}</h3>
             <input
@@ -1196,7 +1464,13 @@ export const SettingsView: React.FC = () => {
       </div>
 
       {isAddingCat && (
-        <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm">
+        <div
+          className="fixed left-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm w-full"
+          style={{
+            height: visualViewport.height,
+            top: visualViewport.offsetTop
+          }}
+        >
           <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-6 animate-slide-up h-[70vh] flex flex-col">
             <div className="flex justify-between items-center mb-6">
               <button onClick={() => setIsAddingCat(false)} className="text-ios-subtext">取消</button>
@@ -1241,7 +1515,13 @@ export const SettingsView: React.FC = () => {
       )}
 
       {editingCat && (
-        <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm">
+        <div
+          className="fixed left-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm w-full"
+          style={{
+            height: visualViewport.height,
+            top: visualViewport.offsetTop
+          }}
+        >
           <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-6 animate-slide-up h-[70vh] flex flex-col">
             <div className="flex justify-between items-center mb-6">
               <button
@@ -1295,7 +1575,13 @@ export const SettingsView: React.FC = () => {
       )}
 
       {groupModal.isOpen && (
-        <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm">
+        <div
+          className="fixed left-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm w-full"
+          style={{
+            height: visualViewport.height,
+            top: visualViewport.offsetTop
+          }}
+        >
           <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-6 animate-slide-up h-[70vh] flex flex-col">
             <div className="flex justify-between items-center mb-4">
               <button onClick={() => setGroupModal({ isOpen: false, mode: 'create', name: '', categoryIds: [] })} className="text-ios-subtext">取消</button>
@@ -1502,6 +1788,8 @@ export const SettingsView: React.FC = () => {
         return '主题设置';
       case 'about':
         return '关于';
+      case 'storage':
+        return '存储空间';
       default:
         return '设置';
     }
@@ -1544,6 +1832,7 @@ export const SettingsView: React.FC = () => {
         {page === 'history' && renderHistory()}
         {page === 'layout' && renderLayout()}
         {page === 'theme' && renderTheme()}
+        {page === 'storage' && renderStorage()}
         {page === 'about' && renderAbout()}
       </div>
 

@@ -3,6 +3,7 @@ import { Icon } from './ui/Icon';
 import { cn } from '../utils';
 import { format } from 'date-fns';
 import { dbAPI } from '../services/db';
+import { useApp } from '../contexts/AppContext';
 
 interface UsageStats {
     id: number;
@@ -31,30 +32,58 @@ export const UsageStatsModal: React.FC<UsageStatsModalProps> = ({ isOpen, onClos
     const [stats, setStats] = useState<UsageStats | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [isEditing, setIsEditing] = useState(false);
+
+    const { state, dispatch, triggerCloudSync } = useApp();
 
     useEffect(() => {
         if (isOpen) {
-            // Load config from IndexedDB (persistent but not synced)
-            dbAPI.getCFConfig().then(config => {
-                if (config) setCfConfig(config);
-            });
+            // Load config from state.settings.cfConfig (synced with settings)
+            const config = state.settings.cfConfig;
+            if (config) {
+                setCfConfig({
+                    accountId: config.accountId || '',
+                    apiToken: config.apiToken || '',
+                    kvId: config.kvId || ''
+                });
+                // If config is missing items, enter edit mode
+                if (!config.accountId || !config.apiToken || !config.kvId) {
+                    setIsEditing(true);
+                }
+            } else {
+                setIsEditing(true);
+            }
         }
-    }, [isOpen]);
+    }, [isOpen, state.settings.cfConfig]);
 
     useEffect(() => {
+        // Clear stats when switching modes to avoid showing stale data from previous mode
+        setStats(null);
+        setError(null);
+
         if (isOpen && endpoint && token) {
-            fetchStats();
+            // If Local mode, fetch immediately
+            // If Cloudflare mode, fetch only if not editing and config is present
+            if (mode === 'local') {
+                fetchStats();
+            } else if (mode === 'cloudflare' && !isEditing && cfConfig.accountId) {
+                fetchStats();
+            }
         }
     }, [isOpen, endpoint, token, mode]);
 
     const handleSaveConfig = () => {
-        dbAPI.saveCFConfig(cfConfig);
+        // Save cfConfig to settings - this will trigger cloud sync automatically
+        dispatch({ type: 'UPDATE_SETTINGS', payload: { cfConfig } });
+        console.log('[handleSaveConfig] cfConfig saved to settings, sync will trigger automatically');
+        setIsEditing(false);
         fetchStats();
     };
 
     const fetchStats = async () => {
         if (mode === 'cloudflare' && (!cfConfig.accountId || !cfConfig.apiToken || !cfConfig.kvId)) {
-            return; // Wait for input
+            setIsEditing(true);
+            return;
         }
 
         setLoading(true);
@@ -94,6 +123,9 @@ export const UsageStatsModal: React.FC<UsageStatsModalProps> = ({ isOpen, onClos
 
     if (!isOpen) return null;
 
+    const isConfigMissing = !cfConfig.accountId || !cfConfig.apiToken || !cfConfig.kvId;
+    const showConfigForm = mode === 'cloudflare' && (isEditing || isConfigMissing);
+
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/20 backdrop-blur-sm animate-in fade-in duration-200">
             <div className="bg-white dark:bg-zinc-900 w-full max-w-sm rounded-2xl shadow-xl border border-ios-border overflow-hidden animate-in zoom-in-95 duration-200">
@@ -132,7 +164,7 @@ export const UsageStatsModal: React.FC<UsageStatsModalProps> = ({ isOpen, onClos
                         </button>
                     </div>
 
-                    {mode === 'cloudflare' && (!cfConfig.accountId || !cfConfig.apiToken || !cfConfig.kvId) ? (
+                    {showConfigForm ? (
                         <div className="space-y-3 animate-in slide-in-from-top-2">
                             <div className="space-y-2">
                                 <label className="text-xs font-medium text-ios-subtext ml-1">Account ID</label>
@@ -164,14 +196,23 @@ export const UsageStatsModal: React.FC<UsageStatsModalProps> = ({ isOpen, onClos
                                     placeholder="KV Namespace ID"
                                 />
                             </div>
-                            <button
-                                onClick={handleSaveConfig}
-                                className="w-full py-2.5 bg-ios-primary text-white text-sm font-medium rounded-xl active:opacity-90 transition-opacity"
-                            >
-                                保存并获取数据
-                            </button>
+                            <div className="grid grid-cols-2 gap-2">
+                                <button
+                                    onClick={() => setIsEditing(false)}
+                                    className="w-full py-2.5 bg-gray-100 dark:bg-zinc-800 text-ios-text text-sm font-medium rounded-xl active:opacity-90 transition-opacity"
+                                    disabled={loading}
+                                >
+                                    取消
+                                </button>
+                                <button
+                                    onClick={handleSaveConfig}
+                                    className="w-full py-2.5 bg-ios-primary text-white text-sm font-medium rounded-xl active:opacity-90 transition-opacity"
+                                >
+                                    保存并获取
+                                </button>
+                            </div>
                             <p className="text-[10px] text-ios-subtext text-center px-2">
-                                需要 Account Analytics 和 Workers KV Storage 读取权限。
+                                需要 Cloudflare Account Analytics 和 Workers KV Storage 读取权限。
                             </p>
                         </div>
                     ) : (
@@ -190,13 +231,10 @@ export const UsageStatsModal: React.FC<UsageStatsModalProps> = ({ isOpen, onClos
                                         重试
                                     </button>
                                     {mode === 'cloudflare' && (
-                                        <button onClick={() => setCfConfig({ accountId: '', apiToken: '', kvId: '' })} className="mt-2 text-xs text-ios-subtext underline">
+                                        <button onClick={() => setIsEditing(true)} className="mt-2 text-xs text-ios-subtext underline">
                                             重新配置 API
                                         </button>
                                     )}
-                                    <p className="text-[10px] text-ios-subtext text-center px-4 leading-relaxed">
-                                        {stats?.note || '注：数据仅供参考，Cloudflare 每日额度按 UTC 时间重置。'}
-                                    </p>
                                 </div>
                             ) : stats ? (
                                 <div className="space-y-4 animate-in fade-in">
@@ -268,7 +306,7 @@ export const UsageStatsModal: React.FC<UsageStatsModalProps> = ({ isOpen, onClos
                                     </p>
 
                                     {mode === 'cloudflare' && (
-                                        <button onClick={() => setCfConfig({ accountId: '', apiToken: '', kvId: '' })} className="w-full text-[10px] text-ios-subtext underline text-center">
+                                        <button onClick={() => setIsEditing(true)} className="w-full text-[10px] text-ios-subtext underline text-center">
                                             修改 API 配置
                                         </button>
                                     )}

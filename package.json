@@ -10,9 +10,16 @@
     "cap": "cap"
   },
   "dependencies": {
+    "@capacitor/android": "^7.4.4",
+    "@capacitor/app": "^7.1.0",
     "@capacitor/cli": "^7.4.4",
+    "@capacitor/clipboard": "^7.0.3",
     "@capacitor/core": "^7.4.4",
+    "@capacitor/filesystem": "^7.1.5",
+    "@capacitor/haptics": "^7.0.2",
     "@capacitor/ios": "^7.4.4",
+    "@capacitor/keyboard": "^7.0.3",
+    "@capacitor/share": "^7.0.3",
     "clsx": "^2.1.0",
     "date-fns": "^3.3.1",
     "dexie": "^3.2.4",
@@ -24,6 +31,7 @@
     "vconsole": "^3.15.1"
   },
   "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
     "@types/react": "^18.2.56",
     "@types/react-dom": "^18.2.19",
     "@vitejs/plugin-react": "^4.2.1",

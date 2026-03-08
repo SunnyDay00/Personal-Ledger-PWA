@@ -42,6 +42,7 @@ export interface Transaction {
   categoryId: string;
   date: number; // Timestamp
   note: string;
+  attachments: string[]; // R2 keys
   createdAt: number;
   updatedAt?: number; // Crucial for sync
   isDeleted?: boolean; // Soft delete
@@ -59,7 +60,7 @@ export interface OperationLog {
 export interface BackupLog {
   id: string;
   timestamp: number;
-  type: 'settings' | 'ledgers' | 'ledger_csv' | 'full' | 'restore';
+  type: 'settings' | 'ledgers' | 'ledger_csv' | 'full' | 'restore' | 'transactions' | 'mixed' | 'incremental';
   action: 'upload' | 'download';
   status: 'success' | 'failure';
   file?: string;
@@ -93,6 +94,9 @@ export interface AppSettings {
   customThemeColor: string;
   enableAnimations: boolean;
   enableSound: boolean;
+  enableHaptics: boolean;
+  hapticStrength: number; // 0=Off, 1=Light, 2=Medium, 3=Heavy
+  fontContrast: 'normal' | 'high';
   
   // WebDAV
   webdavUrl: string;
@@ -114,6 +118,10 @@ export interface AppSettings {
   keypadHeight: number; // percentage (20-60)
   categoryRows: number; // items per row (4-6)
   
+  // Image Cache
+  imageCacheLimit?: number; // bytes, default 200MB
+
+  
   // Data
   categoryNotes: Record<string, string[]>; // Category ID -> List of recent notes
   searchHistory: string[];
@@ -134,6 +142,13 @@ export interface AppSettings {
   
   // Debug
   debugMode?: boolean;
+
+  // Cloudflare API Config (for usage stats)
+  cfConfig?: {
+    accountId: string;
+    apiToken: string;
+    kvId: string;
+  };
 }
 
 export interface AppState {
