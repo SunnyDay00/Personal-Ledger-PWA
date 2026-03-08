@@ -301,6 +301,27 @@ npx cap open ios
 
 仓库中也包含 iOS 打包工作流，可生成测试用 IPA 产物。正式签名与分发仍需你自己的 Apple 签名配置。
 
+如果你在 Windows 上使用 GitHub Actions 云端打包，可以直接运行根目录脚本：
+
+```bat
+build-ios-github.cmd
+```
+
+前置条件：
+
+- 已安装 GitHub CLI：`winget install --id GitHub.cli -e`
+- 已完成登录：`gh auth login`
+- 需要打包的代码已经推送到远端分支
+
+脚本启动后会显示 1 搭建并下载、2 下载已有构建、3 退出 三个选项。
+
+脚本会自动：
+- 启动后先询问是“搭建并下载”还是“下载已有构建”
+- 选择 `3` 时，会立即退出脚本
+- 选择“搭建并下载”时，会列出远端分支并按编号选择
+- 选择“下载已有构建”时，会列出 GitHub 上最近成功的 iOS 构建记录，并显示构建时间、分支和运行 ID
+- 下载成功后，会优先从 GitHub 远端项目的 `package.json` 读取版本号命名文件，例如 `7.3.0` 会保存为 `builds/ios/7.3.ipa`；如果读取失败，则回退为 `builds/ios/run-<运行ID>.ipa`
+
 ## 使用说明
 
 ### 首次使用
