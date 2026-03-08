@@ -21,7 +21,7 @@ Personal Ledger PWA 是一个以本地优先为核心的个人记账应用，支
 - 添加 / 修改账目时可直接点击日期并选择日期，编辑时默认带出原账目日期
 - 金额小键盘支持加减乘除表达式输入，长按减号可切换为 ÷，长按加号可切换为 ×
 - 自定义分类与分类分组
-- 分类管理支持拖动排序，分类顺序调整会直接写回本地数据
+- 分类管理支持稳定拖动排序，拖动提示位于卡片下方，拖动过程中列表不抖动，分类顺序调整会直接写回本地数据
 - 周 / 月 / 年统计视图
 - 饼图、柱状图、折线图分析
 - 预算展示与进度追踪
@@ -137,6 +137,8 @@ WebDAV 方案更偏向文件式备份，主要保存：
 
 实现中使用了 ETag 乐观锁和重试逻辑，用来降低并发覆盖风险。
 
+如果浏览器无法直接访问某些 WebDAV 服务（例如坚果云），当前 Cloudflare Worker 还提供了一个可选的 `/webdav/*` 代理路由。该路由会将 `GET`、`PUT`、`DELETE`、`PROPFIND` 请求转发到坚果云 WebDAV，并透传 `Authorization`、`Depth`、`If-Match` 等备份所需请求头。
+
 ### 5. 图片附件流程
 
 - 新增图片时先写入本地缓存
@@ -251,9 +253,22 @@ npx wrangler deploy --config cloudflareworker/wrangler.toml
 - `AUTH_TOKEN`
 - 多设备共用的稳定 `userId`
 
+如果你还需要给坚果云 WebDAV 备份做浏览器侧中转，可以直接复用同一个 Worker。部署完成后，将应用里的 WebDAV 地址改为：
+
+```text
+https://<你的-worker-域名>/webdav
+```
+
+此时用户名和密码仍填写你的坚果云 WebDAV 账号信息，Worker 会把备份请求中转到 `https://dav.jianguoyun.com/dav`。
+
 ### 方案三：只使用 WebDAV 备份
 
-如果不想部署 Cloudflare 后端，也可以只使用 WebDAV。
+如果不想使用 D1 + KV + R2 同步，也可以只使用 WebDAV。
+
+有两种方式：
+
+- 直接填写 WebDAV 服务地址
+- 如果浏览器无法直连坚果云，则先部署上面的 Worker，再填写 `https://<你的-worker-域名>/webdav`
 
 需要配置：
 

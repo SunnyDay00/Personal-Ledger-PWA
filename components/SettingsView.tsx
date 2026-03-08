@@ -95,6 +95,8 @@ export const SettingsView: React.FC = () => {
   const [isReordering, setIsReordering] = useState(false);
   const [dragCategoryId, setDragCategoryId] = useState<string | null>(null);
   const [dragOverCategoryId, setDragOverCategoryId] = useState<string | null>(null);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const dragStartRef = useRef<{ pointerId: number; startX: number; startY: number; startScrollTop: number } | null>(null);
   const [groupModal, setGroupModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; categoryIds: string[] }>({
     isOpen: false,
     mode: 'create',
@@ -465,10 +467,11 @@ export const SettingsView: React.FC = () => {
       return { ...prev, categoryIds: exists ? prev.categoryIds.filter(id => id !== catId) : [...prev.categoryIds, catId] };
     });
   };
-
   useEffect(() => {
     setDragCategoryId(null);
     setDragOverCategoryId(null);
+    setDragOffset({ x: 0, y: 0 });
+    dragStartRef.current = null;
   }, [catType, selectedLedgerId, isReordering]);
 
   const reorderCategoriesById = (list: Category[], activeId: string, overId: string) => {
@@ -496,13 +499,12 @@ export const SettingsView: React.FC = () => {
     feedback.play('switch');
     feedback.vibrate('light');
   };
-
-  const previewCategories = useMemo(() => {
-    if (!dragCategoryId || !dragOverCategoryId || dragCategoryId === dragOverCategoryId) {
-      return sortedCategories;
-    }
-    return reorderCategoriesById(sortedCategories, dragCategoryId, dragOverCategoryId);
-  }, [sortedCategories, dragCategoryId, dragOverCategoryId]);
+  const resetCategoryDrag = () => {
+    dragStartRef.current = null;
+    setDragCategoryId(null);
+    setDragOverCategoryId(null);
+    setDragOffset({ x: 0, y: 0 });
+  };
 
   const getCategoryIdFromPoint = (clientX: number, clientY: number) => {
     const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
@@ -529,18 +531,32 @@ export const SettingsView: React.FC = () => {
 
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
+    dragStartRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startScrollTop: scrollRef.current?.scrollTop || 0,
+    };
+    setDragOffset({ x: 0, y: 0 });
     setDragCategoryId(categoryId);
     setDragOverCategoryId(categoryId);
   };
 
   const handleCategoryPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!isReordering || !dragCategoryId) return;
+    const dragStart = dragStartRef.current;
+    if (!dragStart || dragStart.pointerId !== event.pointerId) return;
 
     event.preventDefault();
     maybeAutoScrollCategories(event.clientY);
+    const scrollDelta = (scrollRef.current?.scrollTop || dragStart.startScrollTop) - dragStart.startScrollTop;
+    setDragOffset({
+      x: event.clientX - dragStart.startX,
+      y: event.clientY - dragStart.startY + scrollDelta,
+    });
 
     const targetCategoryId = getCategoryIdFromPoint(event.clientX, event.clientY);
-    if (targetCategoryId) {
+    if (targetCategoryId && targetCategoryId !== dragOverCategoryId) {
       setDragOverCategoryId(targetCategoryId);
     }
   };
@@ -554,13 +570,11 @@ export const SettingsView: React.FC = () => {
       commitCategoryOrder(reorderCategoriesById(sortedCategories, dragCategoryId, dragOverCategoryId));
     }
 
-    setDragCategoryId(null);
-    setDragOverCategoryId(null);
+    resetCategoryDrag();
   };
 
   const cancelCategoryDrag = () => {
-    setDragCategoryId(null);
-    setDragOverCategoryId(null);
+    resetCategoryDrag();
   };
 
   const renderStorage = () => (
@@ -1457,12 +1471,14 @@ export const SettingsView: React.FC = () => {
         </button>
       </div>
       {isReordering && <p className="text-[11px] text-ios-subtext px-4 -mt-2 mb-2">按住分类卡片拖动排序</p>}
-
       <div className="px-4">
         <div className="grid grid-cols-4 gap-3">
-          {previewCategories.map((c, index) => {
+          {sortedCategories.map((c, index) => {
             const isDraggingCard = dragCategoryId === c.id;
             const isDropTarget = dragOverCategoryId === c.id && dragCategoryId !== c.id;
+            const dragStyle = isDraggingCard
+              ? { transform: `translate3d(${dragOffset.x}px, ${dragOffset.y}px, 0) scale(1.03)` }
+              : undefined;
 
             return (
               <div
@@ -1476,24 +1492,24 @@ export const SettingsView: React.FC = () => {
                 className={cn(
                   'relative group bg-white dark:bg-zinc-900 rounded-xl p-3 flex flex-col items-center justify-center gap-2 shadow-sm border border-ios-border aspect-square animate-fade-in transition-transform duration-150',
                   isReordering && 'cursor-grab select-none touch-none',
-                  isDraggingCard && 'z-10 scale-95 opacity-70 shadow-lg ring-2 ring-ios-primary/60',
-                  isDropTarget && 'ring-2 ring-ios-primary/40 -translate-y-1'
+                  isDraggingCard && 'z-20 opacity-95 shadow-xl ring-2 ring-ios-primary/60 pointer-events-none transition-none',
+                  isDropTarget && 'ring-2 ring-ios-primary/40 bg-ios-primary/5'
                 )}
+                style={dragStyle}
                 onClick={() => {
                   if (!isReordering) openEditCategory(c);
                 }}
               >
-                {isReordering && (
-                  <div className="absolute top-2 right-2 flex items-center gap-1 rounded-full bg-ios-primary/10 px-2 py-0.5 text-[10px] text-ios-primary">
-                    <Icon name="GripVertical" className="w-3 h-3" />
-                    <span>拖动</span>
-                  </div>
-                )}
-
                 <div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-zinc-800 flex items-center justify-center text-ios-primary">
                   <Icon name={c.icon} className="w-4 h-4" />
                 </div>
                 <span className="text-xs text-center truncate w-full">{c.name}</span>
+                {isReordering && (
+                  <div className="inline-flex items-center gap-1 rounded-full bg-ios-primary/10 px-2 py-1 text-[10px] text-ios-primary">
+                    <Icon name="GripVertical" className="w-3 h-3" />
+                    <span>&#x62D6;&#x52A8;</span>
+                  </div>
+                )}
 
                 {isReordering ? (
                   <div className="absolute top-2 left-2 min-w-6 h-6 px-1 rounded-full bg-gray-100 dark:bg-zinc-800 text-[10px] font-medium text-ios-subtext flex items-center justify-center">
