@@ -2,6 +2,15 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '7.4.1',
+      date: '2026/03/25',
+      content: [
+          'iOS WebDAV 备份改为优先走原生 HTTP 通道，可直接连接坚果云官方 WebDAV 地址。',
+          '修复 WebDAV 备份提醒天数设为 0 后仍可能继续提醒的问题。',
+          '保存 WebDAV 备份设置时会立即落盘，并在云端设置合并时保留“关闭提醒”状态。'
+      ]
+  },
+  {
       version: '7.4.0',
       date: '2026/03/08',
       content: [

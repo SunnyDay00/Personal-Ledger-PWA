@@ -13,8 +13,8 @@ import { SyncLogModal } from './SyncLogModal';
 import { Ledger, Category } from '../types';
 import { feedback } from '../services/feedback';
 import { UsageStatsModal } from './UsageStatsModal';
-
 import { imageService } from '../services/imageService';
+import { normalizeAppSettings, normalizeBackupAutoEnabled, normalizeBackupIntervalDays, normalizeBackupReminderDays } from '../services/settingsUtils';
 
 type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'history' | 'layout' | 'theme' | 'about' | 'storage';
 
@@ -74,9 +74,9 @@ export const SettingsView: React.FC = () => {
     versionCheckIntervalBg: state.settings.versionCheckIntervalBg ?? 20,
   });
   const [isManualSyncing, setIsManualSyncing] = useState(false);
-  const [reminderDays, setReminderDays] = useState<number>(state.settings.backupReminderDays ?? 7);
-  const [autoBackupEnabled, setAutoBackupEnabled] = useState<boolean>(state.settings.backupAutoEnabled ?? false);
-  const [autoBackupDays, setAutoBackupDays] = useState<number>(state.settings.backupIntervalDays ?? 7);
+  const [reminderDays, setReminderDays] = useState<number>(normalizeBackupReminderDays(state.settings.backupReminderDays));
+  const [autoBackupEnabled, setAutoBackupEnabled] = useState<boolean>(normalizeBackupAutoEnabled(state.settings.backupAutoEnabled));
+  const [autoBackupDays, setAutoBackupDays] = useState<number>(normalizeBackupIntervalDays(state.settings.backupIntervalDays));
   const [exportStart, setExportStart] = useState(state.settings.exportStartDate || '');
   const [exportEnd, setExportEnd] = useState(state.settings.exportEndDate || '');
 
@@ -162,9 +162,9 @@ export const SettingsView: React.FC = () => {
         user: state.settings.webdavUser || '',
         pass: state.settings.webdavPass || '',
       });
-      setReminderDays(state.settings.backupReminderDays ?? 7);
-      setAutoBackupEnabled(state.settings.backupAutoEnabled ?? false);
-      setAutoBackupDays(state.settings.backupIntervalDays ?? 7);
+      setReminderDays(normalizeBackupReminderDays(state.settings.backupReminderDays));
+      setAutoBackupEnabled(normalizeBackupAutoEnabled(state.settings.backupAutoEnabled));
+      setAutoBackupDays(normalizeBackupIntervalDays(state.settings.backupIntervalDays));
       setExportStart(state.settings.exportStartDate || '');
       setExportEnd(state.settings.exportEndDate || '');
     }
@@ -271,20 +271,23 @@ export const SettingsView: React.FC = () => {
     }
   };
 
-  const handleSaveWebDav = () => {
+  const handleSaveWebDav = async () => {
     const { url, user, pass } = webdavForm;
+    const nextSettings = {
+      ...state.settings,
+      webdavUrl: url,
+      webdavUser: user,
+      webdavPass: pass,
+      enableCloudSync: false,
+      backupReminderDays: normalizeBackupReminderDays(reminderDays),
+      backupAutoEnabled: normalizeBackupAutoEnabled(autoBackupEnabled),
+      backupIntervalDays: normalizeBackupIntervalDays(autoBackupDays),
+    };
     dispatch({
       type: 'UPDATE_SETTINGS',
-      payload: {
-        webdavUrl: url,
-        webdavUser: user,
-        webdavPass: pass,
-        enableCloudSync: false,
-        backupReminderDays: reminderDays,
-        backupAutoEnabled: autoBackupEnabled,
-        backupIntervalDays: autoBackupDays,
-      },
+      payload: nextSettings,
     });
+    await db.settings.put({ key: 'main', value: normalizeAppSettings(nextSettings) });
     setIsWebDavEditing(false);
     window.alert('设置已保存');
   };
@@ -1065,7 +1068,7 @@ export const SettingsView: React.FC = () => {
                 window.alert('WebDAV 配置不完整，无法备份');
                 return;
               }
-              if (isWebDavEditing) handleSaveWebDav();
+              if (isWebDavEditing) await handleSaveWebDav();
               if (!window.confirm('确定将本地数据上传备份到云端？')) return;
               setIsBackingUp(true);
               try {
@@ -1094,7 +1097,7 @@ export const SettingsView: React.FC = () => {
                 window.alert('WebDAV 配置不完整，无法恢复');
                 return;
               }
-              if (isWebDavEditing) handleSaveWebDav();
+              if (isWebDavEditing) await handleSaveWebDav();
               if (!window.confirm('从云端恢复并覆盖本地数据？')) return;
               setIsRestoring(true);
               try {

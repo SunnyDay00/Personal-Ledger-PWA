@@ -141,6 +141,8 @@ WebDAV 方案更偏向文件式备份，主要保存：
 
 在 iOS 原生壳中，WebDAV 备份会优先走 Capacitor 的原生 HTTP 通道，因此可以直接填写坚果云官方 WebDAV 地址而不依赖浏览器跨域能力。浏览器/PWA 端如果无法直连某些 WebDAV 服务，仍可继续使用代理方案。
 
+`备份提醒天数` 支持设置为 `0` 来彻底关闭提醒；应用会在读取本地设置和合并云端设置时保留这个关闭状态，避免旧的同步配置把提醒重新打开。
+
 如果浏览器无法直接访问某些 WebDAV 服务（例如坚果云），当前 Cloudflare Worker 还提供了一个可选的 `/webdav/*` 代理路由。该路由会将 `GET`、`PUT`、`DELETE`、`PROPFIND` 请求转发到坚果云 WebDAV，并透传 `Authorization`、`Depth`、`If-Match` 等备份所需请求头。
 
 ### 5. 图片附件流程

@@ -8,6 +8,7 @@ import { pushToCloud, pullFromCloud } from '../services/d1Sync';
 import { SyncService } from '../services/sync';
 import { feedback } from '../services/feedback';
 import { imageService } from '../services/imageService';
+import { normalizeAppSettings, normalizeBackupReminderDays } from '../services/settingsUtils';
 
 const initialState: AppState = {
     ledgers: INITIAL_LEDGERS,
@@ -114,7 +115,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
             };
         }
         case 'UPDATE_SETTINGS':
-            return { ...state, settings: { ...state.settings, ...action.payload } };
+            return { ...state, settings: normalizeAppSettings({ ...state.settings, ...action.payload }, DEFAULT_SETTINGS) };
         case 'ADD_OPERATION_LOG':
             return { ...state, operationLogs: [action.payload, ...state.operationLogs] };
         case 'ADD_BACKUP_LOG':
@@ -124,7 +125,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
         case 'SET_ONLINE_STATUS':
             return { ...state, isOnline: action.payload };
         case 'RESTORE_DATA':
-            const newSettings = { ...state.settings, ...(action.payload.settings || {}) };
+            const newSettings = normalizeAppSettings({ ...state.settings, ...(action.payload.settings || {}) }, DEFAULT_SETTINGS);
             return {
                 ...state,
                 ...action.payload,
@@ -225,7 +226,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     groupStoreAvailableRef.current ? dbAPI.getCategoryGroups() : Promise.resolve([])
                 ]);
 
-                const loadedSettings = settings ? { ...DEFAULT_SETTINGS, ...settings } : DEFAULT_SETTINGS;
+                const loadedSettings = normalizeAppSettings(settings, DEFAULT_SETTINGS);
                 if (loadedSettings.enableCloudSync === undefined) loadedSettings.enableCloudSync = false;
 
                 const lastLedgerId = typeof window !== 'undefined' ? localStorage.getItem('lastLedgerId') : null;
@@ -374,7 +375,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (!isDBLoaded || hasRemindedRef.current) return;
         const { lastBackupTime, webdavUrl, webdavUser, webdavPass, backupReminderDays } = state.settings;
         const hasWebdav = !!(webdavUrl && webdavUser && webdavPass);
-        const thresholdDays = backupReminderDays ?? 7;
+        const thresholdDays = normalizeBackupReminderDays(backupReminderDays, DEFAULT_SETTINGS.backupReminderDays ?? 7);
         // 仅在已配置 WebDAV 且存在有效的上次备份时间且开启提醒时提示
         if (!hasWebdav || !lastBackupTime || thresholdDays <= 0) return;
         const days = (Date.now() - lastBackupTime) / (1000 * 60 * 60 * 24);
@@ -668,7 +669,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
                 // CRITICAL FIX: Merge Logic to Prefer Cloud Settings but Preserve Connection
                 const dbSettingsRow = await db.settings.get('main');
-                const localSettings = { ...(dbSettingsRow?.value || DEFAULT_SETTINGS), ...stateRef.current.settings };
+                const localSettings = normalizeAppSettings(
+                    { ...(dbSettingsRow?.value || DEFAULT_SETTINGS), ...stateRef.current.settings },
+                    DEFAULT_SETTINGS
+                );
+                const localReminderDays = normalizeBackupReminderDays(
+                    localSettings.backupReminderDays,
+                    DEFAULT_SETTINGS.backupReminderDays ?? 7
+                );
 
                 const newSettings = {
                     ...localSettings, // Start with local structure
@@ -683,6 +691,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     syncEndpoint: (dataObj.syncEndpoint && String(dataObj.syncEndpoint).trim() !== '') ? dataObj.syncEndpoint : localSettings.syncEndpoint,
                     syncToken: (dataObj.syncToken && String(dataObj.syncToken).trim() !== '') ? dataObj.syncToken : localSettings.syncToken,
                     syncUserId: (dataObj.syncUserId && String(dataObj.syncUserId).trim() !== '') ? dataObj.syncUserId : localSettings.syncUserId,
+                    backupReminderDays: localReminderDays <= 0
+                        ? 0
+                        : normalizeBackupReminderDays(
+                            dataObj.backupReminderDays,
+                            localSettings.backupReminderDays ?? DEFAULT_SETTINGS.backupReminderDays ?? 7
+                        ),
 
                     // PRESERVE Local First Run state if false
                     isFirstRun: localSettings.isFirstRun === false ? false : (dataObj.isFirstRun ?? DEFAULT_SETTINGS.isFirstRun),
@@ -691,7 +705,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
                 await db.settings.put({
                     key: 'main',
-                    value: newSettings
+                    value: normalizeAppSettings(newSettings, DEFAULT_SETTINGS)
                 });
             }
         });
@@ -1190,8 +1204,6 @@ export const useApp = () => {
     }
     return context;
 };
-
-
 
 
 
