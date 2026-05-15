@@ -1,6 +1,5 @@
 ﻿import React, { useState, useEffect } from 'react';
 import { HomeView } from './HomeView';
-import { StatsView } from './StatsView';
 import { SettingsView } from './SettingsView';
 import { AddView } from './AddView';
 import { OnboardingView } from './OnboardingView';
@@ -21,6 +20,8 @@ type HomeJumpTarget = {
     transactionId: string;
     nonce: number;
 };
+
+const StatsView = React.lazy(() => import('./StatsView').then(module => ({ default: module.StatsView })));
 
 export const Layout: React.FC = () => {
     const { state, dispatch, canUndo, undo } = useApp();
@@ -144,7 +145,15 @@ export const Layout: React.FC = () => {
             {/* Main takes full height, navigation floats on top at bottom */}
             <main className="h-full w-full overflow-hidden relative">
                 {activeTab === 'home' && <HomeView onOpenSearch={() => setShowSearch(true)} onOpenBudget={() => setShowBudget(true)} jumpTarget={homeJumpTarget} onJumpTargetHandled={() => setHomeJumpTarget(null)} />}
-                {activeTab === 'stats' && <StatsView onOpenHomeTransaction={handleOpenHomeTransaction} />}
+                {activeTab === 'stats' && (
+                    <React.Suspense fallback={
+                        <div className="h-full w-full flex items-center justify-center text-ios-subtext">
+                            <Icon name="Loader2" className="w-6 h-6 animate-spin" />
+                        </div>
+                    }>
+                        <StatsView onOpenHomeTransaction={handleOpenHomeTransaction} />
+                    </React.Suspense>
+                )}
                 {activeTab === 'ledgers' && <LedgerManageView />}
                 {activeTab === 'settings' && <SettingsView />}
             </main>

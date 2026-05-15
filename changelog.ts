@@ -2,6 +2,14 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '7.4.3',
+      date: '2026/05/15',
+      content: [
+          '修复 7.4.2 生产构建中图表依赖被手动拆包后触发的初始化顺序错误，解决 iOS IPA 安装后白屏问题。',
+          '统计页改为按需加载，保留图标包瘦身，同时避免 Recharts/D3 分包导致的运行时崩溃。'
+      ]
+  },
+  {
       version: '7.4.2',
       date: '2026/05/15',
       content: [

@@ -75,24 +75,8 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           const normalizedId = id.replace(/\\/g, '/');
-          if (!normalizedId.includes('node_modules')) return undefined;
-          if (normalizedId.includes('/lucide-react/')) return 'icons-vendor';
-          if (
-            normalizedId.includes('/recharts/') ||
-            normalizedId.includes('/d3-') ||
-            normalizedId.includes('/react-is/') ||
-            normalizedId.includes('/react-smooth/') ||
-            normalizedId.includes('/victory-vendor/')
-          ) return 'charts-vendor';
-          if (normalizedId.includes('/@capacitor/')) return 'capacitor-vendor';
-          if (normalizedId.includes('/dexie/')) return 'storage-vendor';
-          if (normalizedId.includes('/date-fns/')) return 'date-vendor';
-          if (
-            normalizedId.includes('/react/') ||
-            normalizedId.includes('/react-dom/') ||
-            normalizedId.includes('/scheduler/')
-          ) return 'react-vendor';
-          return 'vendor';
+          if (normalizedId.includes('/node_modules/lucide-react/')) return 'icons-vendor';
+          return undefined;
         }
       }
     }
