@@ -2,6 +2,16 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '7.4.2',
+      date: '2026/05/15',
+      content: [
+          '修复账目新增、修改、删除时未可靠持久化的问题，所有账目变更会先成功写入本地 IndexedDB，再更新界面和提示成功。',
+          '新增本地待同步队列，断网、Token 错误或云同步失败时账目会保留在本地，下次启动、恢复联网或回到前台后继续同步。',
+          '移除数据库异常时自动清空本地数据的保护缺口，旧版 IndexedDB 数据会在当前库为空时自动迁移到新库。',
+          '优化构建配置，修复 Browserslist、vConsole eval 和图标包体积相关构建警告。'
+      ]
+  },
+  {
       version: '7.4.1',
       date: '2026/03/25',
       content: [

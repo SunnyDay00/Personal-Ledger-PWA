@@ -1,5 +1,5 @@
 
-import { db, ensureStoresReady, resetDB } from './db';
+import { db, ensureStoresReady } from './db';
 import { WebDAVService } from './webdav';
 import { AppSettings, Ledger, Transaction, Category, CategoryGroup } from '../types';
 import { transactionsToCsv, parseCsvToTransactions } from '../utils';
@@ -29,11 +29,10 @@ export class SyncService {
     async performSync() {
         let attempt = 0;
         const MAX_CONFLICT_RETRIES = 3;
-        // 确认表存在，否则重建一次
-        let ready = await ensureStoresReady();
+        // 确认表存在；异常时停止同步，避免自动删库
+        const ready = await ensureStoresReady();
         if (!ready) {
-            await resetDB();
-            ready = await ensureStoresReady();
+            throw new Error('本地数据库结构异常，已停止同步以保护本地数据');
         }
         let hasGroupStore = ready && db.tables.some(t => (t as any).name === 'categoryGroups');
         if (hasGroupStore) {

@@ -2,11 +2,29 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import './index.css';
 import App from './App';
-import VConsole from 'vconsole';
+import vConsoleUrl from 'vconsole/dist/vconsole.min.js?url';
 
-// Initialize vConsole for mobile debugging if enabled
+declare global {
+  interface Window {
+    VConsole?: new () => unknown;
+  }
+}
+
+const loadVConsole = () => {
+  if (document.querySelector('script[data-vconsole]')) return;
+  const script = document.createElement('script');
+  script.src = vConsoleUrl;
+  script.async = true;
+  script.dataset.vconsole = 'true';
+  script.onload = () => {
+    if (window.VConsole) new window.VConsole();
+  };
+  document.head.appendChild(script);
+};
+
+// Initialize vConsole for mobile debugging if enabled.
 if (localStorage.getItem('debugMode') === 'true') {
-  new VConsole();
+  loadVConsole();
 }
 
 const rootElement = document.getElementById('root');

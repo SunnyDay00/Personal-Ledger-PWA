@@ -48,6 +48,18 @@ export interface Transaction {
   isDeleted?: boolean; // Soft delete
 }
 
+export type SyncEntityType = 'transaction' | 'ledger' | 'category' | 'categoryGroup' | 'settings';
+export type SyncOperation = 'upsert' | 'delete';
+
+export interface SyncQueueItem {
+  id: string;
+  entityType: SyncEntityType;
+  entityId: string;
+  operation: SyncOperation;
+  updatedAt: number;
+  createdAt: number;
+}
+
 export interface OperationLog {
   id: string;
   type: 'add' | 'edit' | 'delete' | 'restore' | 'import' | 'export';
@@ -165,6 +177,8 @@ export interface AppState {
   updateLogs: UpdateLog[]; // Static or dynamic
   syncStatus: 'idle' | 'syncing' | 'success' | 'error';
   isOnline: boolean;
+  pendingSyncCount: number;
+  lastSyncError?: string;
 }
 
 export type AppAction =
@@ -189,6 +203,8 @@ export type AppAction =
   | { type: 'ADD_BACKUP_LOG'; payload: BackupLog }
   | { type: 'SET_SYNC_STATUS'; payload: AppState['syncStatus'] }
   | { type: 'SET_ONLINE_STATUS'; payload: boolean }
+  | { type: 'SET_PENDING_SYNC_COUNT'; payload: number }
+  | { type: 'SET_LAST_SYNC_ERROR'; payload?: string }
   | { type: 'RESTORE_DATA'; payload: Partial<AppState> }
   | { type: 'SET_THEME_MODE'; payload: ThemeMode }
   | { type: 'ADD_SEARCH_HISTORY'; payload: string }
@@ -203,12 +219,12 @@ export type AppAction =
 export interface AppContextType {
   state: AppState;
   dispatch: React.Dispatch<AppAction>;
-  addTransaction: (transaction: Transaction) => void;
-  updateTransaction: (transaction: Transaction) => void;
-  deleteTransaction: (id: string) => void;
-  batchDeleteTransactions: (ids: string[]) => void;
-  batchUpdateTransactions: (ids: string[], updates: Partial<Transaction>) => void;
-  undo: () => void;
+  addTransaction: (transaction: Transaction) => Promise<void>;
+  updateTransaction: (transaction: Transaction) => Promise<void>;
+  deleteTransaction: (id: string) => Promise<void>;
+  batchDeleteTransactions: (ids: string[]) => Promise<void>;
+  batchUpdateTransactions: (ids: string[], updates: Partial<Transaction>) => Promise<void>;
+  undo: () => Promise<void>;
   canUndo: boolean;
   manualBackup: () => Promise<void>;
   manualCloudSync: () => Promise<void>;

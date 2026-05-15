@@ -148,25 +148,33 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
         setSelectedIds(newSet);
     };
 
-    const handleBatchDelete = () => {
+    const handleBatchDelete = async () => {
         if (confirm(`确定要删除选中的 ${selectedIds.size} 条记录吗？`)) {
-            feedback.play('delete');
-            feedback.vibrate('light');
-            batchDeleteTransactions(Array.from(selectedIds));
-            setIsSelectionMode(false);
-            setSelectedIds(new Set());
+            try {
+                await batchDeleteTransactions(Array.from(selectedIds));
+                feedback.play('delete');
+                feedback.vibrate('light');
+                setIsSelectionMode(false);
+                setSelectedIds(new Set());
+            } catch (e: any) {
+                window.alert('Delete failed: ' + (e?.message || 'unknown error'));
+            }
         }
     };
 
-    const handleBatchUpdate = (updates: Partial<Transaction>) => {
+    const handleBatchUpdate = async (updates: Partial<Transaction>) => {
         if (Object.keys(updates).length === 0) return;
         if (confirm(`确定要更新选中的 ${selectedIds.size} 条记录吗？`)) {
-            feedback.play('success');
-            feedback.vibrate('success');
-            batchUpdateTransactions(Array.from(selectedIds), updates);
-            setIsSelectionMode(false);
-            setSelectedIds(new Set());
-            setShowBatchEdit(false);
+            try {
+                await batchUpdateTransactions(Array.from(selectedIds), updates);
+                feedback.play('success');
+                feedback.vibrate('success');
+                setIsSelectionMode(false);
+                setSelectedIds(new Set());
+                setShowBatchEdit(false);
+            } catch (e: any) {
+                window.alert('Update failed: ' + (e?.message || 'unknown error'));
+            }
         }
     };
 
@@ -361,11 +369,15 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                                                         {t.type === 'expense' ? '-' : '+'}{formatCurrency(t.amount).replace('¥', '')}
                                                     </div>
                                                     {!isSelectionMode && (
-                                                        <button onClick={(e) => {
+                                                        <button onClick={async (e) => {
                                                             e.stopPropagation();
-                                                            feedback.play('delete');
-                                                            feedback.vibrate('light');
-                                                            deleteTransaction(t.id);
+                                                            try {
+                                                                await deleteTransaction(t.id);
+                                                                feedback.play('delete');
+                                                                feedback.vibrate('light');
+                                                            } catch (error: any) {
+                                                                window.alert('Delete failed: ' + (error?.message || 'unknown error'));
+                                                            }
                                                         }} className="p-2 -mr-2 text-gray-300 hover:text-red-500"><Icon name="X" className="w-4 h-4" /></button>
                                                     )}
                                                 </div>

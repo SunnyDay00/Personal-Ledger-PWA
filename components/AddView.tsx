@@ -418,7 +418,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
             };
 
             if (initialTransaction?.id) {
-                updateTransaction({
+                await updateTransaction({
                     ...initialTransaction,
                     ...txData,
                     id: initialTransaction.id,
@@ -427,7 +427,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                     isDeleted: initialTransaction.isDeleted,
                 } as Transaction);
             } else {
-                addTransaction({
+                await addTransaction({
                     ...txData,
                     id: generateId(),
                     createdAt: Date.now(),

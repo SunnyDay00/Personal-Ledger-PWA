@@ -1,9 +1,9 @@
 ﻿import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef, useCallback } from 'react';
-import { AppState, AppAction, Transaction, Ledger, OperationLog, BackupLog, Category, CategoryGroup, AppSettings } from '../types';
+import { AppState, AppAction, Transaction, Ledger, OperationLog, BackupLog, Category, CategoryGroup, AppSettings, SyncQueueItem } from '../types';
 import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, INITIAL_LEDGERS } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
 import { generateId, extractCategoriesFromCsv, formatCurrency, parseCsvToTransactions } from '../utils';
-import { db, initAndMigrateDB, dbAPI, resetDB, ensureStoresReady } from '../services/db';
+import { db, initAndMigrateDB, dbAPI, ensureStoresReady, createSyncQueueItem } from '../services/db';
 import { pushToCloud, pullFromCloud } from '../services/d1Sync';
 import { SyncService } from '../services/sync';
 import { feedback } from '../services/feedback';
@@ -24,17 +24,18 @@ const initialState: AppState = {
     updateLogs: UPDATE_LOGS,
     syncStatus: 'idle',
     isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
+    pendingSyncCount: 0,
 };
 
 interface AppContextType {
     state: AppState;
     dispatch: React.Dispatch<AppAction>;
-    addTransaction: (t: Transaction) => void;
-    updateTransaction: (t: Transaction) => void;
-    deleteTransaction: (id: string) => void;
-    batchDeleteTransactions: (ids: string[]) => void;
-    batchUpdateTransactions: (ids: string[], updates: Partial<Transaction>) => void;
-    undo: () => void;
+    addTransaction: (t: Transaction) => Promise<void>;
+    updateTransaction: (t: Transaction) => Promise<void>;
+    deleteTransaction: (id: string) => Promise<void>;
+    batchDeleteTransactions: (ids: string[]) => Promise<void>;
+    batchUpdateTransactions: (ids: string[], updates: Partial<Transaction>) => Promise<void>;
+    undo: () => Promise<void>;
     canUndo: boolean;
     manualBackup: () => Promise<void>;
     manualCloudSync: () => Promise<void>;
@@ -50,12 +51,12 @@ interface AppContextType {
 const AppContext = createContext<AppContextType>({
     state: initialState,
     dispatch: () => null,
-    addTransaction: () => null,
-    updateTransaction: () => null,
-    deleteTransaction: () => null,
-    batchDeleteTransactions: () => null,
-    batchUpdateTransactions: () => null,
-    undo: () => null,
+    addTransaction: async () => { },
+    updateTransaction: async () => { },
+    deleteTransaction: async () => { },
+    batchDeleteTransactions: async () => { },
+    batchUpdateTransactions: async () => { },
+    undo: async () => { },
     canUndo: false,
     manualBackup: async () => { },
     manualCloudSync: async () => { },
@@ -93,7 +94,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
             return {
                 ...state,
                 transactions: state.transactions.map(t =>
-                    ids.includes(t.id) ? { ...t, ...updates, updatedAt: Date.now() } : t
+                    ids.includes(t.id) ? { ...t, ...updates, updatedAt: updates.updatedAt ?? Date.now() } : t
                 )
             };
         case 'RESTORE_TRANSACTION':
@@ -124,6 +125,10 @@ function appReducer(state: AppState, action: AppAction): AppState {
             return { ...state, syncStatus: action.payload };
         case 'SET_ONLINE_STATUS':
             return { ...state, isOnline: action.payload };
+        case 'SET_PENDING_SYNC_COUNT':
+            return { ...state, pendingSyncCount: action.payload };
+        case 'SET_LAST_SYNC_ERROR':
+            return { ...state, lastSyncError: action.payload };
         case 'RESTORE_DATA':
             const newSettings = normalizeAppSettings({ ...state.settings, ...(action.payload.settings || {}) }, DEFAULT_SETTINGS);
             return {
@@ -181,6 +186,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
     const [state, dispatch] = useReducer(appReducer, initialState);
     const [isDBLoaded, setIsDBLoaded] = useState(false);
+    const [dbInitError, setDbInitError] = useState<string | null>(null);
     const [syncDirty, setSyncDirty] = useState(false);
     const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const isRestoringRef = useRef(false); // Guard against auto-sync immediately after restore
@@ -192,6 +198,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const autoBackupRef = useRef(false);
     // 默认认为不存在，检测成功后再置为 true，避免首次恢复访问不存在的 store
     const groupStoreAvailableRef = useRef(false);
+
+    const refreshPendingSyncCount = useCallback(async () => {
+        try {
+            const count = await dbAPI.getPendingSyncCount();
+            dispatch({ type: 'SET_PENDING_SYNC_COUNT', payload: count });
+            return count;
+        } catch (e) {
+            console.warn('Failed to refresh pending sync count', e);
+            return 0;
+        }
+    }, []);
 
     // Sync settings to FeedbackService
     useEffect(() => {
@@ -205,6 +222,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const init = async (retry = false) => {
             try {
                 const ok = await ensureStoresReady();
+                if (!ok) {
+                    throw new Error('本地数据库结构异常，已停止初始化以保护本地数据');
+                }
                 await initAndMigrateDB();
 
                 // detect categoryGroups store availability
@@ -257,22 +277,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 };
 
                 dispatch({ type: 'RESTORE_DATA', payload: newState });
+                const pendingCount = await refreshPendingSyncCount();
+                if (pendingCount > 0) setSyncDirty(true);
                 setIsDBLoaded(true);
+                setDbInitError(null);
                 await reloadGroupsToState();
             } catch (e: any) {
-                // 如果是缺少 objectStore，再尝试一次全量重建
-                if (!retry && (e?.name === 'NotFoundError' || /objectStore/i.test(e?.message || ''))) {
-                    console.warn('DB schema missing, resetting DB and retrying once...', e);
-                    await resetDB();
-                    groupStoreAvailableRef.current = false;
-                    await init(true);
-                    return;
-                }
                 console.error('Init failed', e);
+                const message = e?.message || '本地数据库初始化失败';
+                setDbInitError(message);
+                dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: message });
             }
         };
         init();
-    }, []);
+    }, [refreshPendingSyncCount]);
 
     // Persist Changes to DB (Write-Behind / Side-Effects)
     // We use this useEffect to save Settings whenever they change
@@ -321,7 +339,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // Online/Offline Listeners
     useEffect(() => {
-        const handleOnline = () => dispatch({ type: 'SET_ONLINE_STATUS', payload: true });
+        const handleOnline = () => {
+            dispatch({ type: 'SET_ONLINE_STATUS', payload: true });
+            setSyncDirty(true);
+        };
         const handleOffline = () => dispatch({ type: 'SET_ONLINE_STATUS', payload: false });
         window.addEventListener('online', handleOnline);
         window.addEventListener('offline', handleOffline);
@@ -340,6 +361,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 // and avoids race conditions during quick re-opens.
             }
             // On visible, do NOTHING. Wait for user interaction (touchstart) to resume.
+            if (document.visibilityState === 'visible') {
+                setSyncDirty(true);
+            }
         };
 
         // iOS requires user interaction to unlock audio context
@@ -385,63 +409,86 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
     }, [isDBLoaded, state.settings.lastBackupTime, state.settings.webdavUrl, state.settings.webdavUser, state.settings.webdavPass, state.settings.backupReminderDays]);
 
+    const nextMutationTime = () => Math.max(Date.now(), (stateRef.current.settings.lastSyncVersion || 0) + 1);
+
+    const persistTransactionWithQueue = async (tx: Transaction, operation: 'upsert' | 'delete') => {
+        const queued = createSyncQueueItem('transaction', tx.id, operation, tx.updatedAt || nextMutationTime());
+        await (db as any).transaction('rw', db.transactions, db.syncQueue, async () => {
+            await db.transactions.put(tx);
+            await db.syncQueue.put(queued);
+        });
+        await refreshPendingSyncCount();
+    };
+
+    const persistTransactionsWithQueue = async (txs: Transaction[], operation: 'upsert' | 'delete') => {
+        if (txs.length === 0) return;
+        const queueItems = txs.map(tx => createSyncQueueItem('transaction', tx.id, operation, tx.updatedAt || nextMutationTime()));
+        await (db as any).transaction('rw', db.transactions, db.syncQueue, async () => {
+            await db.transactions.bulkPut(txs);
+            await db.syncQueue.bulkPut(queueItems);
+        });
+        await refreshPendingSyncCount();
+    };
+
 
     // ================= ACTIONS (DB + State) =================
 
-    const addTransaction = (t: Transaction) => {
-        // 1. Update UI
-        dispatch({ type: 'ADD_TRANSACTION', payload: t });
-        // 2. Write DB
-        // Ensure strictly monotonic time relative to last sync to prevent clock skew issues
-        const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
-        db.transactions.put({ ...t, updatedAt: now, isDeleted: false });
+    const addTransaction = async (t: Transaction) => {
+        const now = nextMutationTime();
+        const saved: Transaction = { ...t, updatedAt: now, isDeleted: false };
+        await persistTransactionWithQueue(saved, 'upsert');
+        dispatch({ type: 'ADD_TRANSACTION', payload: saved });
 
-        // Logs & Notes
-        if (t.note) dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: t.categoryId, note: t.note } });
-        logOperation('add', t.id, 'Add ' + (t.type === 'expense' ? 'expense ' : 'income ') + t.amount);
+        if (saved.note) dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: saved.categoryId, note: saved.note } });
+        logOperation('add', saved.id, 'Add ' + (saved.type === 'expense' ? 'expense ' : 'income ') + saved.amount);
+        dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: undefined });
         setSyncDirty(true);
     };
 
-    const updateTransaction = (t: Transaction) => {
-        dispatch({ type: 'UPDATE_TRANSACTION', payload: t });
-        const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
-        db.transactions.put({ ...t, updatedAt: now, isDeleted: false });
+    const updateTransaction = async (t: Transaction) => {
+        const now = nextMutationTime();
+        const saved: Transaction = { ...t, updatedAt: now, isDeleted: false };
+        await persistTransactionWithQueue(saved, 'upsert');
+        dispatch({ type: 'UPDATE_TRANSACTION', payload: saved });
 
-        if (t.note) dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: t.categoryId, note: t.note } });
-        logOperation('edit', t.id, 'Update amount ' + t.amount);
+        if (saved.note) dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: saved.categoryId, note: saved.note } });
+        logOperation('edit', saved.id, 'Update amount ' + saved.amount);
+        dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: undefined });
         setSyncDirty(true);
     };
 
-    const deleteTransaction = (id: string) => {
-        const target = state.transactions.find(t => t.id === id);
-        if (target) {
-            dispatch({ type: 'DELETE_TRANSACTION', payload: id });
-            // Soft Delete in DB
-            const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
-            db.transactions.update(id, { isDeleted: true, updatedAt: now });
+    const deleteTransaction = async (id: string) => {
+        const target = stateRef.current.transactions.find(t => t.id === id);
+        if (!target) return;
 
-            logOperation('delete', id, 'Delete ' + target.amount);
-            setUndoStack({ type: 'restore_delete', data: target });
-            setSyncDirty(true);
-        }
+        const now = nextMutationTime();
+        const deleted: Transaction = { ...target, isDeleted: true, updatedAt: now };
+        await persistTransactionWithQueue(deleted, 'delete');
+
+        dispatch({ type: 'DELETE_TRANSACTION', payload: id });
+        logOperation('delete', id, 'Delete ' + target.amount);
+        setUndoStack({ type: 'restore_delete', data: target });
+        dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: undefined });
+        setSyncDirty(true);
     };
 
-    const undo = () => {
+    const undo = async () => {
         if (!undoStack) return;
-        // Robust timestamp
-        const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
+        const now = nextMutationTime();
         if (undoStack.type === 'restore_delete') {
-            const restored = { ...undoStack.data, isDeleted: false, updatedAt: now };
+            const restored: Transaction = { ...undoStack.data, isDeleted: false, updatedAt: now };
+            await persistTransactionWithQueue(restored, 'upsert');
             dispatch({ type: 'RESTORE_TRANSACTION', payload: restored });
-            db.transactions.put(restored);
             logOperation('restore', restored.id, '撤回删除');
         } else if (undoStack.type === 'restore_batch') {
-            const restoredList = undoStack.data.map(t => ({ ...t, isDeleted: false, updatedAt: now }));
+            const restoredList: Transaction[] = undoStack.data.map(t => ({ ...t, isDeleted: false, updatedAt: now }));
+            await persistTransactionsWithQueue(restoredList, 'upsert');
             restoredList.forEach(r => dispatch({ type: 'RESTORE_TRANSACTION', payload: r }));
-            db.transactions.bulkPut(restoredList);
             logOperation('restore', 'batch', `撤回批量删除 ${restoredList.length} 条`);
         }
         setUndoStack(null);
+        dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: undefined });
+        setSyncDirty(true);
     };
 
     // Wrapper for dispatching category/ledger actions to also sync to DB
@@ -544,24 +591,41 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (markDirtyTypes.includes(action.type)) setSyncDirty(true);
     };
 
-    const batchDeleteTransactions = (ids: string[]) => {
+    const batchDeleteTransactions = async (ids: string[]) => {
         if (!ids || ids.length === 0) return;
-        const deletedTxs = state.transactions.filter(t => ids.includes(t.id));
-        enhancedDispatch({ type: 'BATCH_DELETE_TRANSACTIONS', payload: ids });
+        const deletedTxs = stateRef.current.transactions.filter(t => ids.includes(t.id));
+        const now = nextMutationTime();
+        const deletedForDb = deletedTxs.map(t => ({ ...t, isDeleted: true, updatedAt: now }));
+        await persistTransactionsWithQueue(deletedForDb, 'delete');
+        dispatch({ type: 'BATCH_DELETE_TRANSACTIONS', payload: ids });
         setUndoStack({ type: 'restore_batch', data: deletedTxs });
         logOperation('delete', 'batch', '批量删除 ' + ids.length + ' 条');
+        dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: undefined });
+        setSyncDirty(true);
     };
 
-    const batchUpdateTransactions = (ids: string[], updates: Partial<Transaction>) => {
+    const batchUpdateTransactions = async (ids: string[], updates: Partial<Transaction>) => {
         if (!ids || ids.length === 0) return;
         if (!updates || Object.keys(updates).length === 0) return;
-        enhancedDispatch({ type: 'BATCH_UPDATE_TRANSACTIONS', payload: { ids, updates } });
+        const now = nextMutationTime();
+        const persistedUpdates: Partial<Transaction> = {};
+        (Object.entries(updates) as [keyof Transaction, any][]).forEach(([key, value]) => {
+            if (value !== undefined) (persistedUpdates as any)[key] = value;
+        });
+        const updatedTxs = stateRef.current.transactions
+            .filter(t => ids.includes(t.id))
+            .map(t => ({ ...t, ...persistedUpdates, updatedAt: now, isDeleted: false }));
+
+        await persistTransactionsWithQueue(updatedTxs, 'upsert');
+        dispatch({ type: 'BATCH_UPDATE_TRANSACTIONS', payload: { ids, updates: { ...persistedUpdates, updatedAt: now, isDeleted: false } } });
         const noteToSave = updates.note;
-        const categoryForNote = updates.categoryId || state.transactions.find(t => ids.includes(t.id))?.categoryId;
+        const categoryForNote = updates.categoryId || stateRef.current.transactions.find(t => ids.includes(t.id))?.categoryId;
         if (noteToSave && categoryForNote) {
             dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: categoryForNote, note: noteToSave } });
         }
         logOperation('edit', 'batch', 'Batch update ' + ids.length + ' items');
+        dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: undefined });
+        setSyncDirty(true);
     };
 
 
@@ -732,9 +796,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (!syncEndpoint || !syncToken || !isDBLoaded || !stateRef.current.isOnline) return;
         const ready = await ensureStoresReady();
         if (!ready) {
-            // 已重置 DB，重新初始化一次
-            setIsDBLoaded(false);
-            window.location.reload();
+            dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
+            dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: '本地数据库结构异常，已停止同步以保护本地数据' });
             return;
         }
         const hasGroupStore = true; // 始终尝试同步分组，避免误判跳过
@@ -750,24 +813,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             // 如果本地为空（常见于重置/首次恢复），强制全量 push/pull，避免 lastSyncVersion 过大导致云端数据未拉取
             let sinceForPush = reason === 'manual' ? 0 : (lastSyncVersion || 0);
             let sinceForPull = reason === 'manual' ? 0 : (lastSyncVersion || 0);
-            const [txAll, ledgersAll, catsAll, groupsAll] = await Promise.all([
+            const [txAll, ledgersAll, catsAll, groupsAll, queuedSyncItems] = await Promise.all([
                 dbAPI.getAllTransactionsIncludingDeleted(),
                 dbAPI.getAllLedgersIncludingDeleted(),
                 dbAPI.getAllCategoriesIncludingDeleted(),
                 dbAPI.getAllCategoryGroupsIncludingDeleted(),
+                dbAPI.getSyncQueueItems(),
             ]);
             const isLocalEmpty = txAll.length === 0 && ledgersAll.length === 0 && catsAll.length === 0 && groupsAll.length === 0;
             if (isLocalEmpty) {
                 sinceForPush = 0;
                 sinceForPull = 0;
             }
-            const filterBySince = <T extends { updatedAt?: number; updated_at?: number }>(arr: T[]) =>
-                sinceForPush === 0 ? arr : arr.filter(item => (item.updatedAt ?? item.updated_at ?? 0) > sinceForPush);
+            const queuedIds = (entityType: SyncQueueItem['entityType']) =>
+                new Set(queuedSyncItems.filter(item => item.entityType === entityType).map(item => item.entityId));
+            const filterForSync = <T extends { id?: string; updatedAt?: number; updated_at?: number }>(arr: T[], entityType: SyncQueueItem['entityType']) => {
+                const ids = queuedIds(entityType);
+                if (sinceForPush === 0) return arr;
+                return arr.filter(item => (item.updatedAt ?? item.updated_at ?? 0) > sinceForPush || (item.id ? ids.has(item.id) : false));
+            };
 
-            const txFiltered = filterBySince(txAll);
-            const ledgersFiltered = filterBySince(ledgersAll);
-            const catsFiltered = filterBySince(catsAll);
-            const groupsFiltered = filterBySince(groupsAll);
+            const txFiltered = filterForSync(txAll, 'transaction');
+            const ledgersFiltered = filterForSync(ledgersAll, 'ledger');
+            const catsFiltered = filterForSync(catsAll, 'category');
+            const groupsFiltered = filterForSync(groupsAll, 'categoryGroup');
 
             // 规范化字段（含删除标记），确保后端能写入 is_deleted 等字段
             const userId = syncUserId || 'default';
@@ -833,21 +902,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             // 手动同步强制全量拉取（since=0），避免版本偏差导致删除未拉取
             const pulled = await pullFromCloud(syncEndpoint, syncToken, syncUserId || 'default', sinceForPull);
             await mergeFromCloud(pulled);
+            await dbAPI.markSyncQueueItemsSynced(queuedSyncItems);
+            await refreshPendingSyncCount();
             // 重新从本地 DB 取分组，确保 UI 状态刷新
             const groupsReloaded = await dbAPI.getCategoryGroups();
             dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groupsReloaded } });
             setSyncDirty(false);
             logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'success', file: 'D1 Sync', message: reason === 'manual' ? '手动同步成功' : '自动同步成功' });
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'success' });
+            dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: undefined });
             setTimeout(() => dispatch({ type: 'SET_SYNC_STATUS', payload: 'idle' }), 2000);
         } catch (e: any) {
             console.error('Cloud sync failed', e);
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
+            dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: e?.message || '同步失败' });
             logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'failure', file: 'D1 Sync', message: e?.message || '同步失败' });
             if (reason === 'manual') alert('Sync failed: ' + (e?.message || 'unknown error'));
+            await refreshPendingSyncCount();
             setSyncDirty(true);
         }
-    }, [isDBLoaded, mergeFromCloud]);
+    }, [isDBLoaded, mergeFromCloud, refreshPendingSyncCount]);
 
     useEffect(() => {
         if (!syncDirty) return;
@@ -1024,7 +1098,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setSyncDirty(true);
     };
 
-    const smartImportCsv = (csvContent: string, targetLedgerId: string = state.currentLedgerId) => {
+    const smartImportCsv = async (csvContent: string, targetLedgerId: string = state.currentLedgerId) => {
         try {
             const parsedTxs = parseCsvToTransactions(csvContent);
             if (!parsedTxs || parsedTxs.length === 0) {
@@ -1063,7 +1137,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             newCats.forEach(c => enhancedDispatch({ type: 'ADD_CATEGORY', payload: c }));
 
             // Normalize and persist transactions
-            parsedTxs.forEach(tx => {
+            for (const tx of parsedTxs) {
                 const mappedCatId = registerCat(tx.categoryId || 'Other', tx.type === 'income' ? 'income' : 'expense');
                 const normalized: Transaction = {
                     ...tx,
@@ -1076,8 +1150,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     updatedAt: tx.updatedAt || tx.date || Date.now(),
                     isDeleted: false,
                 };
-                addTransaction(normalized);
-            });
+                await addTransaction(normalized);
+            }
 
             alert("Import finished, " + parsedTxs.length + " records added");
         } catch (e: any) {
@@ -1104,9 +1178,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
         const ready = await ensureStoresReady();
         if (!ready) {
-            setIsDBLoaded(false);
-            window.location.reload();
-            return;
+            isRestoringRef.current = false;
+            setIsRestoring(false);
+            throw new Error('本地数据库结构异常，已停止恢复以保护本地数据');
         }
 
         dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
@@ -1188,7 +1262,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setSyncDirty(true);
     };
 
-    if (!isDBLoaded) return null; // Or loading spinner
+    if (!isDBLoaded) {
+        if (dbInitError) {
+            return (
+                <div className="min-h-screen bg-ios-bg text-ios-text flex items-center justify-center p-6">
+                    <div className="max-w-sm rounded-2xl border border-ios-border bg-white dark:bg-zinc-900 p-5 shadow-sm">
+                        <h1 className="text-base font-semibold mb-2">本地数据库异常</h1>
+                        <p className="text-sm text-ios-subtext mb-3">为避免账目丢失，应用已停止自动重建数据库。请不要清理浏览器数据，可尝试关闭其他已打开的应用窗口后重新进入。</p>
+                        <p className="text-xs text-red-500 break-words">{dbInitError}</p>
+                    </div>
+                </div>
+            );
+        }
+        return null;
+    }
 
     return (
         <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, batchDeleteTransactions, batchUpdateTransactions, undo, canUndo: !!undoStack, manualBackup, manualCloudSync, importData, smartImportCsv, restoreFromCloud, resetApp, restoreFromD1, addLedger, triggerCloudSync }}>
@@ -1204,14 +1291,3 @@ export const useApp = () => {
     }
     return context;
 };
-
-
-
-
-
-
-
-
-
-
-

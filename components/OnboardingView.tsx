@@ -2,6 +2,7 @@
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { readJsonFile, generateId } from '../utils';
+import { db } from '../services/db';
 
 export const OnboardingView: React.FC = () => {
   const { dispatch, importData, restoreFromD1, addLedger } = useApp();
@@ -94,9 +95,6 @@ export const OnboardingView: React.FC = () => {
     }
     setIsRestoring(true);
     try {
-      // Import db once at the beginning
-      const { db } = await import('../services/db');
-
       // First save sync config to DB to ensure settings are persisted immediately
       const newSettings = {
         syncEndpoint: d1Form.endpoint.trim(),

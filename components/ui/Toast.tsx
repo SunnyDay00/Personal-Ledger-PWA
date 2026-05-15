@@ -3,7 +3,7 @@ import { Icon } from './Icon';
 
 interface ToastProps {
   message: string;
-  onUndo?: () => void;
+  onUndo?: () => void | Promise<void>;
   onClose: () => void;
   duration?: number;
 }

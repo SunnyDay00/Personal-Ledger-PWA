@@ -6,7 +6,7 @@ import { clsx } from 'clsx';
 
 export const CloudSyncButton: React.FC<{ className?: string }> = ({ className }) => {
   const { state } = useApp();
-  const { settings, syncStatus, backupLogs, isOnline } = state;
+  const { settings, syncStatus, backupLogs, isOnline, pendingSyncCount, lastSyncError } = state;
   const [showLog, setShowLog] = useState(false);
 
   const { icon, color, animate, status } = useMemo(() => {
@@ -20,6 +20,9 @@ export const CloudSyncButton: React.FC<{ className?: string }> = ({ className })
     if (syncStatus === 'syncing') {
       return { icon: 'RefreshCw', color: 'text-blue-500', animate: true, status: 'syncing' };
     }
+    if (pendingSyncCount > 0) {
+      return { icon: lastSyncError ? 'CloudOff' : 'CloudUpload', color: lastSyncError ? 'text-red-500' : 'text-orange-500', animate: false, status: 'pending' };
+    }
     if (backupLogs.length === 0) {
       return { icon: 'Cloud', color: 'text-gray-400', animate: false, status: 'idle' };
     }
@@ -31,7 +34,7 @@ export const CloudSyncButton: React.FC<{ className?: string }> = ({ className })
       return { icon: 'Cloud', color: 'text-yellow-500', animate: false, status: 'stale' };
     }
     return { icon: 'Cloud', color: 'text-green-500', animate: false, status: 'success' };
-  }, [settings.syncEndpoint, settings.syncToken, syncStatus, backupLogs, isOnline]);
+  }, [settings.syncEndpoint, settings.syncToken, syncStatus, backupLogs, isOnline, pendingSyncCount, lastSyncError]);
 
   const handleClick = () => {
     if (!settings.syncEndpoint || !settings.syncToken) {
@@ -46,12 +49,17 @@ export const CloudSyncButton: React.FC<{ className?: string }> = ({ className })
       <button
         onClick={handleClick}
         className={clsx(
-          'p-2 rounded-full bg-white/50 dark:bg-zinc-800/50 backdrop-blur-md shadow-sm transition-transform active:scale-95 flex items-center justify-center',
+          'relative p-2 rounded-full bg-white/50 dark:bg-zinc-800/50 backdrop-blur-md shadow-sm transition-transform active:scale-95 flex items-center justify-center',
           className
         )}
         title="云端同步状态"
       >
         <Icon name={icon} className={clsx('w-5 h-5', color, animate && 'animate-spin')} />
+        {pendingSyncCount > 0 && (
+          <span className="absolute -top-1 -right-1 min-w-4 h-4 px-1 rounded-full bg-orange-500 text-white text-[10px] leading-4 text-center font-bold">
+            {pendingSyncCount > 9 ? '9+' : pendingSyncCount}
+          </span>
+        )}
       </button>
       {showLog && <SyncLogModal onClose={() => setShowLog(false)} />}
     </>
