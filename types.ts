@@ -157,6 +157,7 @@ export interface AppSettings {
   authSession?: AuthSession;
   authMode?: AuthMode;
   lastSyncVersion?: number;
+  settingsUpdatedAt?: number;
   defaultLedgerId?: string;
   isFirstRun: boolean;
   exportStartDate?: string;

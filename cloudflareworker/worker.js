@@ -217,8 +217,17 @@ const AUTH_SYNC_TABLES = {
   groups: 'groups_v2',
   transactions: 'transactions_v2',
   settings: 'settings_v2',
+  syncVersions: 'sync_versions',
   recordConflict: '(user_id, id)',
 };
+
+const STRUCTURED_SYNC_TABLES = [
+  AUTH_SYNC_TABLES.ledgers,
+  AUTH_SYNC_TABLES.categories,
+  AUTH_SYNC_TABLES.groups,
+  AUTH_SYNC_TABLES.transactions,
+  AUTH_SYNC_TABLES.settings,
+];
 
 function normalizeImageKey(rawKey) {
   if (typeof rawKey !== 'string') return null;
@@ -241,6 +250,11 @@ function imageKeyFromPath(pathname, prefix) {
 
 function userImageObjectKey(userId, key) {
   return `users/${userId}/${key}`;
+}
+
+function clientUpdatedAt(value, fallback) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
 }
 
 // ---- 建表 SQL ----
@@ -281,6 +295,7 @@ CREATE TABLE IF NOT EXISTS ledgers_v2 (
   theme_color TEXT,
   created_at INTEGER,
   updated_at INTEGER,
+  server_updated_at INTEGER NOT NULL DEFAULT 0,
   is_deleted INTEGER,
   PRIMARY KEY (user_id, id)
 );
@@ -294,6 +309,7 @@ CREATE TABLE IF NOT EXISTS categories_v2 (
   "order" INTEGER,
   is_custom INTEGER,
   updated_at INTEGER,
+  server_updated_at INTEGER NOT NULL DEFAULT 0,
   is_deleted INTEGER,
   PRIMARY KEY (user_id, id)
 );
@@ -305,6 +321,7 @@ CREATE TABLE IF NOT EXISTS groups_v2 (
   category_ids TEXT,
   "order" INTEGER,
   updated_at INTEGER,
+  server_updated_at INTEGER NOT NULL DEFAULT 0,
   is_deleted INTEGER,
   PRIMARY KEY (user_id, id)
 );
@@ -320,13 +337,19 @@ CREATE TABLE IF NOT EXISTS transactions_v2 (
   attachments TEXT,
   created_at INTEGER,
   updated_at INTEGER,
+  server_updated_at INTEGER NOT NULL DEFAULT 0,
   is_deleted INTEGER,
   PRIMARY KEY (user_id, id)
 );
 CREATE TABLE IF NOT EXISTS settings_v2 (
   user_id TEXT PRIMARY KEY,
   data TEXT,
-  updated_at INTEGER
+  updated_at INTEGER,
+  server_updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sync_versions (
+  user_id TEXT PRIMARY KEY,
+  version INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ledgers_v2_user_updated ON ledgers_v2(user_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_categories_v2_user_updated ON categories_v2(user_id, updated_at);
@@ -412,6 +435,37 @@ export default {
 async function ensureTables(env) {
     const stmts = CREATE_SQL.split(';').map(s => s.trim()).filter(Boolean);
     for (const sql of stmts) await env.DB.prepare(sql).run();
+    await ensureServerUpdatedAtColumns(env);
+    await ensureServerUpdatedAtIndexes(env);
+}
+
+async function tableHasColumn(env, tableName, columnName) {
+  const info = await env.DB.prepare(`PRAGMA table_info(${tableName})`).all();
+  return (info.results || []).some(row => row.name === columnName);
+}
+
+async function ensureServerUpdatedAtColumns(env) {
+  const now = Date.now();
+  for (const tableName of STRUCTURED_SYNC_TABLES) {
+    const hasColumn = await tableHasColumn(env, tableName, 'server_updated_at');
+    if (!hasColumn) {
+      await env.DB.prepare(`ALTER TABLE ${tableName} ADD COLUMN server_updated_at INTEGER NOT NULL DEFAULT 0`).run();
+    }
+    await env.DB.prepare(
+      `UPDATE ${tableName} SET server_updated_at = ? WHERE server_updated_at IS NULL OR server_updated_at <= 0`
+    ).bind(now).run();
+  }
+}
+
+async function ensureServerUpdatedAtIndexes(env) {
+  const indexes = [
+    `CREATE INDEX IF NOT EXISTS idx_ledgers_v2_user_server_updated ON ${AUTH_SYNC_TABLES.ledgers}(user_id, server_updated_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_categories_v2_user_server_updated ON ${AUTH_SYNC_TABLES.categories}(user_id, server_updated_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_groups_v2_user_server_updated ON ${AUTH_SYNC_TABLES.groups}(user_id, server_updated_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_transactions_v2_user_server_updated ON ${AUTH_SYNC_TABLES.transactions}(user_id, server_updated_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_settings_v2_user_server_updated ON ${AUTH_SYNC_TABLES.settings}(user_id, server_updated_at)`,
+  ];
+  for (const sql of indexes) await env.DB.prepare(sql).run();
 }
 
 async function registerHandler(request, env, origin) {
@@ -547,15 +601,70 @@ async function meHandler(request, env, origin) {
 // ---- 辅助：分批执行，避免超过 D1 50 查询限制 ----
 async function batchInsert(bindings, db) {
   // bindings: Array<Statement>
+  const results = [];
   for (let i = 0; i < bindings.length; i += 40) {
     const slice = bindings.slice(i, i + 40);
-    await db.batch(slice);
+    const batchResults = await db.batch(slice);
+    results.push(...batchResults);
   }
+  return results;
+}
+
+async function getMaxServerUpdatedAt(env, userId, tableName) {
+  const row = await env.DB.prepare(
+    `SELECT MAX(server_updated_at) AS version FROM ${tableName} WHERE user_id=?`
+  ).bind(userId).first();
+  return Number(row?.version || 0);
+}
+
+async function getServerVersion(userId, env, tables) {
+  const [versionStr, ...tableVersions] = await Promise.all([
+    env.SYNC_KV.get(`version:${userId}`),
+    getMaxServerUpdatedAt(env, userId, tables.ledgers),
+    getMaxServerUpdatedAt(env, userId, tables.categories),
+    getMaxServerUpdatedAt(env, userId, tables.groups),
+    getMaxServerUpdatedAt(env, userId, tables.transactions),
+    getMaxServerUpdatedAt(env, userId, tables.settings),
+  ]);
+
+  return Math.max(
+    Number(versionStr || 0),
+    ...tableVersions.map(value => Number(value || 0))
+  );
+}
+
+async function reserveSyncVersion(userId, env, tables) {
+  const [currentVersion, reservedRow] = await Promise.all([
+    getServerVersion(userId, env, tables),
+    env.DB.prepare(`SELECT version FROM ${tables.syncVersions} WHERE user_id=?`).bind(userId).first(),
+  ]);
+  const reservedVersion = Number(reservedRow?.version || 0);
+  const candidate = Math.max(Date.now(), currentVersion + 1, reservedVersion + 1);
+  await env.DB.prepare(`
+    INSERT INTO ${tables.syncVersions} (user_id, version)
+    VALUES (?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+      version = CASE
+        WHEN ${tables.syncVersions}.version >= excluded.version THEN ${tables.syncVersions}.version + 1
+        ELSE excluded.version
+      END
+  `).bind(userId, candidate).run();
+
+  const row = await env.DB.prepare(`SELECT version FROM ${tables.syncVersions} WHERE user_id=?`).bind(userId).first();
+  return Number(row?.version || candidate);
+}
+
+async function publishSyncVersion(userId, version, env, tables) {
+  await env.DB.prepare(`
+    INSERT INTO ${tables.syncVersions} (user_id, version)
+    VALUES (?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET version = MAX(${tables.syncVersions}.version, excluded.version)
+  `).bind(userId, version).run();
+  await env.SYNC_KV.put(`version:${userId}`, String(version));
 }
 
 async function versionHandler(userId, env, origin, ctx) {
-  const versionStr = await env.SYNC_KV.get(`version:${userId}`);
-  const version = versionStr ? Number(versionStr) : Date.now();
+  const version = await getServerVersion(userId, env, AUTH_SYNC_TABLES);
 
   return json({ version }, 200, origin);
 }
@@ -613,16 +722,14 @@ async function deleteImageHandler(key, userId, env, origin) {
 async function pullHandler(url, userId, env, origin, ctx, tables) {
   const since = Number(url.searchParams.get('since') || 0);
 
-  const versionStr = await env.SYNC_KV.get(`version:${userId}`);
-  const version = versionStr ? Number(versionStr) : Date.now();
+  const version = await getServerVersion(userId, env, tables);
 
-  // groups 使用全量返回，避免版本不一致导致分组缺失（如需增量可再改回 > since）
   const [ledgers, categories, groups, transactions, settings] = await Promise.all([
-    env.DB.prepare(`SELECT * FROM ${tables.ledgers} WHERE user_id=? AND updated_at > ?`).bind(userId, since).all(),
-    env.DB.prepare(`SELECT * FROM ${tables.categories} WHERE user_id=? AND updated_at > ?`).bind(userId, since).all(),
-    env.DB.prepare(`SELECT * FROM ${tables.groups} WHERE user_id=?`).bind(userId).all(),
-    env.DB.prepare(`SELECT * FROM ${tables.transactions} WHERE user_id=? AND updated_at > ?`).bind(userId, since).all(),
-    env.DB.prepare(`SELECT * FROM ${tables.settings} WHERE user_id=?`).bind(userId).first(),
+    env.DB.prepare(`SELECT * FROM ${tables.ledgers} WHERE user_id=? AND server_updated_at > ?`).bind(userId, since).all(),
+    env.DB.prepare(`SELECT * FROM ${tables.categories} WHERE user_id=? AND server_updated_at > ?`).bind(userId, since).all(),
+    env.DB.prepare(`SELECT * FROM ${tables.groups} WHERE user_id=? AND server_updated_at > ?`).bind(userId, since).all(),
+    env.DB.prepare(`SELECT * FROM ${tables.transactions} WHERE user_id=? AND server_updated_at > ?`).bind(userId, since).all(),
+    env.DB.prepare(`SELECT * FROM ${tables.settings} WHERE user_id=? AND server_updated_at > ?`).bind(userId, since).first(),
   ]);
 
   const lRes = ledgers.results || [];
@@ -652,24 +759,57 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
   if (!payload) return text('Bad payload', 400, origin);
 
   const now = Date.now();
+  const accepted = [];
+  const superseded = [];
+  const potentialWrites =
+    (Array.isArray(payload.ledgers) ? payload.ledgers.length : 0) +
+    (Array.isArray(payload.categories) ? payload.categories.length : 0) +
+    (Array.isArray(payload.groups) ? payload.groups.length : 0) +
+    (Array.isArray(payload.transactions) ? payload.transactions.length : 0) +
+    (payload.settings ? 1 : 0);
+  const newVersion = potentialWrites > 0 ? await reserveSyncVersion(userId, env, tables) : 0;
+
+  const recordBatchResults = async (entries, results, tableName) => {
+    for (let index = 0; index < entries.length; index++) {
+      const entry = entries[index];
+      if (d1Changes(results[index]) > 0) {
+        accepted.push({ ...entry, serverUpdatedAt: newVersion });
+      } else {
+        const existing = await env.DB.prepare(
+          `SELECT updated_at, server_updated_at FROM ${tableName} WHERE user_id=? AND id=?`
+        ).bind(userId, entry.id).first();
+        superseded.push({
+          ...entry,
+          serverUpdatedAt: Number(existing?.server_updated_at || 0) || null,
+          remoteUpdatedAt: Number(existing?.updated_at || 0) || null,
+        });
+      }
+    }
+  };
 
   // Ledgers
   if (Array.isArray(payload.ledgers) && payload.ledgers.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO ${tables.ledgers} (id,user_id,name,theme_color,created_at,updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?)
+      `INSERT INTO ${tables.ledgers} (id,user_id,name,theme_color,created_at,updated_at,server_updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?)
        ON CONFLICT${tables.recordConflict} DO UPDATE SET
          name=excluded.name, 
          theme_color=excluded.theme_color, 
          updated_at=excluded.updated_at, 
+         server_updated_at=excluded.server_updated_at,
          is_deleted=excluded.is_deleted, 
          user_id=excluded.user_id
-       WHERE excluded.updated_at >= ${tables.ledgers}.updated_at`
+       WHERE excluded.updated_at > COALESCE(${tables.ledgers}.updated_at, 0)
+          OR (excluded.updated_at = COALESCE(${tables.ledgers}.updated_at, 0)
+              AND excluded.is_deleted = 1
+              AND COALESCE(${tables.ledgers}.is_deleted, 0) = 0)`
     );
+    const entries = [];
     const binds = payload.ledgers.map(l => {
       const isDel = l.isDeleted ?? l.is_deleted ?? false;
-      const updatedAt = Math.max(Number(l.updatedAt ?? l.updated_at ?? 0), now);
+      const updatedAt = clientUpdatedAt(l.updatedAt ?? l.updated_at, now);
       const createdAt = Number(l.createdAt ?? l.created_at ?? now);
+      entries.push({ entityType: 'ledger', id: l.id, updatedAt });
       return stmt.bind(
         l.id,
         userId,
@@ -677,17 +817,19 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
         l.themeColor || l.theme_color || '#007AFF',
         createdAt,
         updatedAt,
+        newVersion,
         isDel ? 1 : 0
       );
     });
-    await batchInsert(binds, env.DB);
+    const results = await batchInsert(binds, env.DB);
+    await recordBatchResults(entries, results, tables.ledgers);
   }
 
   // Categories
   if (Array.isArray(payload.categories) && payload.categories.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO ${tables.categories} (id,user_id,ledger_id,name,icon,type,"order",is_custom,updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO ${tables.categories} (id,user_id,ledger_id,name,icon,type,"order",is_custom,updated_at,server_updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT${tables.recordConflict} DO UPDATE SET
          ledger_id=excluded.ledger_id, 
          name=excluded.name, 
@@ -696,14 +838,20 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
          "order"=excluded."order", 
          is_custom=excluded.is_custom, 
          updated_at=excluded.updated_at, 
+         server_updated_at=excluded.server_updated_at,
          is_deleted=excluded.is_deleted, 
          user_id=excluded.user_id
-       WHERE excluded.updated_at >= ${tables.categories}.updated_at`
+       WHERE excluded.updated_at > COALESCE(${tables.categories}.updated_at, 0)
+          OR (excluded.updated_at = COALESCE(${tables.categories}.updated_at, 0)
+              AND excluded.is_deleted = 1
+              AND COALESCE(${tables.categories}.is_deleted, 0) = 0)`
     );
+    const entries = [];
     const binds = payload.categories.map(c => {
       const isDel = c.isDeleted ?? c.is_deleted ?? false;
       const isCustom = c.isCustom ?? c.is_custom ?? false;
-      const updatedAt = Math.max(Number(c.updatedAt ?? c.updated_at ?? 0), now);
+      const updatedAt = clientUpdatedAt(c.updatedAt ?? c.updated_at, now);
+      entries.push({ entityType: 'category', id: c.id, updatedAt });
       return stmt.bind(
         c.id,
         userId,
@@ -714,30 +862,38 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
         c.order ?? 0,
         isCustom ? 1 : 0,
         updatedAt,
+        newVersion,
         isDel ? 1 : 0
       );
     });
-    await batchInsert(binds, env.DB);
+    const results = await batchInsert(binds, env.DB);
+    await recordBatchResults(entries, results, tables.categories);
   }
 
   // Groups
   if (Array.isArray(payload.groups) && payload.groups.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO ${tables.groups} (id,user_id,ledger_id,name,category_ids,"order",updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?,?)
+      `INSERT INTO ${tables.groups} (id,user_id,ledger_id,name,category_ids,"order",updated_at,server_updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?,?)
        ON CONFLICT${tables.recordConflict} DO UPDATE SET
          ledger_id=excluded.ledger_id,
          name=excluded.name,
          category_ids=excluded.category_ids,
          "order"=excluded."order",
          updated_at=excluded.updated_at,
+         server_updated_at=excluded.server_updated_at,
          is_deleted=excluded.is_deleted,
          user_id=excluded.user_id
-       WHERE excluded.updated_at >= ${tables.groups}.updated_at`
+       WHERE excluded.updated_at > COALESCE(${tables.groups}.updated_at, 0)
+          OR (excluded.updated_at = COALESCE(${tables.groups}.updated_at, 0)
+              AND excluded.is_deleted = 1
+              AND COALESCE(${tables.groups}.is_deleted, 0) = 0)`
     );
+    const entries = [];
     const binds = payload.groups.map(g => {
       const isDel = g.isDeleted ?? g.is_deleted ?? false;
-      const updatedAt = Math.max(Number(g.updatedAt ?? g.updated_at ?? 0), now);
+      const updatedAt = clientUpdatedAt(g.updatedAt ?? g.updated_at, now);
+      entries.push({ entityType: 'categoryGroup', id: g.id, updatedAt });
       let cats = [];
       if (Array.isArray(g.categoryIds)) cats = g.categoryIds;
       else if (Array.isArray(g.category_ids)) cats = g.category_ids;
@@ -754,17 +910,19 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
         JSON.stringify(cats),
         g.order ?? 0,
         updatedAt,
+        newVersion,
         isDel ? 1 : 0
       );
     });
-    await batchInsert(binds, env.DB);
+    const results = await batchInsert(binds, env.DB);
+    await recordBatchResults(entries, results, tables.groups);
   }
 
   // Transactions
   if (Array.isArray(payload.transactions) && payload.transactions.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO ${tables.transactions} (id,user_id,ledger_id,amount,type,category_id,date,note,attachments,created_at,updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO ${tables.transactions} (id,user_id,ledger_id,amount,type,category_id,date,note,attachments,created_at,updated_at,server_updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT${tables.recordConflict} DO UPDATE SET
          ledger_id=excluded.ledger_id, 
          amount=excluded.amount, 
@@ -775,14 +933,20 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
          attachments=excluded.attachments,
          created_at=excluded.created_at, 
          updated_at=excluded.updated_at, 
+         server_updated_at=excluded.server_updated_at,
          is_deleted=excluded.is_deleted, 
          user_id=excluded.user_id
-       WHERE excluded.updated_at >= ${tables.transactions}.updated_at`
+       WHERE excluded.updated_at > COALESCE(${tables.transactions}.updated_at, 0)
+          OR (excluded.updated_at = COALESCE(${tables.transactions}.updated_at, 0)
+              AND excluded.is_deleted = 1
+              AND COALESCE(${tables.transactions}.is_deleted, 0) = 0)`
     );
+    const entries = [];
     const binds = payload.transactions.map(t => {
       const isDel = t.isDeleted ?? t.is_deleted ?? false;
-      const updatedAt = Math.max(Number(t.updatedAt ?? t.updated_at ?? 0), now);
+      const updatedAt = clientUpdatedAt(t.updatedAt ?? t.updated_at, now);
       const createdAt = Number(t.createdAt ?? t.created_at ?? t.date ?? now);
+      entries.push({ entityType: 'transaction', id: t.id, updatedAt });
       return stmt.bind(
         t.id,
         userId,
@@ -795,28 +959,50 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
         JSON.stringify(t.attachments || []),
         createdAt,
         updatedAt,
+        newVersion,
         isDel ? 1 : 0
       );
     });
-    await batchInsert(binds, env.DB);
+    const results = await batchInsert(binds, env.DB);
+    await recordBatchResults(entries, results, tables.transactions);
   }
 
   // Settings
   if (payload.settings) {
     const dataStr = typeof payload.settings.data === 'string' ? payload.settings.data : JSON.stringify(payload.settings.data || {});
-    const updatedAt = payload.settings.updated_at || now;
-    await env.DB.prepare(
-      `INSERT INTO ${tables.settings} (user_id,data,updated_at) VALUES (?,?,?)
-       ON CONFLICT(user_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at`
-    ).bind(userId, dataStr, updatedAt).run();
+    const updatedAt = clientUpdatedAt(payload.settings.updatedAt ?? payload.settings.updated_at, now);
+    const result = await env.DB.prepare(
+      `INSERT INTO ${tables.settings} (user_id,data,updated_at,server_updated_at) VALUES (?,?,?,?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         data=excluded.data,
+         updated_at=excluded.updated_at,
+         server_updated_at=excluded.server_updated_at
+       WHERE excluded.updated_at > COALESCE(${tables.settings}.updated_at, 0)`
+    ).bind(userId, dataStr, updatedAt, newVersion).run();
+    const entry = { entityType: 'settings', id: 'main', updatedAt };
+    if (d1Changes(result) > 0) {
+      accepted.push({ ...entry, serverUpdatedAt: newVersion });
+    } else {
+      const existing = await env.DB.prepare(
+        `SELECT updated_at, server_updated_at FROM ${tables.settings} WHERE user_id=?`
+      ).bind(userId).first();
+      superseded.push({
+        ...entry,
+        serverUpdatedAt: Number(existing?.server_updated_at || 0) || null,
+        remoteUpdatedAt: Number(existing?.updated_at || 0) || null,
+      });
+    }
   }
 
-  const newVersion = Date.now();
-  await env.SYNC_KV.put(`version:${userId}`, String(newVersion));
+  if (accepted.length > 0) {
+    await publishSyncVersion(userId, newVersion, env, tables);
+  }
+
+  const version = await getServerVersion(userId, env, tables);
 
   // 统计写入: 
   
   // 异步更新统计，不阻塞主流程
 
-  return json({ ok: true, version: newVersion }, 200, origin);
+  return json({ ok: true, success: true, version, accepted, superseded, results: { accepted, superseded } }, 200, origin);
 }

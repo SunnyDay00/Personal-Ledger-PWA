@@ -22,7 +22,7 @@ export const SyncLogModal: React.FC<{ onClose: () => void }> = ({ onClose }) => 
       case 'mixed':
         return '混合更新';
       case 'full':
-        return '全量数据';
+        return '全量同步';
       case 'restore':
         return '数据恢复';
       case 'incremental':
@@ -37,8 +37,8 @@ export const SyncLogModal: React.FC<{ onClose: () => void }> = ({ onClose }) => 
     if (log.file) detailParts.push(log.file);
     if (log.message) detailParts.push(log.message);
     // 根据 type 简单提示增量/全量
-    if (log.type === 'full') detailParts.push('全量');
-    if (log.type === 'incremental') detailParts.push('增量');
+    if (log.type === 'full') detailParts.push('全量对账');
+    if (log.type === 'incremental') detailParts.push('增量保存');
     return detailParts.join(' · ') || '无详细信息';
   };
 

@@ -84,17 +84,30 @@ export const createSyncQueueItem = (
   createdAt: Date.now(),
 });
 
+export async function queueSyncItem(
+  entityType: SyncEntityType,
+  entityId: string,
+  operation: SyncOperation = 'upsert',
+  updatedAt: number = Date.now()
+): Promise<SyncQueueItem> {
+  await openDB();
+  const item = createSyncQueueItem(entityType, entityId, operation, updatedAt);
+  await db.syncQueue.put(item);
+  return item;
+}
+
 const hasMissingUpdatedAt = <T extends { updatedAt?: number }>(items: T[]) =>
   items.some(item => !item.updatedAt);
 
 export async function markAllLocalDataForSync(): Promise<number> {
   await openDB();
   const now = Date.now();
-  const [transactions, ledgers, categories, groups] = await Promise.all([
+  const [transactions, ledgers, categories, groups, settings] = await Promise.all([
     db.transactions.toArray(),
     db.ledgers.toArray(),
     db.categories.toArray(),
     db.categoryGroups.toArray().catch(() => [] as CategoryGroup[]),
+    db.settings.get('main'),
   ]);
 
   const normalizedTransactions = transactions.map(t => ({
@@ -123,6 +136,7 @@ export async function markAllLocalDataForSync(): Promise<number> {
     ...normalizedLedgers.map(l => createSyncQueueItem('ledger', l.id, l.isDeleted ? 'delete' : 'upsert', l.updatedAt || now)),
     ...normalizedCategories.map(c => createSyncQueueItem('category', c.id, c.isDeleted ? 'delete' : 'upsert', c.updatedAt || now)),
     ...normalizedGroups.map(g => createSyncQueueItem('categoryGroup', g.id, g.isDeleted ? 'delete' : 'upsert', g.updatedAt || now)),
+    ...(settings ? [createSyncQueueItem('settings', 'main', 'upsert', now)] : []),
   ];
 
   await (db as any).transaction('rw', db.transactions, db.ledgers, db.categories, db.categoryGroups, db.syncQueue, async () => {
@@ -449,22 +463,6 @@ export const dbAPI = {
   },
   async hasUnsyncedData(lastSyncVersion: number): Promise<boolean> {
     const queued = await db.syncQueue.count();
-    if (queued > 0) return true;
-
-    const minTime = lastSyncVersion;
-    // Check if any entity has updatedAt > lastSyncVersion
-    const txCount = await db.transactions.where('updatedAt').above(minTime).count();
-    if (txCount > 0) return true;
-    
-    const ledgerCount = await db.ledgers.where('updatedAt').above(minTime).count();
-    if (ledgerCount > 0) return true;
-
-    const catCount = await db.categories.where('updatedAt').above(minTime).count();
-    if (catCount > 0) return true;
-
-    const groupCount = await db.categoryGroups.where('updatedAt').above(minTime).count();
-    if (groupCount > 0) return true;
-
-    return false;
+    return queued > 0;
   },
 };

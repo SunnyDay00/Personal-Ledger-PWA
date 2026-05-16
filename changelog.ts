@@ -2,6 +2,17 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '7.4.5',
+      date: '2026/05/16',
+      content: [
+          'D1 云同步改为双时间模型：客户端 updated_at 负责实体冲突判断，服务端 server_updated_at 负责多设备增量拉取游标，避免跨设备漏同步。',
+          '自动同步改为实体级增量保存，编辑一条账目只上传这一条，新建账本只上传新账本和默认分类，修改设置只上传可同步设置。',
+          '修复旧设备手动同步可能用整包 settings 覆盖新设备设置的问题，settings 也按更新时间参与冲突保护。',
+          '优化同步队列确认逻辑，只有 Worker 明确 accepted 或 superseded 且 pull 合并完成后才清理对应队列项，同步中再次修改会保留到下一轮。',
+          'Cloudflare Worker 已部署新的 D1 迁移与冲突策略，会自动补齐 server_updated_at 字段和索引，历史数据可继续被新游标拉取。'
+      ]
+  },
+  {
       version: '7.4.4',
       date: '2026/05/16',
       content: [

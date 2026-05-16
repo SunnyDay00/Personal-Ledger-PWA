@@ -307,7 +307,6 @@ export const SettingsView: React.FC = () => {
           updatedAt: Date.now()
         };
         dispatch({ type: 'UPDATE_LEDGER', payload: updated });
-        await db.ledgers.put(updated);
         feedback.play('success');
         feedback.vibrate('success');
       }

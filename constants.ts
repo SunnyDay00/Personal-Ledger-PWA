@@ -38,11 +38,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   authMode: 'guest',
   authSession: undefined,
   lastSyncVersion: 0,
+  settingsUpdatedAt: 0,
   lastAutoBackupTime: 0,
   exportStartDate: '',
   exportEndDate: '',
   isFirstRun: true,
-  version: '7.4.4',
+  version: '7.4.5',
   debugMode: typeof localStorage !== 'undefined' ? localStorage.getItem('debugMode') === 'true' : false,
   defaultLedgerId: '',
 };

@@ -8,6 +8,25 @@ export interface D1SyncPayload {
   settings?: any;
 }
 
+export interface D1PushEntityResult {
+  entityType: string;
+  id: string;
+  updatedAt: number;
+  serverUpdatedAt?: number | null;
+}
+
+export interface D1PushResponse {
+  ok?: boolean;
+  success?: boolean;
+  version?: number;
+  accepted?: D1PushEntityResult[];
+  superseded?: D1PushEntityResult[];
+  results?: {
+    accepted?: D1PushEntityResult[];
+    superseded?: D1PushEntityResult[];
+  };
+}
+
 export interface D1PullResponse {
   version: number;
   ledgers: any[];
@@ -32,7 +51,7 @@ const httpError = async (prefix: string, res: Response) => {
   return error;
 };
 
-export async function pushToCloud(token: string, payload: D1SyncPayload, timeoutMs: number = 15000) {
+export async function pushToCloud(token: string, payload: D1SyncPayload, timeoutMs: number = 15000): Promise<D1PushResponse> {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
   

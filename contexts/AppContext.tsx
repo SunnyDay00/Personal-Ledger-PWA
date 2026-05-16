@@ -3,8 +3,8 @@ import { AppState, AppAction, Transaction, Ledger, OperationLog, BackupLog, Cate
 import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, INITIAL_LEDGERS } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
 import { generateId, extractCategoriesFromCsv, formatCurrency, parseCsvToTransactions } from '../utils';
-import { db, initAndMigrateDB, dbAPI, ensureStoresReady, createSyncQueueItem, markAllLocalDataForSync, queueCachedImagesForUpload } from '../services/db';
-import { pushToCloud, pullFromCloud, getCloudVersion, D1PullResponse } from '../services/d1Sync';
+import { db, initAndMigrateDB, dbAPI, ensureStoresReady, createSyncQueueItem, queueSyncItem, markAllLocalDataForSync, queueCachedImagesForUpload } from '../services/db';
+import { pushToCloud, pullFromCloud, getCloudVersion, D1PullResponse, D1PushResponse, D1SyncPayload } from '../services/d1Sync';
 import { login as authLogin, register as authRegister, logout as authLogout, getMe, AuthApiError } from '../services/auth';
 import { SyncService } from '../services/sync';
 import { feedback } from '../services/feedback';
@@ -209,22 +209,133 @@ const countLocalDataRecords = async () => {
     return ledgers + categories + groups + transactions;
 };
 
+const SYNCABLE_SETTINGS_KEYS: (keyof AppSettings)[] = [
+    'themeMode',
+    'customThemeColor',
+    'enableAnimations',
+    'enableSound',
+    'enableHaptics',
+    'hapticStrength',
+    'fontContrast',
+    'webdavUrl',
+    'webdavUser',
+    'webdavPass',
+    'enableCloudSync',
+    'backupReminderDays',
+    'backupAutoEnabled',
+    'backupIntervalDays',
+    'syncDebounceSeconds',
+    'versionCheckIntervalFg',
+    'versionCheckIntervalBg',
+    'budget',
+    'keypadHeight',
+    'categoryRows',
+    'imageCacheLimit',
+    'categoryNotes',
+    'searchHistory',
+    'exportStartDate',
+    'exportEndDate',
+    'defaultLedgerId',
+];
+
 const withoutLocalAuthSecrets = (settings: AppSettings): Partial<AppSettings> => {
-    const syncable = { ...(settings as AppSettings & Record<string, unknown>) };
-    [
-        'authSession',
-        'authMode',
-        'cfConfig',
-        'syncEndpoint',
-        'syncToken',
-        'syncUserId',
-        'legacySyncEndpoint',
-        'legacySyncToken',
-        'legacySyncUserId',
-        'legacyCloudMigratedToUserId',
-        'legacyLocalMigratedToUserId',
-    ].forEach(key => delete syncable[key]);
-    return syncable as Partial<AppSettings>;
+    const syncable: Partial<AppSettings> = {};
+    for (const key of SYNCABLE_SETTINGS_KEYS) {
+        if (settings[key] !== undefined) {
+            (syncable as Record<string, unknown>)[key] = settings[key];
+        }
+    }
+    return syncable;
+};
+
+const SETTINGS_SYNC_ENTITY_ID = 'main';
+
+const createSettingsSyncHash = (settings: AppSettings) => JSON.stringify(withoutLocalAuthSecrets(settings));
+
+const countD1DataRows = (payload: Pick<D1PullResponse, 'ledgers' | 'categories' | 'groups' | 'transactions' | 'settings'>) =>
+    (payload.ledgers?.length || 0) +
+    (payload.categories?.length || 0) +
+    (payload.groups?.length || 0) +
+    (payload.transactions?.length || 0) +
+    (payload.settings ? 1 : 0);
+
+const countD1PushRows = (payload: {
+    ledgers?: unknown[];
+    categories?: unknown[];
+    groups?: unknown[];
+    transactions?: unknown[];
+    settings?: unknown;
+}) =>
+    (payload.ledgers?.length || 0) +
+    (payload.categories?.length || 0) +
+    (payload.groups?.length || 0) +
+    (payload.transactions?.length || 0) +
+    (payload.settings ? 1 : 0);
+
+const maxNumeric = (values: unknown[]): number =>
+    values.reduce<number>((max, value) => {
+        const numeric = Number(value || 0);
+        return Number.isFinite(numeric) ? Math.max(max, numeric) : max;
+    }, 0);
+
+const queueEntityTypeFromPush = (entityType: string): SyncQueueItem['entityType'] | null => {
+    switch (entityType) {
+        case 'ledger':
+        case 'ledgers':
+            return 'ledger';
+        case 'category':
+        case 'categories':
+            return 'category';
+        case 'categoryGroup':
+        case 'group':
+        case 'groups':
+            return 'categoryGroup';
+        case 'transaction':
+        case 'transactions':
+            return 'transaction';
+        case 'settings':
+        case 'setting':
+            return 'settings';
+        default:
+            return null;
+    }
+};
+
+const confirmedQueueItemsFromPush = (
+    queuedItems: SyncQueueItem[],
+    pushResult: D1PushResponse
+): Pick<SyncQueueItem, 'id' | 'updatedAt'>[] => {
+    const confirmed = [
+        ...(pushResult.accepted ?? pushResult.results?.accepted ?? []),
+        ...(pushResult.superseded ?? pushResult.results?.superseded ?? []),
+    ];
+    if (confirmed.length === 0) return [];
+
+    const queuedByKey = new Map(queuedItems.map(item => [`${item.entityType}:${item.entityId}`, item]));
+    const confirmedItems: Pick<SyncQueueItem, 'id' | 'updatedAt'>[] = [];
+
+    for (const item of confirmed) {
+        const entityType = queueEntityTypeFromPush(item.entityType);
+        if (!entityType) continue;
+        const entityId = entityType === 'settings' ? SETTINGS_SYNC_ENTITY_ID : item.id;
+        const queued = queuedByKey.get(`${entityType}:${entityId}`);
+        if (!queued) continue;
+        if (Number(item.updatedAt || 0) !== queued.updatedAt) continue;
+        confirmedItems.push({ id: queued.id, updatedAt: queued.updatedAt });
+    }
+
+    return confirmedItems;
+};
+
+const shouldApplyRemoteEntity = (
+    local: { updatedAt?: number; isDeleted?: boolean } | undefined,
+    remote: { updatedAt?: number; isDeleted?: boolean }
+) => {
+    if (!local) return true;
+    const localUpdatedAt = Number(local.updatedAt || 0);
+    const remoteUpdatedAt = Number(remote.updatedAt || 0);
+    if (remoteUpdatedAt > localUpdatedAt) return true;
+    return remoteUpdatedAt === localUpdatedAt && !!remote.isDeleted && !local.isDeleted;
 };
 
 const restoreStoredAuthSettings = (settings: AppSettings): AppSettings => {
@@ -254,6 +365,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const autoBackupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const autoBackupRunningRef = useRef(false);
     const autoBackupRef = useRef(false);
+    const skipNextSettingsQueueRef = useRef(false);
+    const lastLocalMutationRef = useRef(0);
     // 默认认为不存在，检测成功后再置为 true，避免首次恢复访问不存在的 store
     const groupStoreAvailableRef = useRef(false);
 
@@ -266,6 +379,28 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             console.warn('Failed to refresh pending sync count', e);
             return 0;
         }
+    }, []);
+
+    const queueCloudSave = useCallback(async (
+        entityType: SyncQueueItem['entityType'],
+        entityId: string,
+        operation: SyncQueueItem['operation'] = 'upsert',
+        updatedAt: number = Date.now()
+    ) => {
+        await queueSyncItem(entityType, entityId, operation, updatedAt);
+        await refreshPendingSyncCount();
+        setSyncDirty(true);
+    }, [refreshPendingSyncCount]);
+
+    const reportQueueFailure = (scope: string, error: unknown) => {
+        console.warn(`Failed to queue ${scope} for cloud sync`, error);
+        dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: '本地变更已保存，但加入云端待同步队列失败' });
+    };
+
+    const nextMutationTime = useCallback(() => {
+        const next = Math.max(Date.now(), lastLocalMutationRef.current + 1);
+        lastLocalMutationRef.current = next;
+        return next;
     }, []);
 
     // Sync settings to FeedbackService
@@ -294,14 +429,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 }
 
                 // Load data from DB to Memory for UI (ViewModel)
-                const [settings, ledgers, categories, transactions, operationLogs, backupLogs, groups] = await Promise.all([
+                const [settings, ledgers, categories, transactions, operationLogs, backupLogs, groups, queuedItems] = await Promise.all([
                     dbAPI.getSettings(),
                     dbAPI.getLedgers(),
                     dbAPI.getCategories(),
                     dbAPI.getTransactions(),
                     dbAPI.getOperationLogs(),
                     dbAPI.getBackupLogs(),
-                    groupStoreAvailableRef.current ? dbAPI.getCategoryGroups() : Promise.resolve([])
+                    groupStoreAvailableRef.current ? dbAPI.getCategoryGroups() : Promise.resolve([]),
+                    dbAPI.getSyncQueueItems()
                 ]);
 
                 const loadedSettings = restoreStoredAuthSettings(normalizeAppSettings(settings, DEFAULT_SETTINGS));
@@ -326,6 +462,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                         await db.settings.put({ key: 'main', value: loadedSettings });
                     }
                 }
+
+                lastLocalMutationRef.current = maxNumeric([
+                    loadedSettings.settingsUpdatedAt,
+                    ...ledgers.map(item => item.updatedAt),
+                    ...categories.map(item => item.updatedAt),
+                    ...transactions.map(item => item.updatedAt),
+                    ...groups.map(item => item.updatedAt),
+                    ...queuedItems.map(item => item.updatedAt),
+                ]);
 
                 const newState: Partial<AppState> = {
                     settings: loadedSettings,
@@ -361,16 +506,32 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const prevSettingsRef = useRef<string | null>(null);
     useEffect(() => {
         if (isDBLoaded) {
-            dbAPI.saveSettings(state.settings);
-            // Trigger sync when settings change (excluding lastSyncVersion to prevent infinite loop)
-            const settingsWithoutVersion = { ...state.settings, lastSyncVersion: undefined };
-            const currentHash = JSON.stringify(settingsWithoutVersion);
+            const currentHash = createSettingsSyncHash(state.settings);
             if (prevSettingsRef.current !== null && prevSettingsRef.current !== currentHash) {
-                setSyncDirty(true);
+                if (skipNextSettingsQueueRef.current) {
+                    skipNextSettingsQueueRef.current = false;
+                    dbAPI.saveSettings(state.settings);
+                } else {
+                    const updatedAt = nextMutationTime();
+                    const settingsWithMutationTime = normalizeAppSettings(
+                        { ...state.settings, settingsUpdatedAt: updatedAt },
+                        DEFAULT_SETTINGS
+                    );
+                    stateRef.current = { ...stateRef.current, settings: settingsWithMutationTime };
+                    dbAPI.saveSettings(settingsWithMutationTime);
+                    if (state.settings.settingsUpdatedAt !== updatedAt) {
+                        dispatch({ type: 'UPDATE_SETTINGS', payload: { settingsUpdatedAt: updatedAt } });
+                    }
+                    queueCloudSave('settings', SETTINGS_SYNC_ENTITY_ID, 'upsert', updatedAt)
+                        .catch(e => reportQueueFailure('settings', e));
+                }
+            } else {
+                skipNextSettingsQueueRef.current = false;
+                dbAPI.saveSettings(state.settings);
             }
             prevSettingsRef.current = currentHash;
         }
-    }, [state.settings, isDBLoaded]);
+    }, [state.settings, isDBLoaded, queueCloudSave, nextMutationTime]);
 
     const [undoStack, setUndoStack] = useState<{ type: 'restore_delete'; data: Transaction } | { type: 'restore_batch'; data: Transaction[] } | null>(null);
 
@@ -548,8 +709,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
     }, [isDBLoaded, state.settings.lastBackupTime, state.settings.webdavUrl, state.settings.webdavUser, state.settings.webdavPass, state.settings.backupReminderDays]);
 
-    const nextMutationTime = () => Math.max(Date.now(), (stateRef.current.settings.lastSyncVersion || 0) + 1);
-
     const persistTransactionWithQueue = async (tx: Transaction, operation: 'upsert' | 'delete') => {
         const queued = createSyncQueueItem('transaction', tx.id, operation, tx.updatedAt || nextMutationTime());
         await (db as any).transaction('rw', db.transactions, db.syncQueue, async () => {
@@ -638,40 +797,82 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             'ADD_LEDGER', 'UPDATE_LEDGER', 'DELETE_LEDGER',
             'ADD_CATEGORY', 'UPDATE_CATEGORY', 'DELETE_CATEGORY', 'REORDER_CATEGORIES',
             'ADD_CATEGORY_GROUP', 'UPDATE_CATEGORY_GROUP', 'DELETE_CATEGORY_GROUP', 'REORDER_CATEGORY_GROUPS',
-            'UPDATE_SETTINGS', 'BATCH_DELETE_TRANSACTIONS', 'BATCH_UPDATE_TRANSACTIONS'
+            'BATCH_DELETE_TRANSACTIONS', 'BATCH_UPDATE_TRANSACTIONS'
         ];
 
-        // Robust timestamp to prevent clock skew issues
-        const now = Math.max(Date.now(), (state.settings.lastSyncVersion || 0) + 1);
+        const now = nextMutationTime();
+
+        const persistQueued = (scope: string, task: () => Promise<void>) => {
+            void task()
+                .then(() => refreshPendingSyncCount())
+                .catch(e => reportQueueFailure(scope, e));
+        };
 
         // Handle DB writes for non-transaction entities
         switch (action.type) {
-            case 'ADD_LEDGER':
-                db.ledgers.put({ ...action.payload, updatedAt: now, isDeleted: false });
+            case 'ADD_LEDGER': {
+                const saved: Ledger = { ...action.payload, updatedAt: now, isDeleted: false };
+                persistQueued('ledger', async () => {
+                    await (db as any).transaction('rw', db.ledgers, db.syncQueue, async () => {
+                        await db.ledgers.put(saved);
+                        await db.syncQueue.put(createSyncQueueItem('ledger', saved.id, 'upsert', now));
+                    });
+                });
                 logOperation('add', action.payload.id, `新增账本：${action.payload.name}`);
                 break;
+            }
             case 'UPDATE_LEDGER': {
                 const previousLedger = state.ledgers.find(ledger => ledger.id === action.payload.id);
-                db.ledgers.put({ ...action.payload, updatedAt: now });
+                const saved: Ledger = { ...action.payload, updatedAt: now, isDeleted: !!action.payload.isDeleted };
+                persistQueued('ledger', async () => {
+                    await (db as any).transaction('rw', db.ledgers, db.syncQueue, async () => {
+                        await db.ledgers.put(saved);
+                        await db.syncQueue.put(createSyncQueueItem('ledger', saved.id, saved.isDeleted ? 'delete' : 'upsert', now));
+                    });
+                });
                 logOperation('edit', action.payload.id, `编辑账本：${previousLedger?.name || action.payload.name}`);
                 break;
             }
             case 'DELETE_LEDGER': {
                 const targetLedger = state.ledgers.find(ledger => ledger.id === action.payload);
-                db.ledgers.update(action.payload, { isDeleted: true, updatedAt: now });
-                // Also soft delete txs
-                db.transactions.where('ledgerId').equals(action.payload).modify({ isDeleted: true, updatedAt: now });
+                persistQueued('ledger delete', async () => {
+                    await (db as any).transaction('rw', db.ledgers, db.transactions, db.syncQueue, async () => {
+                        await db.ledgers.update(action.payload, { isDeleted: true, updatedAt: now });
+                        const affectedTxs = await db.transactions.where('ledgerId').equals(action.payload).toArray();
+                        await db.transactions.where('ledgerId').equals(action.payload).modify(t => {
+                            t.isDeleted = true;
+                            t.updatedAt = now;
+                        });
+                        const queueItems = [
+                            createSyncQueueItem('ledger', action.payload, 'delete', now),
+                            ...affectedTxs.map(t => createSyncQueueItem('transaction', t.id, 'delete', now)),
+                        ];
+                        await db.syncQueue.bulkPut(queueItems);
+                    });
+                });
                 logOperation('delete', action.payload, `删除账本：${targetLedger?.name || action.payload}`);
-                setSyncDirty(true);
                 break;
             }
-            case 'ADD_CATEGORY':
-                db.categories.put({ ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: now, isDeleted: false });
+            case 'ADD_CATEGORY': {
+                const saved: Category = { ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: now, isDeleted: false };
+                persistQueued('category', async () => {
+                    await (db as any).transaction('rw', db.categories, db.syncQueue, async () => {
+                        await db.categories.put(saved);
+                        await db.syncQueue.put(createSyncQueueItem('category', saved.id, 'upsert', now));
+                    });
+                });
                 logOperation('add', action.payload.id, `新增${action.payload.type === 'income' ? '收入' : '支出'}分类：${action.payload.name}`);
                 break;
+            }
             case 'UPDATE_CATEGORY': {
                 const previousCategory = state.categories.find(category => category.id === action.payload.id);
-                db.categories.put({ ...action.payload, updatedAt: now });
+                const saved: Category = { ...action.payload, updatedAt: now, isDeleted: !!action.payload.isDeleted };
+                persistQueued('category', async () => {
+                    await (db as any).transaction('rw', db.categories, db.syncQueue, async () => {
+                        await db.categories.put(saved);
+                        await db.syncQueue.put(createSyncQueueItem('category', saved.id, saved.isDeleted ? 'delete' : 'upsert', now));
+                    });
+                });
                 logOperation('edit', action.payload.id, `编辑分类：${previousCategory?.name || action.payload.name}`);
                 break;
             }
@@ -679,47 +880,98 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 break;
             case 'DELETE_CATEGORY': {
                 const targetCategory = state.categories.find(category => category.id === action.payload);
-                db.categories.update(action.payload, { isDeleted: true, updatedAt: now });
+                persistQueued('category delete', async () => {
+                    await (db as any).transaction('rw', db.categories, db.syncQueue, async () => {
+                        await db.categories.update(action.payload, { isDeleted: true, updatedAt: now });
+                        await db.syncQueue.put(createSyncQueueItem('category', action.payload, 'delete', now));
+                    });
+                });
                 logOperation('delete', action.payload, `删除分类：${targetCategory?.name || action.payload}`);
                 break;
             }
             case 'REORDER_CATEGORIES': {
                 const typeLabel = action.payload[0]?.type === 'income' ? '收入' : '支出';
-                db.categories.bulkPut(action.payload.map(c => ({ ...c, updatedAt: now })));
+                const saved = action.payload.map(c => ({ ...c, updatedAt: now }));
+                persistQueued('category reorder', async () => {
+                    await (db as any).transaction('rw', db.categories, db.syncQueue, async () => {
+                        await db.categories.bulkPut(saved);
+                        await db.syncQueue.bulkPut(saved.map(c => createSyncQueueItem('category', c.id, c.isDeleted ? 'delete' : 'upsert', now)));
+                    });
+                });
                 logOperation('edit', `category-order:${action.payload[0]?.ledgerId || state.currentLedgerId}:${action.payload[0]?.type || 'expense'}`, `调整${typeLabel}分类排序，共 ${action.payload.length} 项`);
                 break;
             }
-            case 'ADD_CATEGORY_GROUP':
-                db.categoryGroups.put({ ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: now, isDeleted: false });
+            case 'ADD_CATEGORY_GROUP': {
+                const saved: CategoryGroup = { ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: now, isDeleted: false };
+                persistQueued('category group', async () => {
+                    await (db as any).transaction('rw', db.categoryGroups, db.syncQueue, async () => {
+                        await db.categoryGroups.put(saved);
+                        await db.syncQueue.put(createSyncQueueItem('categoryGroup', saved.id, 'upsert', now));
+                    });
+                });
                 logOperation('add', action.payload.id, `新增分类组：${action.payload.name}`);
                 break;
-            case 'UPDATE_CATEGORY_GROUP':
-                db.categoryGroups.put({ ...action.payload, updatedAt: now, isDeleted: false });
+            }
+            case 'UPDATE_CATEGORY_GROUP': {
+                const saved: CategoryGroup = { ...action.payload, updatedAt: now, isDeleted: false };
+                persistQueued('category group', async () => {
+                    await (db as any).transaction('rw', db.categoryGroups, db.syncQueue, async () => {
+                        await db.categoryGroups.put(saved);
+                        await db.syncQueue.put(createSyncQueueItem('categoryGroup', saved.id, 'upsert', now));
+                    });
+                });
                 logOperation('edit', action.payload.id, `编辑分类组：${action.payload.name}`);
                 break;
+            }
             case 'DELETE_CATEGORY_GROUP': {
                 const targetGroup = state.categoryGroups.find(group => group.id === action.payload);
-                db.categoryGroups.update(action.payload, { isDeleted: true, updatedAt: now });
+                persistQueued('category group delete', async () => {
+                    await (db as any).transaction('rw', db.categoryGroups, db.syncQueue, async () => {
+                        await db.categoryGroups.update(action.payload, { isDeleted: true, updatedAt: now });
+                        await db.syncQueue.put(createSyncQueueItem('categoryGroup', action.payload, 'delete', now));
+                    });
+                });
                 logOperation('delete', action.payload, `删除分类组：${targetGroup?.name || action.payload}`);
                 break;
             }
-            case 'REORDER_CATEGORY_GROUPS':
-                db.categoryGroups.bulkPut(action.payload.map(g => ({ ...g, updatedAt: now })));
+            case 'REORDER_CATEGORY_GROUPS': {
+                const saved = action.payload.map(g => ({ ...g, updatedAt: now }));
+                persistQueued('category group reorder', async () => {
+                    await (db as any).transaction('rw', db.categoryGroups, db.syncQueue, async () => {
+                        await db.categoryGroups.bulkPut(saved);
+                        await db.syncQueue.bulkPut(saved.map(g => createSyncQueueItem('categoryGroup', g.id, g.isDeleted ? 'delete' : 'upsert', now)));
+                    });
+                });
                 logOperation('edit', `category-group-order:${state.currentLedgerId}`, `调整分类组排序，共 ${action.payload.length} 项`);
                 break;
-            case 'BATCH_DELETE_TRANSACTIONS':
-                db.transactions.where('id').anyOf(action.payload).modify(t => { t.isDeleted = true; t.updatedAt = now; });
+            }
+            case 'BATCH_DELETE_TRANSACTIONS': {
+                persistQueued('batch transaction delete', async () => {
+                    await (db as any).transaction('rw', db.transactions, db.syncQueue, async () => {
+                        await db.transactions.where('id').anyOf(action.payload).modify(t => {
+                            t.isDeleted = true;
+                            t.updatedAt = now;
+                        });
+                        await db.syncQueue.bulkPut(action.payload.map(id => createSyncQueueItem('transaction', id, 'delete', now)));
+                    });
+                });
                 break;
+            }
             case 'BATCH_UPDATE_TRANSACTIONS': {
                 const { ids, updates } = action.payload;
                 const persistedUpdates: Partial<Transaction> = {};
                 (Object.entries(updates) as [keyof Transaction, any][]).forEach(([key, value]) => {
                     if (value !== undefined) (persistedUpdates as any)[key] = value;
                 });
-                db.transactions.where('id').anyOf(ids).modify(t => {
-                    Object.assign(t, persistedUpdates);
-                    t.updatedAt = now;
-                    t.isDeleted = false;
+                persistQueued('batch transaction update', async () => {
+                    await (db as any).transaction('rw', db.transactions, db.syncQueue, async () => {
+                        await db.transactions.where('id').anyOf(ids).modify(t => {
+                            Object.assign(t, persistedUpdates);
+                            t.updatedAt = now;
+                            t.isDeleted = false;
+                        });
+                        await db.syncQueue.bulkPut(ids.map(id => createSyncQueueItem('transaction', id, 'upsert', now)));
+                    });
                 });
                 break;
             }
@@ -828,15 +1080,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             for (const l of ledgers) {
                 const normalized: Ledger = { id: l.id, name: l.name, themeColor: l.theme_color || l.themeColor || '#007AFF', createdAt: l.created_at || Date.now(), updatedAt: l.updated_at || Date.now(), isDeleted: !!l.is_deleted };
                 const local = await db.ledgers.get(normalized.id);
-                // 删除标记优先同步，避免另一端保留旧数据
-                if (normalized.isDeleted || !local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
+                if (shouldApplyRemoteEntity(local, normalized)) {
                     await db.ledgers.put(normalized);
                 }
             }
             for (const c of categories) {
                 const normalized: Category = { id: c.id, ledgerId: c.ledger_id || c.ledgerId, name: c.name, icon: c.icon, type: c.type, order: c.order ?? 0, isCustom: c.isCustom, updatedAt: c.updated_at || Date.now(), isDeleted: !!c.is_deleted };
                 const local = await db.categories.get(normalized.id);
-                if (normalized.isDeleted || !local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
+                if (shouldApplyRemoteEntity(local, normalized)) {
                     await db.categories.put(normalized);
                 }
             }
@@ -844,7 +1095,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 for (const g of groups) {
                     const normalized: CategoryGroup = { id: g.id, ledgerId: g.ledger_id || g.ledgerId, name: g.name, categoryIds: Array.isArray(g.category_ids) ? g.category_ids : (() => { try { return JSON.parse(g.category_ids || '[]'); } catch { return []; } })(), order: g.order ?? 0, updatedAt: g.updated_at || Date.now(), isDeleted: !!g.is_deleted };
                     const local = await db.categoryGroups.get(normalized.id);
-                    if (normalized.isDeleted || !local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
+                    if (shouldApplyRemoteEntity(local, normalized)) {
                         await db.categoryGroups.put(normalized);
                     }
                 }
@@ -857,8 +1108,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     attachments: t.attachments ? (Array.isArray(t.attachments) ? t.attachments : JSON.parse(t.attachments)) : []
                 };
                 const local = await db.transactions.get(normalized.id);
-                // 删除标记强制覆盖，保证跨设备删除生效
-                if (normalized.isDeleted || !local || (local.updatedAt || 0) < (normalized.updatedAt || 0)) {
+                if (shouldApplyRemoteEntity(local, normalized)) {
                     await db.transactions.put(normalized);
                 }
             }
@@ -869,49 +1119,52 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 const dataObj = typeof settings.data === 'string'
                     ? (() => { try { return JSON.parse(settings.data); } catch { return {}; } })()
                     : (settings.data || settings);
+                const remoteSettingsUpdatedAt = Number(settings.updated_at ?? settings.updatedAt ?? 0);
 
-                // CRITICAL FIX: Merge Logic to Prefer Cloud Settings but Preserve Connection
                 const dbSettingsRow = await db.settings.get('main');
                 const localSettings = normalizeAppSettings(
                     { ...(dbSettingsRow?.value || DEFAULT_SETTINGS), ...stateRef.current.settings },
                     DEFAULT_SETTINGS
                 );
-                const localReminderDays = normalizeBackupReminderDays(
-                    localSettings.backupReminderDays,
-                    DEFAULT_SETTINGS.backupReminderDays ?? 7
-                );
-                const cloudString = (key: string, fallback: string) =>
-                    Object.prototype.hasOwnProperty.call(dataObj, key)
-                        ? String(dataObj[key] ?? '')
-                        : fallback;
+                const localSettingsUpdatedAt = Number(localSettings.settingsUpdatedAt || 0);
+                if (remoteSettingsUpdatedAt >= localSettingsUpdatedAt) {
+                    const localReminderDays = normalizeBackupReminderDays(
+                        localSettings.backupReminderDays,
+                        DEFAULT_SETTINGS.backupReminderDays ?? 7
+                    );
+                    const cloudString = (key: string, fallback: string) =>
+                        Object.prototype.hasOwnProperty.call(dataObj, key)
+                            ? String(dataObj[key] ?? '')
+                            : fallback;
 
-                const newSettings = {
-                    ...localSettings, // Start with local structure
-                    ...dataObj,       // Overlay Cloud Settings (Wins for preferences, ledgers, etc.)
+                    const newSettings = {
+                        ...localSettings,
+                        ...dataObj,
 
-                    // Keep auth/session local while allowing WebDAV credentials to follow the account.
-                    webdavUrl: cloudString('webdavUrl', localSettings.webdavUrl),
-                    webdavUser: cloudString('webdavUser', localSettings.webdavUser),
-                    webdavPass: cloudString('webdavPass', localSettings.webdavPass),
-                    cfConfig: localSettings.cfConfig,
-                    authSession: localSettings.authSession,
-                    authMode: localSettings.authSession ? 'authenticated' : 'guest',
-                    backupReminderDays: localReminderDays <= 0
-                        ? 0
-                        : normalizeBackupReminderDays(
-                            dataObj.backupReminderDays,
-                            localSettings.backupReminderDays ?? DEFAULT_SETTINGS.backupReminderDays ?? 7
-                        ),
+                        // Keep auth/session local while allowing WebDAV credentials to follow the account.
+                        webdavUrl: cloudString('webdavUrl', localSettings.webdavUrl),
+                        webdavUser: cloudString('webdavUser', localSettings.webdavUser),
+                        webdavPass: cloudString('webdavPass', localSettings.webdavPass),
+                        cfConfig: localSettings.cfConfig,
+                        authSession: localSettings.authSession,
+                        authMode: localSettings.authSession ? 'authenticated' : 'guest',
+                        backupReminderDays: localReminderDays <= 0
+                            ? 0
+                            : normalizeBackupReminderDays(
+                                dataObj.backupReminderDays,
+                                localSettings.backupReminderDays ?? DEFAULT_SETTINGS.backupReminderDays ?? 7
+                            ),
 
-                    // PRESERVE Local First Run state if false
-                    isFirstRun: localSettings.isFirstRun === false ? false : (dataObj.isFirstRun ?? DEFAULT_SETTINGS.isFirstRun),
-                    lastSyncVersion: settings.updated_at || Date.now()
-                };
+                        // PRESERVE Local First Run state if false
+                        isFirstRun: localSettings.isFirstRun === false ? false : (dataObj.isFirstRun ?? DEFAULT_SETTINGS.isFirstRun),
+                        settingsUpdatedAt: Math.max(remoteSettingsUpdatedAt, localSettingsUpdatedAt)
+                    };
 
-                await db.settings.put({
-                    key: 'main',
-                    value: normalizeAppSettings(newSettings, DEFAULT_SETTINGS)
-                });
+                    await db.settings.put({
+                        key: 'main',
+                        value: normalizeAppSettings(newSettings, DEFAULT_SETTINGS)
+                    });
+                }
             }
         });
 
@@ -923,6 +1176,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             db.settings.get('main')
         ]);
         const nextSettings = normalizeAppSettings({ ...(settingsRow?.value || stateRef.current.settings), lastSyncVersion: version }, DEFAULT_SETTINGS);
+        lastLocalMutationRef.current = Math.max(lastLocalMutationRef.current, maxNumeric([
+            nextSettings.settingsUpdatedAt,
+            ...ledgersNew.map(item => item.updatedAt),
+            ...catsNew.map(item => item.updatedAt),
+            ...txsNew.map(item => item.updatedAt),
+            ...groupsNew.map(item => item.updatedAt),
+        ]));
         stateRef.current = {
             ...stateRef.current,
             ledgers: ledgersNew,
@@ -931,6 +1191,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             transactions: txsNew,
             settings: nextSettings,
         };
+        skipNextSettingsQueueRef.current = true;
         dispatch({ type: 'RESTORE_DATA', payload: { ledgers: ledgersNew, categories: catsNew, categoryGroups: groupsNew, transactions: txsNew, settings: nextSettings } });
     }, []);
 
@@ -950,7 +1211,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: '本地数据库结构异常，已停止同步以保护本地数据' });
             return;
         }
-        const hasGroupStore = true; // 始终尝试同步分组，避免误判跳过
         dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
         try {
             // Priority: Sync pending images first
@@ -960,9 +1220,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 console.warn('Image sync warning:', e);
             }
 
-            // 如果本地为空（常见于重置/首次恢复），强制全量 push/pull，避免 lastSyncVersion 过大导致云端数据未拉取
+            // 如果本地为空（常见于重置/首次恢复），强制从云端全量拉取，避免 lastSyncVersion 过大导致云端数据未拉取
             const forceFullSync = reason === 'manual' || reason === 'migration';
-            let sinceForPush = forceFullSync ? 0 : (lastSyncVersion || 0);
             let sinceForPull = forceFullSync ? 0 : (lastSyncVersion || 0);
             const [txAll, ledgersAll, catsAll, groupsAll, queuedSyncItems] = await Promise.all([
                 dbAPI.getAllTransactionsIncludingDeleted(),
@@ -973,21 +1232,82 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             ]);
             const isLocalEmpty = txAll.length === 0 && ledgersAll.length === 0 && catsAll.length === 0 && groupsAll.length === 0;
             if (isLocalEmpty) {
-                sinceForPush = 0;
                 sinceForPull = 0;
             }
-            const queuedIds = (entityType: SyncQueueItem['entityType']) =>
-                new Set(queuedSyncItems.filter(item => item.entityType === entityType).map(item => item.entityId));
-            const filterForSync = <T extends { id?: string; updatedAt?: number; updated_at?: number }>(arr: T[], entityType: SyncQueueItem['entityType']) => {
-                const ids = queuedIds(entityType);
-                if (sinceForPush === 0) return arr;
-                return arr.filter(item => (item.updatedAt ?? item.updated_at ?? 0) > sinceForPush || (item.id ? ids.has(item.id) : false));
+            const latestQueueItems = (entityType: SyncQueueItem['entityType']) => {
+                const items = new Map<string, SyncQueueItem>();
+                for (const item of queuedSyncItems) {
+                    if (item.entityType !== entityType) continue;
+                    const existing = items.get(item.entityId);
+                    if (!existing || item.updatedAt > existing.updatedAt) {
+                        items.set(item.entityId, item);
+                    }
+                }
+                return items;
             };
 
-            const txFiltered = filterForSync(txAll, 'transaction');
-            const ledgersFiltered = filterForSync(ledgersAll, 'ledger');
-            const catsFiltered = filterForSync(catsAll, 'category');
-            const groupsFiltered = filterForSync(groupsAll, 'categoryGroup');
+            const selectForSync = <T extends { id?: string; updatedAt?: number; updated_at?: number; isDeleted?: boolean; is_deleted?: boolean }>(
+                arr: T[],
+                entityType: SyncQueueItem['entityType'],
+                tombstone: (item: SyncQueueItem) => T
+            ) => {
+                if (forceFullSync) return arr;
+                const byId = new Map(arr.filter(item => item.id).map(item => [item.id as string, item]));
+                return Array.from(latestQueueItems(entityType).values()).map(item => {
+                    const current = byId.get(item.entityId);
+                    if (!current) return tombstone(item);
+                    const updatedAt = Math.max(Number(current.updatedAt ?? current.updated_at ?? 0), item.updatedAt);
+                    return {
+                        ...current,
+                        updatedAt,
+                        isDeleted: item.operation === 'delete' ? true : !!(current.isDeleted ?? current.is_deleted),
+                    };
+                });
+            };
+
+            const txFiltered = selectForSync(txAll, 'transaction', item => ({
+                id: item.entityId,
+                ledgerId: '',
+                amount: 0,
+                type: 'expense',
+                categoryId: '',
+                date: item.updatedAt,
+                note: '',
+                attachments: [],
+                createdAt: item.updatedAt,
+                updatedAt: item.updatedAt,
+                isDeleted: true,
+            } as Transaction));
+            const ledgersFiltered = selectForSync(ledgersAll, 'ledger', item => ({
+                id: item.entityId,
+                name: '',
+                themeColor: '#007AFF',
+                createdAt: item.updatedAt,
+                updatedAt: item.updatedAt,
+                isDeleted: true,
+            } as Ledger));
+            const catsFiltered = selectForSync(catsAll, 'category', item => ({
+                id: item.entityId,
+                ledgerId: stateRef.current.currentLedgerId || 'default',
+                name: '',
+                icon: 'Circle',
+                type: 'expense',
+                order: 0,
+                isCustom: true,
+                updatedAt: item.updatedAt,
+                isDeleted: true,
+            } as Category));
+            const groupsFiltered = selectForSync(groupsAll, 'categoryGroup', item => ({
+                id: item.entityId,
+                ledgerId: stateRef.current.currentLedgerId || 'default',
+                name: '',
+                categoryIds: [],
+                order: 0,
+                updatedAt: item.updatedAt,
+                isDeleted: true,
+            } as CategoryGroup));
+            const settingsQueueItem = Array.from(latestQueueItems('settings').values())
+                .sort((a, b) => b.updatedAt - a.updatedAt)[0];
 
             // Fallback to the first available ledger if current is missing
             const defaultLedgerId = ledgersAll[0]?.id || 'default';
@@ -1031,29 +1351,49 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 note: t.note || '',
                 attachments: t.attachments || [],
                 created_at: t.createdAt || t.created_at || t.date || Date.now(),
-                updatedAt: t.updatedAt || t.updated_at || t.date || Date.now(),
+                updated_at: t.updatedAt || t.updated_at || t.date || Date.now(),
                 is_deleted: !!t.isDeleted
             });
 
-            // cfConfig is now part of settings, no separate field needed
-            const payload = {
-                ledgers: ledgersFiltered.map(mapLedger),
-                categories: catsFiltered.map(mapCategory),
-                groups: groupsFiltered.map(mapGroup),
-                transactions: txFiltered.map(mapTx),
-                settings: { data: withoutLocalAuthSecrets(stateRef.current.settings), updated_at: Date.now() }
-            };
-            await pushToCloud(authSession.token, payload);
-            // 手动同步强制全量拉取（since=0），避免版本偏差导致删除未拉取
+            const payload: D1SyncPayload = {};
+            if (forceFullSync || ledgersFiltered.length > 0) payload.ledgers = ledgersFiltered.map(mapLedger);
+            if (forceFullSync || catsFiltered.length > 0) payload.categories = catsFiltered.map(mapCategory);
+            if (forceFullSync || groupsFiltered.length > 0) payload.groups = groupsFiltered.map(mapGroup);
+            if (forceFullSync || txFiltered.length > 0) payload.transactions = txFiltered.map(mapTx);
+            if (settingsQueueItem) {
+                payload.settings = {
+                    data: withoutLocalAuthSecrets(stateRef.current.settings),
+                    updated_at: settingsQueueItem.updatedAt,
+                };
+            }
+
+            const uploadedCount = countD1PushRows(payload);
+            let pushResult: D1PushResponse | undefined;
+            if (uploadedCount > 0) {
+                pushResult = await pushToCloud(authSession.token, payload);
+            }
+
             const pulled = await pullFromCloud(authSession.token, sinceForPull);
+            const pulledCount = countD1DataRows(pulled);
             await mergeFromCloud(pulled);
-            await dbAPI.markSyncQueueItemsSynced(queuedSyncItems);
-            await refreshPendingSyncCount();
+            if (uploadedCount > 0 && pushResult) {
+                const confirmedItems = confirmedQueueItemsFromPush(queuedSyncItems, pushResult);
+                if (confirmedItems.length > 0) {
+                    await dbAPI.markSyncQueueItemsSynced(confirmedItems);
+                }
+            }
+            const pendingAfterSync = await refreshPendingSyncCount();
             // 重新从本地 DB 取分组，确保 UI 状态刷新
             const groupsReloaded = await dbAPI.getCategoryGroups();
             dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groupsReloaded } });
-            setSyncDirty(false);
-            logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'success', file: 'D1 Sync', message: reason === 'manual' ? '手动同步成功' : reason === 'migration' ? '账号接管同步成功' : '自动同步成功' });
+            setSyncDirty(pendingAfterSync > 0);
+            const logType: BackupLog['type'] = reason === 'auto' ? 'incremental' : 'full';
+            const logMessage = reason === 'auto'
+                ? `增量同步成功：上传 ${uploadedCount} 项，拉取 ${pulledCount} 项`
+                : reason === 'manual'
+                    ? `手动全量同步成功：上传 ${uploadedCount} 项，拉取 ${pulledCount} 项`
+                    : `账号接管全量同步成功：上传 ${uploadedCount} 项，拉取 ${pulledCount} 项`;
+            logBackup({ id: generateId(), timestamp: Date.now(), type: logType, action: 'upload', status: 'success', file: 'D1 Sync', message: logMessage });
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'success' });
             dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: undefined });
             setTimeout(() => dispatch({ type: 'SET_SYNC_STATUS', payload: 'idle' }), 2000);
@@ -1064,7 +1404,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
             dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: e?.status === 401 ? '登录已失效，请重新登录' : (e?.message || '同步失败') });
-            logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'failure', file: 'D1 Sync', message: e?.message || '同步失败' });
+            logBackup({ id: generateId(), timestamp: Date.now(), type: reason === 'auto' ? 'incremental' : 'full', action: 'upload', status: 'failure', file: 'D1 Sync', message: e?.message || '同步失败' });
             if (reason === 'manual') alert('Sync failed: ' + (e?.message || 'unknown error'));
             await refreshPendingSyncCount();
             setSyncDirty(true);
@@ -1365,11 +1705,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         // Legacy import support
         dispatch({ type: 'RESTORE_DATA', payload: data });
         // Also write to DB
-        if (data.transactions) db.transactions.bulkPut(data.transactions.map(t => ({ ...t, isDeleted: false, updatedAt: Date.now() })));
-        if (data.ledgers) db.ledgers.bulkPut(data.ledgers.map(l => ({ ...l, isDeleted: false, updatedAt: Date.now() })));
-        if (data.categories) db.categories.bulkPut(data.categories.map(c => ({ ...c, isDeleted: false, updatedAt: Date.now() })));
-        if (data.categoryGroups) db.categoryGroups.bulkPut(data.categoryGroups.map(g => ({ ...g, isDeleted: false, updatedAt: Date.now() })));
-        if (data.settings) db.settings.put({ key: 'main', value: { ...DEFAULT_SETTINGS, ...data.settings } });
+        void (async () => {
+            const now = Date.now();
+            if (data.transactions) await db.transactions.bulkPut(data.transactions.map(t => ({ ...t, isDeleted: false, updatedAt: now })));
+            if (data.ledgers) await db.ledgers.bulkPut(data.ledgers.map(l => ({ ...l, isDeleted: false, updatedAt: now })));
+            if (data.categories) await db.categories.bulkPut(data.categories.map(c => ({ ...c, isDeleted: false, updatedAt: now })));
+            if (data.categoryGroups) await db.categoryGroups.bulkPut(data.categoryGroups.map(g => ({ ...g, isDeleted: false, updatedAt: now })));
+            if (data.settings) await db.settings.put({ key: 'main', value: { ...DEFAULT_SETTINGS, ...data.settings } });
+            await markAllLocalDataForSync();
+            await refreshPendingSyncCount();
+        })().catch(e => reportQueueFailure('imported data', e));
         setSyncDirty(true);
     };
 
@@ -1484,29 +1829,37 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }, [mergeFromCloud, clearAuthSession]);
 
     const addLedger = async (ledger: Ledger) => {
-        dispatch({ type: 'ADD_LEDGER', payload: ledger });
-        dispatch({ type: 'SET_LEDGER', payload: ledger.id });
-        await db.ledgers.put(ledger);
-        feedback.play('success');
-        feedback.vibrate('success');
-        logOperation('add', ledger.id, `Created ledger: ${ledger.name}`);
+        const timestamp = nextMutationTime();
+        const savedLedger: Ledger = { ...ledger, updatedAt: ledger.updatedAt || timestamp, isDeleted: false };
 
         // Auto-seed default categories for the new ledger
-        const timestamp = Date.now();
         const newCategories = DEFAULT_CATEGORIES.map((c, idx) => ({
             ...c,
             id: `${generateId()}_${timestamp}_${idx}`, // Ensure unique ID
-            ledgerId: ledger.id,
+            ledgerId: savedLedger.id,
             order: idx,
             updatedAt: timestamp,
             isDeleted: false
         }));
 
-        // Dispatch and persist categories
+        const queueItems = [
+            createSyncQueueItem('ledger', savedLedger.id, 'upsert', savedLedger.updatedAt || timestamp),
+            ...newCategories.map(cat => createSyncQueueItem('category', cat.id, 'upsert', cat.updatedAt || timestamp)),
+        ];
+        await (db as any).transaction('rw', db.ledgers, db.categories, db.syncQueue, async () => {
+            await db.ledgers.put(savedLedger);
+            await db.categories.bulkPut(newCategories);
+            await db.syncQueue.bulkPut(queueItems);
+        });
+        await refreshPendingSyncCount();
+        dispatch({ type: 'ADD_LEDGER', payload: savedLedger });
+        dispatch({ type: 'SET_LEDGER', payload: savedLedger.id });
         for (const cat of newCategories) {
             dispatch({ type: 'ADD_CATEGORY', payload: cat });
         }
-        await db.categories.bulkPut(newCategories);
+        feedback.play('success');
+        feedback.vibrate('success');
+        logOperation('add', savedLedger.id, `Created ledger: ${savedLedger.name}`);
         setSyncDirty(true);
     };
 
