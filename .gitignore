@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 builds/
+.wrangler/
+.playwright-mcp/
+backups/
 *.local
 
 # Editor directories and files

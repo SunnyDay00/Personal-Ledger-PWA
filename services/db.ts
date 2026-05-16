@@ -84,6 +84,83 @@ export const createSyncQueueItem = (
   createdAt: Date.now(),
 });
 
+const hasMissingUpdatedAt = <T extends { updatedAt?: number }>(items: T[]) =>
+  items.some(item => !item.updatedAt);
+
+export async function markAllLocalDataForSync(): Promise<number> {
+  await openDB();
+  const now = Date.now();
+  const [transactions, ledgers, categories, groups] = await Promise.all([
+    db.transactions.toArray(),
+    db.ledgers.toArray(),
+    db.categories.toArray(),
+    db.categoryGroups.toArray().catch(() => [] as CategoryGroup[]),
+  ]);
+
+  const normalizedTransactions = transactions.map(t => ({
+    ...t,
+    updatedAt: t.updatedAt || t.createdAt || t.date || now,
+    isDeleted: !!t.isDeleted,
+  }));
+  const normalizedLedgers = ledgers.map(l => ({
+    ...l,
+    updatedAt: l.updatedAt || l.createdAt || now,
+    isDeleted: !!l.isDeleted,
+  }));
+  const normalizedCategories = categories.map(c => ({
+    ...c,
+    updatedAt: c.updatedAt || now,
+    isDeleted: !!c.isDeleted,
+  }));
+  const normalizedGroups = groups.map(g => ({
+    ...g,
+    updatedAt: g.updatedAt || now,
+    isDeleted: !!g.isDeleted,
+  }));
+
+  const queueItems = [
+    ...normalizedTransactions.map(t => createSyncQueueItem('transaction', t.id, t.isDeleted ? 'delete' : 'upsert', t.updatedAt || now)),
+    ...normalizedLedgers.map(l => createSyncQueueItem('ledger', l.id, l.isDeleted ? 'delete' : 'upsert', l.updatedAt || now)),
+    ...normalizedCategories.map(c => createSyncQueueItem('category', c.id, c.isDeleted ? 'delete' : 'upsert', c.updatedAt || now)),
+    ...normalizedGroups.map(g => createSyncQueueItem('categoryGroup', g.id, g.isDeleted ? 'delete' : 'upsert', g.updatedAt || now)),
+  ];
+
+  await (db as any).transaction('rw', db.transactions, db.ledgers, db.categories, db.categoryGroups, db.syncQueue, async () => {
+    if (hasMissingUpdatedAt(transactions)) await db.transactions.bulkPut(normalizedTransactions);
+    if (hasMissingUpdatedAt(ledgers)) await db.ledgers.bulkPut(normalizedLedgers);
+    if (hasMissingUpdatedAt(categories)) await db.categories.bulkPut(normalizedCategories);
+    if (hasMissingUpdatedAt(groups)) await db.categoryGroups.bulkPut(normalizedGroups);
+    if (queueItems.length > 0) await db.syncQueue.bulkPut(queueItems);
+  });
+
+  return queueItems.length;
+}
+
+export async function queueCachedImagesForUpload(imageKeys?: string[]): Promise<number> {
+  await openDB();
+  const keys = imageKeys
+    ? imageKeys
+    : (await db.transactions.toArray()).flatMap(transaction => transaction.attachments || []);
+  const uniqueKeys = Array.from(new Set(keys.filter(key => typeof key === 'string' && key.trim() !== '')));
+  if (uniqueKeys.length === 0) return 0;
+
+  let queued = 0;
+  await (db as any).transaction('rw', db.images, db.pending_uploads, async () => {
+    for (const key of uniqueKeys) {
+      const pending = await db.pending_uploads.get(key);
+      if (pending) continue;
+
+      const cached = await db.images.get(key);
+      if (!cached?.blob || cached.blob.size <= 0) continue;
+
+      await db.pending_uploads.put({ key, blob: cached.blob, createdAt: Date.now() });
+      queued++;
+    }
+  });
+
+  return queued;
+}
+
 // 确保所有表存在；如果缺表或打开失败，停止流程以保护本地数据
 export async function ensureStoresReady(): Promise<boolean> {
   try {

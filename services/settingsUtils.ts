@@ -40,9 +40,15 @@ export const normalizeAppSettings = (
   baseSettings: AppSettings = DEFAULT_SETTINGS
 ): AppSettings => {
   const merged = { ...baseSettings, ...(settings || {}) };
+  const now = Date.now();
+  const authSession = merged.authSession && merged.authSession.token && merged.authSession.expiresAt > now
+    ? merged.authSession
+    : undefined;
 
   return {
     ...merged,
+    authSession,
+    authMode: authSession ? 'authenticated' : 'guest',
     backupReminderDays: normalizeBackupReminderDays(
       merged.backupReminderDays,
       baseSettings.backupReminderDays ?? DEFAULT_SETTINGS.backupReminderDays ?? 7

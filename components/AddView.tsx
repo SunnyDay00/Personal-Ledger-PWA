@@ -275,7 +275,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                 const response = await fetch(base64);
                 const blob = await response.blob();
                 const file = new File([blob], `clipboard_${Date.now()}.png`, { type: blob.type || 'image/png' });
-                const key = await imageService.uploadImage(file);
+                const key = await imageService.saveLocalImage(file);
                 const url = URL.createObjectURL(blob);
                 setAttachments(prev => [...prev, { id: key, type: 'key', val: key, url }]);
                 feedback.play('success');

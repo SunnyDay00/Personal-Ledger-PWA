@@ -2,6 +2,15 @@
 main = "worker.js"
 compatibility_date = "2024-01-01"
 
+[[d1_databases]]
+binding = "DB"
+database_name = "personal"
+database_id = "a0513a4b-fb86-42e2-9d72-b4a229cdf618"
+
+[[kv_namespaces]]
+binding = "SYNC_KV"
+id = "b1ed3bb607844ede98a9f76040fac97e"
+
 [[r2_buckets]]
 binding = "IMAGES_BUCKET"
 bucket_name = "ledger-images"

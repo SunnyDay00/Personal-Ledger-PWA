@@ -3,6 +3,19 @@ export type ThemeMode = 'light' | 'dark' | 'auto';
 export type TransactionType = 'expense' | 'income';
 export type BudgetType = 'week' | 'month' | 'year';
 
+export interface AuthUser {
+  id: string;
+  username: string;
+}
+
+export interface AuthSession {
+  user: AuthUser;
+  token: string;
+  expiresAt: number;
+}
+
+export type AuthMode = 'guest' | 'authenticated';
+
 export interface Ledger {
   id: string;
   name: string;
@@ -140,10 +153,10 @@ export interface AppSettings {
   
   // Meta
   lastBackupTime?: number;
-  syncEndpoint?: string;
-  syncToken?: string;
+  lastAutoBackupTime?: number;
+  authSession?: AuthSession;
+  authMode?: AuthMode;
   lastSyncVersion?: number;
-  syncUserId?: string;
   defaultLedgerId?: string;
   isFirstRun: boolean;
   exportStartDate?: string;
@@ -155,7 +168,7 @@ export interface AppSettings {
   // Debug
   debugMode?: boolean;
 
-  // Cloudflare API Config (for usage stats)
+  // Local-only Cloudflare API config. This is not written to account D1 settings.
   cfConfig?: {
     accountId: string;
     apiToken: string;
@@ -234,4 +247,7 @@ export interface AppContextType {
   resetApp: () => Promise<void>;
   restoreFromD1: () => Promise<void>;
   addLedger: (ledger: Ledger) => Promise<void>;
+  loginAccount: (username: string, password: string) => Promise<AuthSession>;
+  registerAccount: (username: string, password: string, inviteCode: string) => Promise<AuthSession>;
+  logoutAccount: () => Promise<void>;
 }

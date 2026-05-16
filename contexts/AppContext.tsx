@@ -1,10 +1,11 @@
 ﻿import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef, useCallback } from 'react';
-import { AppState, AppAction, Transaction, Ledger, OperationLog, BackupLog, Category, CategoryGroup, AppSettings, SyncQueueItem } from '../types';
+import { AppState, AppAction, Transaction, Ledger, OperationLog, BackupLog, Category, CategoryGroup, AppSettings, SyncQueueItem, AuthSession } from '../types';
 import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, INITIAL_LEDGERS } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
 import { generateId, extractCategoriesFromCsv, formatCurrency, parseCsvToTransactions } from '../utils';
-import { db, initAndMigrateDB, dbAPI, ensureStoresReady, createSyncQueueItem } from '../services/db';
-import { pushToCloud, pullFromCloud } from '../services/d1Sync';
+import { db, initAndMigrateDB, dbAPI, ensureStoresReady, createSyncQueueItem, markAllLocalDataForSync, queueCachedImagesForUpload } from '../services/db';
+import { pushToCloud, pullFromCloud, getCloudVersion, D1PullResponse } from '../services/d1Sync';
+import { login as authLogin, register as authRegister, logout as authLogout, getMe, AuthApiError } from '../services/auth';
 import { SyncService } from '../services/sync';
 import { feedback } from '../services/feedback';
 import { imageService } from '../services/imageService';
@@ -46,6 +47,9 @@ interface AppContextType {
     restoreFromD1: () => Promise<void>;
     addLedger: (ledger: Ledger) => Promise<void>;
     triggerCloudSync: () => void;
+    loginAccount: (username: string, password: string) => Promise<AuthSession>;
+    registerAccount: (username: string, password: string, inviteCode: string) => Promise<AuthSession>;
+    logoutAccount: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType>({
@@ -67,6 +71,9 @@ const AppContext = createContext<AppContextType>({
     restoreFromD1: async () => { },
     addLedger: async () => { },
     triggerCloudSync: () => { },
+    loginAccount: async () => { throw new Error('AppContext not ready'); },
+    registerAccount: async () => { throw new Error('AppContext not ready'); },
+    logoutAccount: async () => { },
 });
 
 function appReducer(state: AppState, action: AppAction): AppState {
@@ -183,6 +190,68 @@ function appReducer(state: AppState, action: AppAction): AppState {
     }
 }
 
+const isUnauthorizedError = (error: unknown) => error instanceof AuthApiError && error.status === 401;
+
+const hasPulledRows = (payload: D1PullResponse) =>
+    (payload.ledgers?.length || 0) +
+    (payload.categories?.length || 0) +
+    (payload.groups?.length || 0) +
+    (payload.transactions?.length || 0) +
+    (payload.settings ? 1 : 0) > 0;
+
+const countLocalDataRecords = async () => {
+    const [ledgers, categories, groups, transactions] = await Promise.all([
+        db.ledgers.count(),
+        db.categories.count(),
+        db.categoryGroups.count().catch(() => 0),
+        db.transactions.count(),
+    ]);
+    return ledgers + categories + groups + transactions;
+};
+
+const withoutLocalAuthSecrets = (settings: AppSettings): Partial<AppSettings> => {
+    const syncable = { ...(settings as AppSettings & Record<string, unknown>) };
+    [
+        'authSession',
+        'authMode',
+        'cfConfig',
+        'syncEndpoint',
+        'syncToken',
+        'syncUserId',
+        'legacySyncEndpoint',
+        'legacySyncToken',
+        'legacySyncUserId',
+        'legacyCloudMigratedToUserId',
+        'legacyLocalMigratedToUserId',
+    ].forEach(key => delete syncable[key]);
+    return syncable as Partial<AppSettings>;
+};
+
+const validateStoredAuthSettings = async (settings: AppSettings): Promise<AppSettings> => {
+    const session = settings.authSession;
+    if (!session?.token || session.expiresAt <= Date.now()) {
+        return normalizeAppSettings({ ...settings, authSession: undefined, authMode: 'guest' }, DEFAULT_SETTINGS);
+    }
+
+    try {
+        const me = await getMe(session.token);
+        return normalizeAppSettings({
+            ...settings,
+            authMode: 'authenticated',
+            authSession: {
+                user: me.user,
+                token: session.token,
+                expiresAt: me.expiresAt,
+            },
+        }, DEFAULT_SETTINGS);
+    } catch (e) {
+        if (isUnauthorizedError(e)) {
+            return normalizeAppSettings({ ...settings, authSession: undefined, authMode: 'guest' }, DEFAULT_SETTINGS);
+        }
+        return normalizeAppSettings({ ...settings, authMode: 'authenticated' }, DEFAULT_SETTINGS);
+    }
+};
+
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
     const [state, dispatch] = useReducer(appReducer, initialState);
     const [isDBLoaded, setIsDBLoaded] = useState(false);
@@ -190,6 +259,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const [syncDirty, setSyncDirty] = useState(false);
     const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const isRestoringRef = useRef(false); // Guard against auto-sync immediately after restore
+    const accountTakeoverRunningRef = useRef(false);
     const [isRestoring, setIsRestoring] = useState(false);
     const versionCheckTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const versionCheckRunningRef = useRef(false);
@@ -246,7 +316,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     groupStoreAvailableRef.current ? dbAPI.getCategoryGroups() : Promise.resolve([])
                 ]);
 
-                const loadedSettings = normalizeAppSettings(settings, DEFAULT_SETTINGS);
+                const loadedSettings = await validateStoredAuthSettings(normalizeAppSettings(settings, DEFAULT_SETTINGS));
                 if (loadedSettings.enableCloudSync === undefined) loadedSettings.enableCloudSync = false;
 
                 const lastLedgerId = typeof window !== 'undefined' ? localStorage.getItem('lastLedgerId') : null;
@@ -260,7 +330,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
                 // If no settings found, save default settings to ensure persistence on first run
                 if (!settings) {
-                    await db.settings.put({ key: 'main', value: DEFAULT_SETTINGS });
+                    await db.settings.put({ key: 'main', value: loadedSettings });
+                } else {
+                    const serializedLoaded = JSON.stringify(loadedSettings);
+                    const serializedStored = JSON.stringify(settings);
+                    if (serializedLoaded !== serializedStored) {
+                        await db.settings.put({ key: 'main', value: loadedSettings });
+                    }
                 }
 
                 const newState: Partial<AppState> = {
@@ -312,6 +388,32 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const stateRef = useRef(state);
     useEffect(() => { stateRef.current = state; }, [state]);
+
+    const getActiveAuthSession = () => {
+        const settings = stateRef.current.settings;
+        return settings.authMode === 'authenticated' && settings.authSession?.token
+            ? settings.authSession
+            : undefined;
+    };
+
+    const persistAuthSettings = useCallback(async (payload: Partial<AppSettings>) => {
+        const stored = await dbAPI.getSettings().catch(() => undefined);
+        const base = normalizeAppSettings({ ...stateRef.current.settings, ...(stored || {}) }, DEFAULT_SETTINGS);
+        const next = normalizeAppSettings({ ...base, ...payload }, DEFAULT_SETTINGS);
+        stateRef.current = { ...stateRef.current, settings: next };
+        dispatch({ type: 'UPDATE_SETTINGS', payload: next });
+        await dbAPI.saveSettings(next);
+    }, []);
+
+    const clearAuthSession = useCallback(async () => {
+        if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+        if (versionCheckTimerRef.current) clearInterval(versionCheckTimerRef.current);
+        await persistAuthSettings({
+            authSession: undefined,
+            authMode: 'guest',
+        });
+    }, [persistAuthSettings]);
+
     // 便于在浏览器 Console 调试：window.__state
     useEffect(() => {
         if (typeof window !== 'undefined') (window as any).__state = stateRef;
@@ -681,8 +783,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         } catch { }
     }, []);
 
-    const mergeFromCloud = useCallback(async (payload: { ledgers: any[]; categories: any[]; groups?: any[]; transactions: any[]; settings: any; cfConfig?: any; version: number }) => {
-        const { ledgers = [], categories = [], groups = [], transactions = [], settings, cfConfig, version } = payload;
+    const mergeFromCloud = useCallback(async (payload: { ledgers: any[]; categories: any[]; groups?: any[]; transactions: any[]; settings: any; version: number }) => {
+        const { ledgers = [], categories = [], groups = [], transactions = [], settings, version } = payload;
         const hasGroupStore = hasGroupStoreNow();
 
         await (db as any).transaction('rw', db.ledgers, db.categories, db.transactions, db.settings, hasGroupStore ? db.categoryGroups : undefined, async () => {
@@ -741,20 +843,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     localSettings.backupReminderDays,
                     DEFAULT_SETTINGS.backupReminderDays ?? 7
                 );
+                const cloudString = (key: string, fallback: string) =>
+                    Object.prototype.hasOwnProperty.call(dataObj, key)
+                        ? String(dataObj[key] ?? '')
+                        : fallback;
 
                 const newSettings = {
                     ...localSettings, // Start with local structure
                     ...dataObj,       // Overlay Cloud Settings (Wins for preferences, ledgers, etc.)
 
-                    // RE-APPLY Local Connection Settings to ensure they are not lost if cloud data is missing them
-                    // RE-APPLY Local Connection Settings to ensure they are not lost if cloud data is missing them
-                    // Logic: If cloud has valid non-empty string, use it. Otherwise, keep local.
-                    webdavUrl: (dataObj.webdavUrl && String(dataObj.webdavUrl).trim() !== '') ? dataObj.webdavUrl : localSettings.webdavUrl,
-                    webdavUser: (dataObj.webdavUser && String(dataObj.webdavUser).trim() !== '') ? dataObj.webdavUser : localSettings.webdavUser,
-                    webdavPass: (dataObj.webdavPass && String(dataObj.webdavPass).trim() !== '') ? dataObj.webdavPass : localSettings.webdavPass,
-                    syncEndpoint: (dataObj.syncEndpoint && String(dataObj.syncEndpoint).trim() !== '') ? dataObj.syncEndpoint : localSettings.syncEndpoint,
-                    syncToken: (dataObj.syncToken && String(dataObj.syncToken).trim() !== '') ? dataObj.syncToken : localSettings.syncToken,
-                    syncUserId: (dataObj.syncUserId && String(dataObj.syncUserId).trim() !== '') ? dataObj.syncUserId : localSettings.syncUserId,
+                    // Keep auth/session local while allowing WebDAV credentials to follow the account.
+                    webdavUrl: cloudString('webdavUrl', localSettings.webdavUrl),
+                    webdavUser: cloudString('webdavUser', localSettings.webdavUser),
+                    webdavPass: cloudString('webdavPass', localSettings.webdavPass),
+                    cfConfig: localSettings.cfConfig,
+                    authSession: localSettings.authSession,
+                    authMode: localSettings.authSession ? 'authenticated' : 'guest',
                     backupReminderDays: localReminderDays <= 0
                         ? 0
                         : normalizeBackupReminderDays(
@@ -781,19 +885,28 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             hasGroupStore ? dbAPI.getCategoryGroups() : Promise.resolve([]),
             db.settings.get('main')
         ]);
-        dispatch({ type: 'RESTORE_DATA', payload: { ledgers: ledgersNew, categories: catsNew, categoryGroups: groupsNew, transactions: txsNew, settings: settingsRow?.value } });
-        dispatch({ type: 'UPDATE_SETTINGS', payload: { lastSyncVersion: version } });
+        const nextSettings = normalizeAppSettings({ ...(settingsRow?.value || stateRef.current.settings), lastSyncVersion: version }, DEFAULT_SETTINGS);
+        stateRef.current = {
+            ...stateRef.current,
+            ledgers: ledgersNew,
+            categories: catsNew,
+            categoryGroups: groupsNew,
+            transactions: txsNew,
+            settings: nextSettings,
+        };
+        dispatch({ type: 'RESTORE_DATA', payload: { ledgers: ledgersNew, categories: catsNew, categoryGroups: groupsNew, transactions: txsNew, settings: nextSettings } });
     }, []);
 
-    const performCloudSync = useCallback(async (reason: 'auto' | 'manual' = 'auto') => {
-        const { syncEndpoint, syncToken, syncUserId, lastSyncVersion } = stateRef.current.settings;
+    const performCloudSync = useCallback(async (reason: 'auto' | 'manual' | 'migration' = 'auto') => {
+        const { lastSyncVersion } = stateRef.current.settings;
+        const authSession = getActiveAuthSession();
 
         // Skip auto-sync if we just restored to prevent overwriting cloud with local state
         if (reason === 'auto' && isRestoringRef.current) {
             return;
         }
 
-        if (!syncEndpoint || !syncToken || !isDBLoaded || !stateRef.current.isOnline) return;
+        if (!authSession || !isDBLoaded || !stateRef.current.isOnline) return;
         const ready = await ensureStoresReady();
         if (!ready) {
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
@@ -811,8 +924,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
 
             // 如果本地为空（常见于重置/首次恢复），强制全量 push/pull，避免 lastSyncVersion 过大导致云端数据未拉取
-            let sinceForPush = reason === 'manual' ? 0 : (lastSyncVersion || 0);
-            let sinceForPull = reason === 'manual' ? 0 : (lastSyncVersion || 0);
+            const forceFullSync = reason === 'manual' || reason === 'migration';
+            let sinceForPush = forceFullSync ? 0 : (lastSyncVersion || 0);
+            let sinceForPull = forceFullSync ? 0 : (lastSyncVersion || 0);
             const [txAll, ledgersAll, catsAll, groupsAll, queuedSyncItems] = await Promise.all([
                 dbAPI.getAllTransactionsIncludingDeleted(),
                 dbAPI.getAllLedgersIncludingDeleted(),
@@ -838,14 +952,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             const catsFiltered = filterForSync(catsAll, 'category');
             const groupsFiltered = filterForSync(groupsAll, 'categoryGroup');
 
-            // 规范化字段（含删除标记），确保后端能写入 is_deleted 等字段
-            const userId = syncUserId || 'default';
             // Fallback to the first available ledger if current is missing
             const defaultLedgerId = ledgersAll[0]?.id || 'default';
 
             const mapLedger = (l: any) => ({
                 id: l.id,
-                user_id: userId,
                 name: l.name,
                 theme_color: l.themeColor || l.theme_color,
                 created_at: l.createdAt || l.created_at || Date.now(),
@@ -854,7 +965,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             });
             const mapCategory = (c: any) => ({
                 id: c.id,
-                user_id: userId,
                 ledger_id: c.ledgerId || c.ledger_id || stateRef.current.currentLedgerId || defaultLedgerId,
                 name: c.name,
                 icon: c.icon,
@@ -866,7 +976,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             });
             const mapGroup = (g: any) => ({
                 id: g.id,
-                user_id: userId,
                 ledger_id: g.ledgerId || g.ledger_id || stateRef.current.currentLedgerId || defaultLedgerId,
                 name: g.name,
                 // 直接传数组，服务端负责序列化，避免重复 stringify 导致丢失
@@ -877,7 +986,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             });
             const mapTx = (t: any) => ({
                 id: t.id,
-                user_id: userId,
                 ledger_id: t.ledgerId || t.ledger_id,
                 amount: t.amount,
                 type: t.type,
@@ -896,11 +1004,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 categories: catsFiltered.map(mapCategory),
                 groups: groupsFiltered.map(mapGroup),
                 transactions: txFiltered.map(mapTx),
-                settings: { data: stateRef.current.settings, updated_at: Date.now() }
+                settings: { data: withoutLocalAuthSecrets(stateRef.current.settings), updated_at: Date.now() }
             };
-            await pushToCloud(syncEndpoint, syncToken, syncUserId || 'default', payload);
+            await pushToCloud(authSession.token, payload);
             // 手动同步强制全量拉取（since=0），避免版本偏差导致删除未拉取
-            const pulled = await pullFromCloud(syncEndpoint, syncToken, syncUserId || 'default', sinceForPull);
+            const pulled = await pullFromCloud(authSession.token, sinceForPull);
             await mergeFromCloud(pulled);
             await dbAPI.markSyncQueueItemsSynced(queuedSyncItems);
             await refreshPendingSyncCount();
@@ -908,28 +1016,155 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             const groupsReloaded = await dbAPI.getCategoryGroups();
             dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groupsReloaded } });
             setSyncDirty(false);
-            logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'success', file: 'D1 Sync', message: reason === 'manual' ? '手动同步成功' : '自动同步成功' });
+            logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'success', file: 'D1 Sync', message: reason === 'manual' ? '手动同步成功' : reason === 'migration' ? '账号接管同步成功' : '自动同步成功' });
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'success' });
             dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: undefined });
             setTimeout(() => dispatch({ type: 'SET_SYNC_STATUS', payload: 'idle' }), 2000);
         } catch (e: any) {
             console.error('Cloud sync failed', e);
+            if (e?.status === 401) {
+                await clearAuthSession();
+            }
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
-            dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: e?.message || '同步失败' });
+            dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: e?.status === 401 ? '登录已失效，请重新登录' : (e?.message || '同步失败') });
             logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'failure', file: 'D1 Sync', message: e?.message || '同步失败' });
             if (reason === 'manual') alert('Sync failed: ' + (e?.message || 'unknown error'));
             await refreshPendingSyncCount();
             setSyncDirty(true);
+            if (reason === 'migration') throw e;
         }
-    }, [isDBLoaded, mergeFromCloud, refreshPendingSyncCount]);
+    }, [isDBLoaded, mergeFromCloud, refreshPendingSyncCount, clearAuthSession]);
+
+    const runAccountTakeover = useCallback(async (session: AuthSession) => {
+        if (accountTakeoverRunningRef.current) return;
+
+        accountTakeoverRunningRef.current = true;
+        isRestoringRef.current = true;
+        dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
+
+        let pushError = '';
+
+        try {
+            const ready = await ensureStoresReady();
+            if (!ready) throw new Error('本地数据库结构异常，已停止账号接管以保护本地数据');
+
+            await persistAuthSettings({
+                authSession: session,
+                authMode: 'authenticated',
+                lastSyncVersion: 0,
+            });
+
+            const localCountBeforePull = await countLocalDataRecords();
+            let accountHasData = false;
+            try {
+                const accountPayload = await pullFromCloud(session.token, 0);
+                accountHasData = hasPulledRows(accountPayload);
+                await mergeFromCloud(accountPayload);
+            } catch (e: any) {
+                if (e?.status === 401) {
+                    await clearAuthSession();
+                    throw new Error('登录已失效，请重新登录');
+                }
+                console.warn('Initial authenticated pull skipped during takeover', e);
+            }
+
+            const shouldSeedEmptyAccount = !accountHasData && localCountBeforePull > 0;
+
+            if (shouldSeedEmptyAccount) {
+                await persistAuthSettings({ lastSyncVersion: 0 });
+                const queuedImages = await queueCachedImagesForUpload();
+                if (queuedImages > 0) {
+                    logBackup({
+                        id: generateId(),
+                        timestamp: Date.now(),
+                        type: 'mixed',
+                        action: 'upload',
+                        status: 'success',
+                        file: 'Image Migration',
+                        message: `账号接管已将 ${queuedImages} 张本地缓存图片加入上传队列`,
+                    });
+                }
+                await markAllLocalDataForSync();
+                await refreshPendingSyncCount();
+                try {
+                    await performCloudSync('migration');
+                } catch (e: any) {
+                    pushError = e?.message || '账号接管同步失败';
+                }
+            }
+
+            if (!shouldSeedEmptyAccount) {
+                const pendingCount = await refreshPendingSyncCount();
+                if (pendingCount > 0) {
+                    const restoreGuard = isRestoringRef.current;
+                    try {
+                        isRestoringRef.current = false;
+                        await performCloudSync('auto');
+                    } catch (e: any) {
+                        pushError = e?.message || '账号同步失败';
+                    } finally {
+                        isRestoringRef.current = restoreGuard;
+                    }
+                }
+            }
+
+            if (pushError) {
+                dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
+                dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: pushError });
+                setSyncDirty(true);
+                if (typeof window !== 'undefined') {
+                    window.alert(`账号已登录，但同步未完全完成：${pushError}`);
+                }
+            } else {
+                dispatch({ type: 'SET_SYNC_STATUS', payload: 'success' });
+                dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: undefined });
+                setTimeout(() => dispatch({ type: 'SET_SYNC_STATUS', payload: 'idle' }), 2000);
+            }
+        } catch (e: any) {
+            const message = e?.message || '账号接管失败';
+            dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
+            dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: message });
+            setSyncDirty(true);
+            throw e;
+        } finally {
+            accountTakeoverRunningRef.current = false;
+            isRestoringRef.current = false;
+        }
+    }, [clearAuthSession, mergeFromCloud, performCloudSync, persistAuthSettings, refreshPendingSyncCount]);
+
+    const loginAccount = useCallback(async (username: string, password: string) => {
+        const session = await authLogin(username, password);
+        await runAccountTakeover(session);
+        return session;
+    }, [runAccountTakeover]);
+
+    const registerAccount = useCallback(async (username: string, password: string, inviteCode: string) => {
+        const session = await authRegister(username, password, inviteCode);
+        await runAccountTakeover(session);
+        return session;
+    }, [runAccountTakeover]);
+
+    const logoutAccount = useCallback(async () => {
+        const session = getActiveAuthSession();
+        if (session?.token) {
+            try {
+                await authLogout(session.token);
+            } catch (e) {
+                console.warn('Remote logout failed, clearing local session', e);
+            }
+        }
+        await clearAuthSession();
+        dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: undefined });
+        setSyncDirty(false);
+    }, [clearAuthSession]);
 
     useEffect(() => {
         if (!syncDirty) return;
         // Use stateRef to avoid infinite loop caused by state.settings changes
-        const { syncEndpoint, syncToken, webdavUrl, syncDebounceSeconds } = stateRef.current.settings;
+        const { webdavUrl, syncDebounceSeconds } = stateRef.current.settings;
         if (!stateRef.current.isOnline) return;
 
-        const hasD1 = syncEndpoint && syncToken;
+        const hasD1 = !!getActiveAuthSession();
         const hasWebDAV = webdavUrl;
 
         if (!hasD1 && !hasWebDAV) return;
@@ -949,8 +1184,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // Version lightweight polling
     useEffect(() => {
         if (versionCheckTimerRef.current) clearInterval(versionCheckTimerRef.current);
-        const { syncEndpoint, syncToken, syncUserId, versionCheckIntervalFg, versionCheckIntervalBg } = state.settings;
-        if (!syncEndpoint || !syncToken || !state.isOnline) return;
+        const { authSession, authMode, versionCheckIntervalFg, versionCheckIntervalBg } = state.settings;
+        if (authMode !== 'authenticated' || !authSession?.token || !state.isOnline) return;
         const fg = Math.max(3, versionCheckIntervalFg ?? 10);
         const bg = Math.max(fg, versionCheckIntervalBg ?? 20);
         const getInterval = () => (document.visibilityState === 'visible' ? fg : bg) * 1000;
@@ -960,22 +1195,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             versionCheckRunningRef.current = true;
             try {
                 // 1. Check Remote Version
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
-
                 let remoteVersion = 0;
                 try {
-                    const res = await fetch(`${syncEndpoint.replace(/\/$/, '')}/sync/version?user_id=${encodeURIComponent(syncUserId || 'default')}`, {
-                        headers: { 'Authorization': `Bearer ${syncToken}` },
-                        signal: controller.signal
-                    });
-                    clearTimeout(timeoutId);
-                    if (res.ok) {
-                        const data = await res.json();
-                        remoteVersion = Number(data.version || 0);
+                    remoteVersion = await getCloudVersion(authSession.token);
+                } catch (e: any) {
+                    if (e?.status === 401) {
+                        await clearAuthSession();
                     }
-                } catch (e) {
-                    // network error, ignore
                 }
 
                 // 2. Check Local Unsynced Data
@@ -1008,7 +1234,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             if (versionCheckTimerRef.current) clearInterval(versionCheckTimerRef.current);
             document.removeEventListener('visibilitychange', handleVisibility);
         };
-    }, [state.settings.syncEndpoint, state.settings.syncToken, state.settings.syncUserId, state.settings.versionCheckIntervalFg, state.settings.versionCheckIntervalBg, state.isOnline, performCloudSync]);
+    }, [state.settings.authMode, state.settings.authSession?.token, state.settings.versionCheckIntervalFg, state.settings.versionCheckIntervalBg, state.isOnline, performCloudSync, clearAuthSession]);
 
     // 自动备份：先同步 D1/KV 再执行 WebDAV 备份，并记录日志
     const runAutoBackup = useCallback(async () => {
@@ -1029,7 +1255,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
             await performUpload(true);
             const now = Date.now();
-            dispatch({ type: 'UPDATE_SETTINGS', payload: { lastBackupTime: now } });
+            dispatch({ type: 'UPDATE_SETTINGS', payload: { lastBackupTime: now, lastAutoBackupTime: now } });
             logBackup({ id: generateId(), timestamp: now, type: 'full', action: 'upload', status: 'success', file: 'Auto Backup', message: '定期自动备份完成' });
         } catch (e: any) {
             logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'upload', status: 'failure', file: 'Auto Backup', message: e?.message || '自动备份失败' });
@@ -1169,11 +1395,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setIsRestoring(true);
         isRestoringRef.current = true; // Block auto-sync
 
-        const { syncEndpoint, syncToken, syncUserId } = stateRef.current.settings;
-        if (!syncEndpoint || !syncToken) {
+        const authSession = getActiveAuthSession();
+        if (!authSession) {
             isRestoringRef.current = false;
             setIsRestoring(false);
-            throw new Error('请先在设置里填写同步地址和 AUTH_TOKEN');
+            throw new Error('请先登录账号');
         }
 
         const ready = await ensureStoresReady();
@@ -1185,7 +1411,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
         dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
         try {
-            const pulled = await pullFromCloud(syncEndpoint, syncToken, syncUserId || 'default', 0);
+            const pulled = await pullFromCloud(authSession.token, 0);
             await mergeFromCloud(pulled);
             dispatch({ type: 'UPDATE_SETTINGS', payload: { lastSyncVersion: pulled.version } });
             logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'download', status: 'success', file: 'D1 Sync', message: '仅拉取恢复成功' });
@@ -1196,6 +1422,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             setTimeout(() => { isRestoringRef.current = false; }, 10000);
         } catch (e: any) {
             isRestoringRef.current = false;
+            if (e?.status === 401) {
+                await clearAuthSession();
+            }
             logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'download', status: 'failure', file: 'D1 Sync', message: e?.message || '恢复失败' });
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
             setSyncDirty(true);
@@ -1203,7 +1432,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         } finally {
             setIsRestoring(false);
         }
-    }, [mergeFromCloud]);
+    }, [mergeFromCloud, clearAuthSession]);
 
     const addLedger = async (ledger: Ledger) => {
         dispatch({ type: 'ADD_LEDGER', payload: ledger });
@@ -1278,7 +1507,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
 
     return (
-        <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, batchDeleteTransactions, batchUpdateTransactions, undo, canUndo: !!undoStack, manualBackup, manualCloudSync, importData, smartImportCsv, restoreFromCloud, resetApp, restoreFromD1, addLedger, triggerCloudSync }}>
+        <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, batchDeleteTransactions, batchUpdateTransactions, undo, canUndo: !!undoStack, manualBackup, manualCloudSync, importData, smartImportCsv, restoreFromCloud, resetApp, restoreFromD1, addLedger, triggerCloudSync, loginAccount, registerAccount, logoutAccount }}>
             {children}
         </AppContext.Provider>
     );

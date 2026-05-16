@@ -1,6 +1,7 @@
 import { Category, Ledger, AppSettings } from './types';
 
 export const DEFAULT_THEME_COLOR = '#007AFF';
+export const FIXED_SYNC_ENDPOINT = 'https://sync.sssr.edu.kg';
 
 export const DEFAULT_SETTINGS: AppSettings = {
   themeMode: 'auto',
@@ -34,14 +35,14 @@ export const DEFAULT_SETTINGS: AppSettings = {
   categoryRows: 5,
   categoryNotes: {}, // Init note history
   searchHistory: [],
-  syncEndpoint: '',
-  syncToken: '',
-  syncUserId: 'default',
+  authMode: 'guest',
+  authSession: undefined,
   lastSyncVersion: 0,
+  lastAutoBackupTime: 0,
   exportStartDate: '',
   exportEndDate: '',
   isFirstRun: true,
-  version: '7.4.3',
+  version: '7.4.4',
   debugMode: typeof localStorage !== 'undefined' ? localStorage.getItem('debugMode') === 'true' : false,
   defaultLedgerId: '',
 };

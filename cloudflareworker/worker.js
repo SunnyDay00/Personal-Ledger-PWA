@@ -2,6 +2,10 @@
 const ALLOW_ORIGINS = [
   '*',
 ];
+const PASSWORD_ITERATIONS = 100000;
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const USERNAME_RE = /^[a-z0-9_.-]{3,40}$/;
+const INVITE_CODE_RE = /^\d{6}$/;
 const DEFAULT_ALLOW_ORIGIN = '*'; // 不在白名单时用这个，测试可暂设为 '*'
 
 // ---- CORS 工具 ----
@@ -27,20 +31,262 @@ function text(body, status = 200, origin = null) {
   });
 }
 
+async function parseJsonBody(request) {
+  try {
+    const body = await request.json();
+    return body && typeof body === 'object' && !Array.isArray(body) ? body : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function normalizeUsername(username) {
+  return typeof username === 'string' ? username.trim().toLowerCase() : '';
+}
+
+function normalizeInviteCode(inviteCode) {
+  return typeof inviteCode === 'string' ? inviteCode.trim() : '';
+}
+
+function d1Changes(result) {
+  return Number(result?.meta?.changes ?? result?.changes ?? 0);
+}
+
+function createUserId() {
+  return `user_${crypto.randomUUID()}`;
+}
+
+function bytesToHex(buffer) {
+  return Array.from(new Uint8Array(buffer))
+    .map(byte => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function hexToBytes(hex) {
+  if (typeof hex !== 'string' || hex.length % 2 !== 0) {
+    throw new Error('Invalid hex input');
+  }
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function createRandomHex(byteLength) {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return bytesToHex(bytes);
+}
+
+function bytesToBase64Url(bytes) {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function createSessionToken() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return bytesToBase64Url(bytes);
+}
+
+async function sha256Hex(text) {
+  const data = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return bytesToHex(digest);
+}
+
+async function pbkdf2HashPassword(password, salt, iterations) {
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(password),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      hash: 'SHA-256',
+      salt: hexToBytes(salt),
+      iterations,
+    },
+    keyMaterial,
+    256
+  );
+  return bytesToHex(bits);
+}
+
+function constantTimeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const length = Math.max(a.length, b.length);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < length; i++) {
+    const ac = i < a.length ? a.charCodeAt(i) : 0;
+    const bc = i < b.length ? b.charCodeAt(i) : 0;
+    diff |= ac ^ bc;
+  }
+  return diff === 0;
+}
+
+async function verifyPassword(password, user) {
+  if (!user || typeof password !== 'string') return false;
+  if (!user.password_hash || !user.password_salt || !user.password_iterations) return false;
+  const hash = await pbkdf2HashPassword(password, user.password_salt, Number(user.password_iterations));
+  return constantTimeEqual(hash, user.password_hash);
+}
+
+function getBearerToken(request) {
+  const auth = request.headers.get('Authorization') || '';
+  const match = auth.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : null;
+}
+
+async function getSessionUser(request, env) {
+  const token = getBearerToken(request);
+  if (!token) return null;
+
+  const tokenHash = await sha256Hex(token);
+  const row = await env.DB.prepare(`
+    SELECT
+      sessions.id AS session_id,
+      sessions.user_id AS session_user_id,
+      sessions.expires_at AS expires_at,
+      sessions.revoked_at AS revoked_at,
+      users.id AS user_id,
+      users.username AS username,
+      users.disabled AS disabled
+    FROM sessions
+    JOIN users ON users.id = sessions.user_id
+    WHERE sessions.token_hash = ?
+  `).bind(tokenHash).first();
+
+  if (!row) return null;
+  if (row.revoked_at !== null && row.revoked_at !== undefined) return null;
+  if (Number(row.expires_at) <= Date.now()) return null;
+  if (Number(row.disabled) === 1) return null;
+
+  return {
+    user: {
+      id: row.user_id,
+      username: row.username,
+    },
+    session: {
+      id: row.session_id,
+      expiresAt: Number(row.expires_at),
+    },
+    tokenHash,
+  };
+}
+
+async function requireSessionUser(request, env, origin) {
+  const sessionUser = await getSessionUser(request, env);
+  if (!sessionUser) {
+    return { response: json({ error: 'Unauthorized' }, 401, origin) };
+  }
+  return sessionUser;
+}
+
+async function createSessionForUser(userId, request, env) {
+  const token = createSessionToken();
+  const tokenHash = await sha256Hex(token);
+  const now = Date.now();
+  const expiresAt = now + SESSION_TTL_MS;
+  const sessionId = crypto.randomUUID();
+  const userAgent = request.headers.get('User-Agent') || '';
+
+  await env.DB.prepare(`
+    INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at, revoked_at, user_agent)
+    VALUES (?, ?, ?, ?, ?, NULL, ?)
+  `).bind(sessionId, userId, tokenHash, now, expiresAt, userAgent).run();
+
+  return { token, expiresAt, sessionId };
+}
+
+function authUserPayload(user) {
+  return {
+    id: user.id,
+    username: user.username,
+  };
+}
+
+const AUTH_SYNC_TABLES = {
+  ledgers: 'ledgers_v2',
+  categories: 'categories_v2',
+  groups: 'groups_v2',
+  transactions: 'transactions_v2',
+  settings: 'settings_v2',
+  recordConflict: '(user_id, id)',
+};
+
+function normalizeImageKey(rawKey) {
+  if (typeof rawKey !== 'string') return null;
+
+  let key = rawKey.trim();
+  try {
+    key = decodeURIComponent(key);
+  } catch (e) {
+    return null;
+  }
+
+  key = key.replace(/^\/+/, '');
+  if (!key || key.includes('..')) return null;
+  return key;
+}
+
+function imageKeyFromPath(pathname, prefix) {
+  return normalizeImageKey(pathname.slice(prefix.length));
+}
+
+function userImageObjectKey(userId, key) {
+  return `users/${userId}/${key}`;
+}
+
 // ---- 建表 SQL ----
 const CREATE_SQL = `
-CREATE TABLE IF NOT EXISTS ledgers (
+CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
-  user_id TEXT,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  password_salt TEXT NOT NULL,
+  password_iterations INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  disabled INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  user_agent TEXT,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
+CREATE TABLE IF NOT EXISTS invite_codes (
+  code TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  used_at INTEGER,
+  used_by_user_id TEXT,
+  disabled INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS ledgers_v2 (
+  user_id TEXT NOT NULL,
+  id TEXT NOT NULL,
   name TEXT,
   theme_color TEXT,
   created_at INTEGER,
   updated_at INTEGER,
-  is_deleted INTEGER
+  is_deleted INTEGER,
+  PRIMARY KEY (user_id, id)
 );
-CREATE TABLE IF NOT EXISTS categories (
-  id TEXT PRIMARY KEY,
-  user_id TEXT,
+CREATE TABLE IF NOT EXISTS categories_v2 (
+  user_id TEXT NOT NULL,
+  id TEXT NOT NULL,
   ledger_id TEXT,
   name TEXT,
   icon TEXT,
@@ -48,21 +294,23 @@ CREATE TABLE IF NOT EXISTS categories (
   "order" INTEGER,
   is_custom INTEGER,
   updated_at INTEGER,
-  is_deleted INTEGER
+  is_deleted INTEGER,
+  PRIMARY KEY (user_id, id)
 );
-CREATE TABLE IF NOT EXISTS groups (
-  id TEXT PRIMARY KEY,
-  user_id TEXT,
+CREATE TABLE IF NOT EXISTS groups_v2 (
+  user_id TEXT NOT NULL,
+  id TEXT NOT NULL,
   ledger_id TEXT,
   name TEXT,
   category_ids TEXT,
   "order" INTEGER,
   updated_at INTEGER,
-  is_deleted INTEGER
+  is_deleted INTEGER,
+  PRIMARY KEY (user_id, id)
 );
-CREATE TABLE IF NOT EXISTS transactions (
-  id TEXT PRIMARY KEY,
-  user_id TEXT,
+CREATE TABLE IF NOT EXISTS transactions_v2 (
+  user_id TEXT NOT NULL,
+  id TEXT NOT NULL,
   ledger_id TEXT,
   amount REAL,
   type TEXT,
@@ -72,21 +320,18 @@ CREATE TABLE IF NOT EXISTS transactions (
   attachments TEXT,
   created_at INTEGER,
   updated_at INTEGER,
-  is_deleted INTEGER
+  is_deleted INTEGER,
+  PRIMARY KEY (user_id, id)
 );
-CREATE TABLE IF NOT EXISTS settings (
+CREATE TABLE IF NOT EXISTS settings_v2 (
   user_id TEXT PRIMARY KEY,
   data TEXT,
   updated_at INTEGER
 );
-CREATE TABLE IF NOT EXISTS usage_stats (
-  id INTEGER PRIMARY KEY,
-  d1_rows_read INTEGER DEFAULT 0,
-  d1_rows_written INTEGER DEFAULT 0,
-  kv_read_ops INTEGER DEFAULT 0,
-  kv_write_ops INTEGER DEFAULT 0,
-  updated_at INTEGER
-);
+CREATE INDEX IF NOT EXISTS idx_ledgers_v2_user_updated ON ledgers_v2(user_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_categories_v2_user_updated ON categories_v2(user_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_groups_v2_user ON groups_v2(user_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_v2_user_updated ON transactions_v2(user_id, updated_at);
 `;
 
 export default {
@@ -102,136 +347,61 @@ export default {
     // 健康检查
     if (url.pathname === '/health') return text('ok', 200, origin);
 
-    // 鉴权（Bearer AUTH_TOKEN）
-    const auth = request.headers.get('Authorization') || '';
-    if (!auth.startsWith('Bearer ') || auth.slice(7) !== env.AUTH_TOKEN) {
-      return text('Unauthorized', 401, origin);
+    if (url.pathname === '/auth/register' && request.method === 'POST') {
+      await ensureTables(env);
+      return registerHandler(request, env, origin);
+    }
+    if (url.pathname === '/auth/login' && request.method === 'POST') {
+      await ensureTables(env);
+      return loginHandler(request, env, origin);
+    }
+    if (url.pathname === '/auth/logout' && request.method === 'POST') {
+      await ensureTables(env);
+      return logoutHandler(request, env, origin);
+    }
+    if (url.pathname === '/auth/me' && request.method === 'GET') {
+      await ensureTables(env);
+      return meHandler(request, env, origin);
     }
 
-    // 路由分发
-    if (url.pathname === '/sync/pull' && request.method === 'GET') {
-      // 仅在真正同步时检查表结构，减少 D1 读写
-      await ensureTables(env);
-      return pullHandler(url, env, origin, ctx);
-    }
-    if (url.pathname === '/sync/push' && request.method === 'POST') {
-      await ensureTables(env);
-      return pushHandler(request, url, env, origin, ctx);
-    }
-    
-    // 版本探测：只返回当前 version，便于前端轻量检测
+    // Normal cloud data routes trust only the authenticated session user.
     if (url.pathname === '/sync/version' && request.method === 'GET') {
-      const userId = url.searchParams.get('user_id') || 'default';
-      const versionStr = await env.SYNC_KV.get(`version:${userId}`);
-      const version = versionStr ? Number(versionStr) : Date.now();
-      
-      // 统计 KV 读取 (1次)
-      ctx.waitUntil(updateStats(env, 0, 0, 1, 0));
-      
-      return json({ version }, 200, origin);
+      await ensureTables(env);
+      const sessionUser = await requireSessionUser(request, env, origin);
+      if (sessionUser.response) return sessionUser.response;
+      return versionHandler(sessionUser.user.id, env, origin, ctx);
     }
-
-    // Usage stats
-    if (url.pathname === '/usage' && request.method === 'GET') {
-      // Check for Cloudflare API headers
-      const cfAccount = request.headers.get('X-CF-Account-ID');
-      const cfToken = request.headers.get('X-CF-API-Token');
-      const cfKvId = request.headers.get('X-CF-KV-Namespace-ID');
-
-      // Get D1 storage usage (approximate) - Always fetch locally for accuracy
-      let dbSize = 0;
-      try {
-         const sizeRes = await env.DB.prepare('PRAGMA page_count;').first();
-         dbSize = (sizeRes?.page_count || 0) * 4096; // 4KB pages
-      } catch (e) {}
-
-      if (cfAccount && cfToken) {
-        return fetchCloudflareStats(cfAccount, cfToken, cfKvId, origin, dbSize);
-      }
-
-      // Local stats logic
-      // 确保 usage_stats 表存在 (读取时检查一次即可)
-      await env.DB.prepare(`
-        CREATE TABLE IF NOT EXISTS usage_stats (
-          id INTEGER PRIMARY KEY,
-          d1_rows_read INTEGER DEFAULT 0,
-          d1_rows_written INTEGER DEFAULT 0,
-          kv_read_ops INTEGER DEFAULT 0,
-          kv_write_ops INTEGER DEFAULT 0,
-          updated_at INTEGER
-        );
-      `).run();
-
-      const stats = await env.DB.prepare('SELECT * FROM usage_stats WHERE id=1').first();
-      
-      return json({ 
-        ...stats, 
-        d1_storage_bytes: dbSize,
-        kv_storage_bytes: 0,
-        note: "数据来源：本地软件统计 (UTC)"
-      }, 200, origin);
-    }
-
-    // ---- R2 Image Upload ----
-    if (url.pathname === '/upload/image' && request.method === 'POST') {
-      const contentType = request.headers.get('Content-Type') || 'application/octet-stream';
-      // Allow client to specify key for offline-first support
-      const clientKey = request.headers.get('X-Image-Key');
-      const key = clientKey || crypto.randomUUID();
-      try {
-        await env.IMAGES_BUCKET.put(key, request.body, {
-          httpMetadata: { contentType }
-        });
-        return json({ key }, 201, origin);
-      } catch (e) {
-        return json({ error: e.message }, 500, origin);
-      }
-    }
-
-    // ---- R2 Image Get ----
-    if (url.pathname.startsWith('/image/') && request.method === 'GET') {
-      const key = url.pathname.replace('/image/', '');
-      if (!key) return text('Missing key', 400, origin);
-
-      try {
-        const object = await env.IMAGES_BUCKET.get(key);
-        if (!object) return text('Not found', 404, origin);
-
-        const headers = new Headers();
-        object.writeHttpMetadata(headers);
-        headers.set('etag', object.httpEtag);
-        // CORS headers manually since we construct raw Response
-        const cors = makeCorsHeaders(origin);
-        Object.entries(cors).forEach(([k,v]) => headers.set(k, v));
-        headers.set('Cache-Control', 'public, max-age=31536000');
-
-        return new Response(object.body, { headers });
-      } catch (e) {
-        return text('Error fetching image', 500, origin);
-      }
-    }
-
-    // ---- R2 Image Delete ----
-    if (url.pathname.startsWith('/image/') && request.method === 'DELETE') {
-      const key = url.pathname.replace('/image/', '');
-      if (!key) return json({ error: 'Missing key' }, 400, origin);
-
-      try {
-        await env.IMAGES_BUCKET.delete(key);
-        return json({ success: true }, 200, origin);
-      } catch (e) {
-        return json({ error: e.message }, 500, origin);
-      }
-    }
-
-    // ---- Push Sync (D1) ----
-    if (url.pathname === '/sync/push' && request.method === 'POST') {
-      return pushHandler(request, env, origin, ctx);
-    }
-    
-    // ---- Pull Sync (D1) ----
     if (url.pathname === '/sync/pull' && request.method === 'GET') {
-      return pullHandler(url, env, origin, ctx);
+      await ensureTables(env);
+      const sessionUser = await requireSessionUser(request, env, origin);
+      if (sessionUser.response) return sessionUser.response;
+      return pullHandler(url, sessionUser.user.id, env, origin, ctx, AUTH_SYNC_TABLES);
+    }
+    if (url.pathname === '/sync/push' && request.method === 'POST') {
+      await ensureTables(env);
+      const sessionUser = await requireSessionUser(request, env, origin);
+      if (sessionUser.response) return sessionUser.response;
+      return pushHandler(request, sessionUser.user.id, env, origin, ctx, AUTH_SYNC_TABLES);
+    }
+    if (url.pathname === '/upload/image' && request.method === 'POST') {
+      await ensureTables(env);
+      const sessionUser = await requireSessionUser(request, env, origin);
+      if (sessionUser.response) return sessionUser.response;
+      return uploadImageHandler(request, sessionUser.user.id, env, origin);
+    }
+    if (url.pathname.startsWith('/image/') && request.method === 'GET') {
+      await ensureTables(env);
+      const sessionUser = await requireSessionUser(request, env, origin);
+      if (sessionUser.response) return sessionUser.response;
+      const key = imageKeyFromPath(url.pathname, '/image/');
+      return getImageHandler(key, sessionUser.user.id, env, origin);
+    }
+    if (url.pathname.startsWith('/image/') && request.method === 'DELETE') {
+      await ensureTables(env);
+      const sessionUser = await requireSessionUser(request, env, origin);
+      if (sessionUser.response) return sessionUser.response;
+      const key = imageKeyFromPath(url.pathname, '/image/');
+      return deleteImageHandler(key, sessionUser.user.id, env, origin);
     }
 
     return text('Not found', 404, origin);
@@ -244,6 +414,136 @@ async function ensureTables(env) {
     for (const sql of stmts) await env.DB.prepare(sql).run();
 }
 
+async function registerHandler(request, env, origin) {
+  const body = await parseJsonBody(request);
+  if (!body) return json({ error: 'Invalid JSON body' }, 400, origin);
+
+  const username = normalizeUsername(body.username);
+  const password = body.password;
+  const inviteCode = normalizeInviteCode(body.inviteCode);
+
+  if (!INVITE_CODE_RE.test(inviteCode)) {
+    return json({ error: 'Invalid invite code' }, 403, origin);
+  }
+  if (!USERNAME_RE.test(username)) {
+    return json({ error: 'Username must be 3-40 characters and use only letters, numbers, underscore, hyphen, or dot' }, 400, origin);
+  }
+  if (typeof password !== 'string' || password.length < 8) {
+    return json({ error: 'Password must be at least 8 characters' }, 400, origin);
+  }
+
+  const existing = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(username).first();
+  if (existing) return json({ error: 'Username already exists' }, 409, origin);
+
+  const now = Date.now();
+  const user = {
+    id: createUserId(),
+    username,
+  };
+  const salt = createRandomHex(16);
+  const passwordHash = await pbkdf2HashPassword(password, salt, PASSWORD_ITERATIONS);
+
+  const claim = await env.DB.prepare(`
+    UPDATE invite_codes
+    SET used_at = ?, used_by_user_id = ?
+    WHERE code = ? AND disabled = 0 AND used_at IS NULL
+  `).bind(now, user.id, inviteCode).run();
+
+  if (d1Changes(claim) !== 1) {
+    return json({ error: 'Invalid invite code' }, 403, origin);
+  }
+
+  try {
+    await env.DB.prepare(`
+      INSERT INTO users (id, username, password_hash, password_salt, password_iterations, created_at, updated_at, disabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+    `).bind(user.id, username, passwordHash, salt, PASSWORD_ITERATIONS, now, now).run();
+  } catch (e) {
+    if (String(e?.message || e).toLowerCase().includes('unique')) {
+      await releaseInviteCode(env, inviteCode, user.id);
+      return json({ error: 'Username already exists' }, 409, origin);
+    }
+    await releaseInviteCode(env, inviteCode, user.id);
+    return json({ error: 'Registration failed' }, 500, origin);
+  }
+
+  const session = await createSessionForUser(user.id, request, env);
+  return json({
+    user: authUserPayload(user),
+    token: session.token,
+    expiresAt: session.expiresAt,
+  }, 201, origin);
+}
+
+async function releaseInviteCode(env, inviteCode, userId) {
+  try {
+    await env.DB.prepare(`
+      UPDATE invite_codes
+      SET used_at = NULL, used_by_user_id = NULL
+      WHERE code = ? AND used_by_user_id = ?
+    `).bind(inviteCode, userId).run();
+  } catch (e) {
+    console.error('Failed to release invite code after registration failure', e);
+  }
+}
+
+async function loginHandler(request, env, origin) {
+  const body = await parseJsonBody(request);
+  if (!body) return json({ error: 'Invalid JSON body' }, 400, origin);
+
+  const username = normalizeUsername(body.username);
+  const password = body.password;
+  if (!USERNAME_RE.test(username) || typeof password !== 'string') {
+    return json({ error: 'Invalid username or password' }, 401, origin);
+  }
+
+  const user = await env.DB.prepare(`
+    SELECT id, username, password_hash, password_salt, password_iterations, disabled
+    FROM users
+    WHERE username = ?
+  `).bind(username).first();
+
+  if (!user || Number(user.disabled) === 1) {
+    return json({ error: 'Invalid username or password' }, 401, origin);
+  }
+
+  const validPassword = await verifyPassword(password, user);
+  if (!validPassword) {
+    return json({ error: 'Invalid username or password' }, 401, origin);
+  }
+
+  const session = await createSessionForUser(user.id, request, env);
+  return json({
+    user: authUserPayload(user),
+    token: session.token,
+    expiresAt: session.expiresAt,
+  }, 200, origin);
+}
+
+async function logoutHandler(request, env, origin) {
+  const token = getBearerToken(request);
+  if (!token) return json({ error: 'Unauthorized' }, 401, origin);
+
+  const tokenHash = await sha256Hex(token);
+  await env.DB.prepare(`
+    UPDATE sessions
+    SET revoked_at = COALESCE(revoked_at, ?)
+    WHERE token_hash = ?
+  `).bind(Date.now(), tokenHash).run();
+
+  return json({ ok: true }, 200, origin);
+}
+
+async function meHandler(request, env, origin) {
+  const sessionUser = await requireSessionUser(request, env, origin);
+  if (sessionUser.response) return sessionUser.response;
+
+  return json({
+    user: authUserPayload(sessionUser.user),
+    expiresAt: sessionUser.session.expiresAt,
+  }, 200, origin);
+}
+
 // ---- 辅助：分批执行，避免超过 D1 50 查询限制 ----
 async function batchInsert(bindings, db) {
   // bindings: Array<Statement>
@@ -253,9 +553,64 @@ async function batchInsert(bindings, db) {
   }
 }
 
+async function versionHandler(userId, env, origin, ctx) {
+  const versionStr = await env.SYNC_KV.get(`version:${userId}`);
+  const version = versionStr ? Number(versionStr) : Date.now();
+
+  return json({ version }, 200, origin);
+}
+
+async function uploadImageHandler(request, userId, env, origin) {
+  const contentType = request.headers.get('Content-Type') || 'application/octet-stream';
+  const key = normalizeImageKey(request.headers.get('X-Image-Key') || crypto.randomUUID());
+  if (!key) return json({ error: 'Invalid image key' }, 400, origin);
+
+  try {
+    await env.IMAGES_BUCKET.put(userImageObjectKey(userId, key), request.body, {
+      httpMetadata: { contentType },
+    });
+    return json({ key }, 201, origin);
+  } catch (e) {
+    return json({ error: e.message }, 500, origin);
+  }
+}
+
+function imageResponse(object, origin) {
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set('etag', object.httpEtag);
+  const cors = makeCorsHeaders(origin);
+  Object.entries(cors).forEach(([key, value]) => headers.set(key, value));
+  headers.set('Cache-Control', 'private, max-age=31536000');
+  headers.set('Vary', 'Authorization');
+  return new Response(object.body, { headers });
+}
+
+async function getImageHandler(key, userId, env, origin) {
+  if (!key) return text('Missing or invalid key', 400, origin);
+
+  try {
+    const object = await env.IMAGES_BUCKET.get(userImageObjectKey(userId, key));
+    if (!object) return text('Not found', 404, origin);
+    return imageResponse(object, origin);
+  } catch (e) {
+    return text('Error fetching image', 500, origin);
+  }
+}
+
+async function deleteImageHandler(key, userId, env, origin) {
+  if (!key) return json({ error: 'Missing or invalid key' }, 400, origin);
+
+  try {
+    await env.IMAGES_BUCKET.delete(userImageObjectKey(userId, key));
+    return json({ success: true }, 200, origin);
+  } catch (e) {
+    return json({ error: e.message }, 500, origin);
+  }
+}
+
 // ---- 拉取 ----
-async function pullHandler(url, env, origin, ctx) {
-  const userId = url.searchParams.get('user_id') || 'default';
+async function pullHandler(url, userId, env, origin, ctx, tables) {
   const since = Number(url.searchParams.get('since') || 0);
 
   const versionStr = await env.SYNC_KV.get(`version:${userId}`);
@@ -263,11 +618,11 @@ async function pullHandler(url, env, origin, ctx) {
 
   // groups 使用全量返回，避免版本不一致导致分组缺失（如需增量可再改回 > since）
   const [ledgers, categories, groups, transactions, settings] = await Promise.all([
-    env.DB.prepare(`SELECT * FROM ledgers WHERE user_id=? AND updated_at > ?`).bind(userId, since).all(),
-    env.DB.prepare(`SELECT * FROM categories WHERE user_id=? AND updated_at > ?`).bind(userId, since).all(),
-    env.DB.prepare(`SELECT * FROM groups WHERE user_id=?`).bind(userId).all(),
-    env.DB.prepare(`SELECT * FROM transactions WHERE user_id=? AND updated_at > ?`).bind(userId, since).all(),
-    env.DB.prepare(`SELECT * FROM settings WHERE user_id=?`).bind(userId).first(),
+    env.DB.prepare(`SELECT * FROM ${tables.ledgers} WHERE user_id=? AND updated_at > ?`).bind(userId, since).all(),
+    env.DB.prepare(`SELECT * FROM ${tables.categories} WHERE user_id=? AND updated_at > ?`).bind(userId, since).all(),
+    env.DB.prepare(`SELECT * FROM ${tables.groups} WHERE user_id=?`).bind(userId).all(),
+    env.DB.prepare(`SELECT * FROM ${tables.transactions} WHERE user_id=? AND updated_at > ?`).bind(userId, since).all(),
+    env.DB.prepare(`SELECT * FROM ${tables.settings} WHERE user_id=?`).bind(userId).first(),
   ]);
 
   const lRes = ledgers.results || [];
@@ -276,10 +631,6 @@ async function pullHandler(url, env, origin, ctx) {
   const tRes = transactions.results || [];
 
   // 统计读取:
-  // D1 Read: sum of rows returned + 1 (settings)
-  // KV Read: 1 (version)
-  const d1Reads = lRes.length + cRes.length + gRes.length + tRes.length + (settings ? 1 : 0);
-  ctx.waitUntil(updateStats(env, d1Reads, 0, 1, 0));
 
   return json(
     {
@@ -296,25 +647,24 @@ async function pullHandler(url, env, origin, ctx) {
 }
 
 // ---- 推送 ----
-async function pushHandler(request, url, env, origin, ctx) {
-  const userId = url.searchParams.get('user_id') || 'default';
-  const payload = await request.json();
-  if (!payload || typeof payload !== 'object') return text('Bad payload', 400, origin);
+async function pushHandler(request, userId, env, origin, ctx, tables) {
+  const payload = await parseJsonBody(request);
+  if (!payload) return text('Bad payload', 400, origin);
 
   const now = Date.now();
 
   // Ledgers
   if (Array.isArray(payload.ledgers) && payload.ledgers.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO ledgers (id,user_id,name,theme_color,created_at,updated_at,is_deleted)
+      `INSERT INTO ${tables.ledgers} (id,user_id,name,theme_color,created_at,updated_at,is_deleted)
        VALUES (?,?,?,?,?,?,?)
-       ON CONFLICT(id) DO UPDATE SET 
+       ON CONFLICT${tables.recordConflict} DO UPDATE SET
          name=excluded.name, 
          theme_color=excluded.theme_color, 
          updated_at=excluded.updated_at, 
          is_deleted=excluded.is_deleted, 
          user_id=excluded.user_id
-       WHERE excluded.updated_at >= ledgers.updated_at`
+       WHERE excluded.updated_at >= ${tables.ledgers}.updated_at`
     );
     const binds = payload.ledgers.map(l => {
       const isDel = l.isDeleted ?? l.is_deleted ?? false;
@@ -336,9 +686,9 @@ async function pushHandler(request, url, env, origin, ctx) {
   // Categories
   if (Array.isArray(payload.categories) && payload.categories.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO categories (id,user_id,ledger_id,name,icon,type,"order",is_custom,updated_at,is_deleted)
+      `INSERT INTO ${tables.categories} (id,user_id,ledger_id,name,icon,type,"order",is_custom,updated_at,is_deleted)
        VALUES (?,?,?,?,?,?,?,?,?,?)
-       ON CONFLICT(id) DO UPDATE SET 
+       ON CONFLICT${tables.recordConflict} DO UPDATE SET
          ledger_id=excluded.ledger_id, 
          name=excluded.name, 
          icon=excluded.icon, 
@@ -348,7 +698,7 @@ async function pushHandler(request, url, env, origin, ctx) {
          updated_at=excluded.updated_at, 
          is_deleted=excluded.is_deleted, 
          user_id=excluded.user_id
-       WHERE excluded.updated_at >= categories.updated_at`
+       WHERE excluded.updated_at >= ${tables.categories}.updated_at`
     );
     const binds = payload.categories.map(c => {
       const isDel = c.isDeleted ?? c.is_deleted ?? false;
@@ -373,9 +723,9 @@ async function pushHandler(request, url, env, origin, ctx) {
   // Groups
   if (Array.isArray(payload.groups) && payload.groups.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO groups (id,user_id,ledger_id,name,category_ids,"order",updated_at,is_deleted)
+      `INSERT INTO ${tables.groups} (id,user_id,ledger_id,name,category_ids,"order",updated_at,is_deleted)
        VALUES (?,?,?,?,?,?,?,?)
-       ON CONFLICT(id) DO UPDATE SET 
+       ON CONFLICT${tables.recordConflict} DO UPDATE SET
          ledger_id=excluded.ledger_id,
          name=excluded.name,
          category_ids=excluded.category_ids,
@@ -383,7 +733,7 @@ async function pushHandler(request, url, env, origin, ctx) {
          updated_at=excluded.updated_at,
          is_deleted=excluded.is_deleted,
          user_id=excluded.user_id
-       WHERE excluded.updated_at >= groups.updated_at`
+       WHERE excluded.updated_at >= ${tables.groups}.updated_at`
     );
     const binds = payload.groups.map(g => {
       const isDel = g.isDeleted ?? g.is_deleted ?? false;
@@ -413,9 +763,9 @@ async function pushHandler(request, url, env, origin, ctx) {
   // Transactions
   if (Array.isArray(payload.transactions) && payload.transactions.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO transactions (id,user_id,ledger_id,amount,type,category_id,date,note,attachments,created_at,updated_at,is_deleted)
+      `INSERT INTO ${tables.transactions} (id,user_id,ledger_id,amount,type,category_id,date,note,attachments,created_at,updated_at,is_deleted)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-       ON CONFLICT(id) DO UPDATE SET 
+       ON CONFLICT${tables.recordConflict} DO UPDATE SET
          ledger_id=excluded.ledger_id, 
          amount=excluded.amount, 
          type=excluded.type, 
@@ -427,7 +777,7 @@ async function pushHandler(request, url, env, origin, ctx) {
          updated_at=excluded.updated_at, 
          is_deleted=excluded.is_deleted, 
          user_id=excluded.user_id
-       WHERE excluded.updated_at >= transactions.updated_at`
+       WHERE excluded.updated_at >= ${tables.transactions}.updated_at`
     );
     const binds = payload.transactions.map(t => {
       const isDel = t.isDeleted ?? t.is_deleted ?? false;
@@ -456,7 +806,7 @@ async function pushHandler(request, url, env, origin, ctx) {
     const dataStr = typeof payload.settings.data === 'string' ? payload.settings.data : JSON.stringify(payload.settings.data || {});
     const updatedAt = payload.settings.updated_at || now;
     await env.DB.prepare(
-      `INSERT INTO settings (user_id,data,updated_at) VALUES (?,?,?)
+      `INSERT INTO ${tables.settings} (user_id,data,updated_at) VALUES (?,?,?)
        ON CONFLICT(user_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at`
     ).bind(userId, dataStr, updatedAt).run();
   }
@@ -465,177 +815,8 @@ async function pushHandler(request, url, env, origin, ctx) {
   await env.SYNC_KV.put(`version:${userId}`, String(newVersion));
 
   // 统计写入: 
-  // D1 Write: ledgers + categories + groups + transactions + settings(1)
-  // KV Write: 1 (version)
-  const d1Writes = (payload.ledgers?.length || 0) + 
-                   (payload.categories?.length || 0) + 
-                   (payload.groups?.length || 0) + 
-                   (payload.transactions?.length || 0) + 
-                   (payload.settings ? 1 : 0);
   
   // 异步更新统计，不阻塞主流程
-  ctx.waitUntil(updateStats(env, 0, d1Writes, 0, 1));
 
   return json({ ok: true, version: newVersion }, 200, origin);
-}
-
-// ---- 统计工具 ----
-async function updateStats(env, d1Read, d1Write, kvRead, kvWrite) {
-  try {
-    const now = Date.now();
-    // 获取当前 UTC 日期字符串 (YYYY-MM-DD)
-    const today = new Date(now).toISOString().split('T')[0];
-
-    // 先读取现有统计
-    const current = await env.DB.prepare('SELECT * FROM usage_stats WHERE id=1').first();
-    
-    let shouldReset = false;
-    if (current && current.updated_at) {
-      const lastDate = new Date(current.updated_at).toISOString().split('T')[0];
-      if (lastDate !== today) {
-        shouldReset = true;
-      }
-    }
-
-    if (shouldReset) {
-      // 跨天重置：覆盖旧数据
-      await env.DB.prepare(`
-        INSERT INTO usage_stats (id, d1_rows_read, d1_rows_written, kv_read_ops, kv_write_ops, updated_at)
-        VALUES (1, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          d1_rows_read = excluded.d1_rows_read,
-          d1_rows_written = excluded.d1_rows_written,
-          kv_read_ops = excluded.kv_read_ops,
-          kv_write_ops = excluded.kv_write_ops,
-          updated_at = excluded.updated_at
-      `).bind(d1Read, d1Write, kvRead, kvWrite, now).run();
-    } else {
-      // 当天累加
-      await env.DB.prepare(`
-        INSERT INTO usage_stats (id, d1_rows_read, d1_rows_written, kv_read_ops, kv_write_ops, updated_at)
-        VALUES (1, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          d1_rows_read = d1_rows_read + excluded.d1_rows_read,
-          d1_rows_written = d1_rows_written + excluded.d1_rows_written,
-          kv_read_ops = kv_read_ops + excluded.kv_read_ops,
-          kv_write_ops = kv_write_ops + excluded.kv_write_ops,
-          updated_at = excluded.updated_at
-      `).bind(d1Read, d1Write, kvRead, kvWrite, now).run();
-    }
-  } catch (e) {
-    console.error('Failed to update stats', e);
-  }
-}
-
-// ---- Cloudflare API Proxy ----
-async function fetchCloudflareStats(accountId, token, kvId, origin, localD1Size) {
-  try {
-    const today = new Date().toISOString().split('T')[0];
-    const query = `
-      query {
-        viewer {
-          accounts(filter: {accountTag: "${accountId}"}) {
-            d1AnalyticsAdaptiveGroups(limit: 1, filter: {date_geq: "${today}"}) {
-              sum {
-                rowsRead
-                rowsWritten
-              }
-            }
-            d1QueriesAdaptiveGroups(limit: 1, filter: {date_geq: "${today}"}) {
-              count
-            }
-            d1StorageAdaptiveGroups(limit: 1, filter: {date_geq: "${today}"}) {
-              max {
-                databaseSizeBytes
-              }
-            }
-            ${kvId ? `
-            kvOperationsAdaptiveGroups(limit: 1000, filter: {namespaceId: "${kvId}", date_geq: "${today}"}) {
-              sum {
-                requests
-              }
-              dimensions {
-                actionType
-              }
-            }
-            kvStorageAdaptiveGroups(limit: 1, filter: {namespaceId: "${kvId}", date_geq: "${today}"}) {
-              max {
-                byteCount
-              }
-            }
-            ` : ''}
-          }
-        }
-      }
-    `;
-
-    const res = await fetch('https://api.cloudflare.com/client/v4/graphql', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ query }),
-    });
-
-    if (!res.ok) {
-      return json({ error: 'Failed to fetch from Cloudflare API' }, 500, origin);
-    }
-
-    const data = await res.json();
-    const accountData = data?.data?.viewer?.accounts?.[0];
-    
-    if (!accountData) {
-      return json({ error: 'No account data found' }, 404, origin);
-    }
-
-    // Parse D1
-    const d1Sum = accountData.d1AnalyticsAdaptiveGroups?.[0]?.sum || {};
-    const d1Read = d1Sum.rowsRead || 0;
-    const d1Write = d1Sum.rowsWritten || 0;
-    
-    const d1Queries = accountData.d1QueriesAdaptiveGroups?.[0]?.count || 0;
-
-    // Parse D1 Storage (Use API value if available, otherwise fallback to local)
-    let d1Storage = localD1Size;
-    if (accountData.d1StorageAdaptiveGroups?.[0]) {
-        d1Storage = accountData.d1StorageAdaptiveGroups[0].max?.databaseSizeBytes || localD1Size;
-    }
-
-    // Parse KV
-    let kvRead = 0;
-    let kvWrite = 0;
-    let kvStorage = 0;
-
-    if (accountData.kvOperationsAdaptiveGroups) {
-      for (const g of accountData.kvOperationsAdaptiveGroups) {
-        const type = (g.dimensions?.actionType || '').toLowerCase();
-        const count = g.sum?.requests || 0;
-        // KV Free Tier: Read (100k), Write/Delete/List (1k)
-        // Group 'read'/'get' as Read. Group 'write'/'put'/'delete'/'list' as Write.
-        if (['read', 'get'].includes(type)) kvRead += count;
-        else kvWrite += count;
-      }
-    }
-
-    if (accountData.kvStorageAdaptiveGroups?.[0]) {
-      kvStorage = accountData.kvStorageAdaptiveGroups[0].max?.byteCount || 0;
-    }
-
-    return json({
-      id: 0,
-      d1_rows_read: d1Read,
-      d1_rows_written: d1Write,
-      d1_queries: d1Queries,
-      kv_read_ops: kvRead,
-      kv_write_ops: kvWrite,
-      updated_at: Date.now(),
-      d1_storage_bytes: d1Storage,
-      kv_storage_bytes: kvStorage,
-      note: "数据来源：Cloudflare 官方 API"
-    }, 200, origin);
-
-  } catch (e) {
-    return json({ error: e.message }, 500, origin);
-  }
 }

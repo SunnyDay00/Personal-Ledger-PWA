@@ -1,42 +1,24 @@
 import { db, dbAPI } from './db';
 import { generateId } from '../utils';
+import { FIXED_SYNC_ENDPOINT } from '../constants';
 
 const DEFAULT_CACHE_LIMIT = 200 * 1024 * 1024; // 200MB
 
 export const imageService = {
-  // ... uploadImage (keep existing logic or copy it here if I replace whole file) ...
-  // Wait, I am using replace_file_content, so I need to be careful.
-  // I will assume uploadImage is fine. I will rewrite fetchImageBlob and add helper methods.
-
   async uploadImage(blob: Blob): Promise<string> {
-    // Legacy direct upload method, keeping for reference or explicit sync
-    const key = generateId(); // Use client ID
+    const key = generateId();
     return this.uploadImageWithKey(key, blob);
   },
 
   async uploadImageWithKey(key: string, blob: Blob): Promise<string> {
       const settings = await dbAPI.getSettings();
-      const endpoint = settings?.syncEndpoint;
-      const token = settings?.syncToken;
+      const token = settings?.authMode === 'authenticated' ? settings.authSession?.token : undefined;
   
-      if (!endpoint || !token) {
-        throw new Error("请先配置云端同步信息 (Endpoint/Token)");
+      if (!token) {
+        throw new Error("请先登录账号后同步图片");
       }
   
-      const workerUrl = endpoint.replace(/\/$/, '');
-      
-      // Upload with PUT to specify key (or POST if Worker updated to accept key, but currently Worker generates random UUID)
-      // WORKER CHANGE REQUIRED: We need Worker to accept a key, OR strictly use client-generated keys.
-      // Current Worker: const key = crypto.randomUUID(); -> It ignores client key.
-      // PROBLEM: To support offline, we MUST generate key on client.
-      // SOLUTION: We will change `uploadImage` to use `PUT /image/:key` if we want to force key, OR `POST` with a header?
-      // Actually, standard R2 / Worker pattern often allows PUT. 
-      // Let's assume for this "Offline" feature we will rely on a new Worker endpoint or modification to POST logic?
-      // NO, simpler: The Client generates UUID. The Worker *should* accept it.
-      // But currently Worker lines 176-180: const key = crypto.randomUUID();
-      // I MUST UPDATE WORKER.JS FIRST to accept key from header or URL.
-      
-      // Let's use a custom header 'X-Image-Key' for the POST request to hint the key.
+      const workerUrl = FIXED_SYNC_ENDPOINT.replace(/\/$/, '');
       
       const res = await fetch(`${workerUrl}/upload/image`, {
         method: 'POST',
@@ -54,9 +36,8 @@ export const imageService = {
       }
   
       const data = await res.json();
-      const finalKey = data.key; // Should match our key if Worker updated
+      const finalKey = data.key;
       
-      // Cache locally
       await this.cacheImage(finalKey, blob);
       
       return finalKey;
@@ -64,15 +45,14 @@ export const imageService = {
 
   async deleteRemoteImage(key: string): Promise<void> {
     const settings = await dbAPI.getSettings();
-    const endpoint = settings?.syncEndpoint;
-    const token = settings?.syncToken;
+    const token = settings?.authMode === 'authenticated' ? settings.authSession?.token : undefined;
 
-    if (!endpoint || !token) {
-        console.warn("Skipping remote delete: No sync config");
+    if (!token) {
+        console.warn("Skipping remote delete: not authenticated");
         return;
     }
 
-    const workerUrl = endpoint.replace(/\/$/, '');
+    const workerUrl = FIXED_SYNC_ENDPOINT.replace(/\/$/, '');
     try {
         const res = await fetch(`${workerUrl}/image/${key}`, {
             method: 'DELETE',
@@ -135,12 +115,11 @@ export const imageService = {
 
     // 2. Fetch Remote
     const settings = await dbAPI.getSettings();
-    const endpoint = settings?.syncEndpoint;
-    const token = settings?.syncToken;
+    const token = settings?.authMode === 'authenticated' ? settings.authSession?.token : undefined;
 
-    if (!endpoint || !token) throw new Error("Missing sync config");
+    if (!token) throw new Error("请先登录账号后下载云端图片");
 
-    const workerUrl = endpoint.replace(/\/$/, '');
+    const workerUrl = FIXED_SYNC_ENDPOINT.replace(/\/$/, '');
     const res = await fetch(`${workerUrl}/image/${key}`, {
       method: 'GET',
       headers: {

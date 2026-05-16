@@ -12,9 +12,10 @@ import { format } from 'date-fns';
 import { SyncLogModal } from './SyncLogModal';
 import { Ledger, Category } from '../types';
 import { feedback } from '../services/feedback';
-import { UsageStatsModal } from './UsageStatsModal';
 import { imageService } from '../services/imageService';
 import { normalizeAppSettings, normalizeBackupAutoEnabled, normalizeBackupIntervalDays, normalizeBackupReminderDays } from '../services/settingsUtils';
+import { AuthPanel } from './AuthPanel';
+import { getCloudVersion } from '../services/d1Sync';
 
 type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'history' | 'layout' | 'theme' | 'about' | 'storage';
 
@@ -51,7 +52,7 @@ const SettingsItem: React.FC<{ icon: string; label: string; value?: string; onCl
 );
 
 export const SettingsView: React.FC = () => {
-  const { state, dispatch, manualBackup, restoreFromCloud, smartImportCsv, manualCloudSync, resetApp, addLedger } = useApp();
+  const { state, dispatch, manualBackup, restoreFromCloud, smartImportCsv, manualCloudSync, resetApp, addLedger, logoutAccount } = useApp();
   const [page, setPage] = useState<SettingsPage>('main');
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -66,9 +67,6 @@ export const SettingsView: React.FC = () => {
   const [isTestingConnection, setIsTestingConnection] = useState(false);
 
   const [d1Form, setD1Form] = useState({
-    endpoint: state.settings.syncEndpoint || '',
-    token: state.settings.syncToken || '',
-    userId: state.settings.syncUserId || 'default',
     syncDebounceSeconds: state.settings.syncDebounceSeconds ?? 3,
     versionCheckIntervalFg: state.settings.versionCheckIntervalFg ?? 10,
     versionCheckIntervalBg: state.settings.versionCheckIntervalBg ?? 20,
@@ -79,9 +77,11 @@ export const SettingsView: React.FC = () => {
   const [autoBackupDays, setAutoBackupDays] = useState<number>(normalizeBackupIntervalDays(state.settings.backupIntervalDays));
   const [exportStart, setExportStart] = useState(state.settings.exportStartDate || '');
   const [exportEnd, setExportEnd] = useState(state.settings.exportEndDate || '');
+  const lastAutoBackupLabel = state.settings.lastAutoBackupTime
+    ? format(state.settings.lastAutoBackupTime, 'yyyy/MM/dd HH:mm')
+    : '暂无';
 
   const [showSyncLog, setShowSyncLog] = useState(false);
-  const [showUsageStats, setShowUsageStats] = useState(false);
   const [showLedgerSelect, setShowLedgerSelect] = useState(false);
   const [ledgerModal, setLedgerModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; color: string }>(
     { isOpen: false, mode: 'create', name: '', color: '#007AFF' }
@@ -105,6 +105,9 @@ export const SettingsView: React.FC = () => {
   });
 
   const [cacheStats, setCacheStats] = useState({ count: 0, size: 0 });
+  const authSession = state.settings.authMode === 'authenticated' ? state.settings.authSession : undefined;
+  const isAuthenticated = !!authSession?.token;
+
   useEffect(() => {
     if (page === 'storage') {
       imageService.getCacheStats().then(setCacheStats);
@@ -169,9 +172,6 @@ export const SettingsView: React.FC = () => {
       setExportEnd(state.settings.exportEndDate || '');
     }
     setD1Form({
-      endpoint: state.settings.syncEndpoint || '',
-      token: state.settings.syncToken || '',
-      userId: state.settings.syncUserId || 'default',
       syncDebounceSeconds: state.settings.syncDebounceSeconds ?? 3,
       versionCheckIntervalFg: state.settings.versionCheckIntervalFg ?? 10,
       versionCheckIntervalBg: state.settings.versionCheckIntervalBg ?? 20,
@@ -210,27 +210,20 @@ export const SettingsView: React.FC = () => {
     }).catch(() => { });
   }, [sortedGroups.length, dispatch]);
   const handleSaveD1 = () => {
-    if (!d1Form.endpoint.trim() || !d1Form.token.trim()) {
-      window.alert('请填写同步地址和 AUTH_TOKEN');
-      return;
-    }
     dispatch({
       type: 'UPDATE_SETTINGS',
       payload: {
-        syncEndpoint: d1Form.endpoint.trim(),
-        syncToken: d1Form.token.trim(),
-        syncUserId: d1Form.userId.trim() || 'default',
         syncDebounceSeconds: Math.max(1, Number(d1Form.syncDebounceSeconds) || 3),
         versionCheckIntervalFg: Math.max(2, Number(d1Form.versionCheckIntervalFg) || 10),
         versionCheckIntervalBg: Math.max(2, Number(d1Form.versionCheckIntervalBg) || 20),
       },
     });
-    window.alert('已保存 D1/KV 同步配置');
+    window.alert('已保存同步设置');
   };
 
   const handleManualCloudSync = async () => {
-    if (!d1Form.endpoint.trim() || !d1Form.token.trim()) {
-      window.alert('请先在“云同步”里填好地址和 AUTH_TOKEN');
+    if (!isAuthenticated) {
+      window.alert('请先登录账号');
       return;
     }
     setIsManualSyncing(true);
@@ -245,25 +238,14 @@ export const SettingsView: React.FC = () => {
   };
 
   const handleTestD1Connection = async () => {
-    if (!d1Form.endpoint.trim() || !d1Form.token.trim()) {
-      window.alert('请先填写地址和 AUTH_TOKEN');
+    if (!authSession?.token) {
+      window.alert('请先登录账号');
       return;
     }
     setIsTestingConnection(true);
     try {
-      const controller = new AbortController();
-      const id = setTimeout(() => controller.abort(), 10000); // 10s timeout
-      const res = await fetch(`${d1Form.endpoint.trim().replace(/\/$/, '')}/sync/version?user_id=${encodeURIComponent(d1Form.userId || 'default')}`, {
-        headers: { 'Authorization': `Bearer ${d1Form.token.trim()}` },
-        signal: controller.signal
-      });
-      clearTimeout(id);
-      if (res.ok) {
-        const data = await res.json();
-        window.alert(`连接成功！服务器版本：${data.version}`);
-      } else {
-        window.alert(`连接失败：HTTP ${res.status}`);
-      }
+      const version = await getCloudVersion(authSession.token);
+      window.alert(`连接成功！服务器版本：${version}`);
     } catch (e: any) {
       window.alert(`连接出错：${e.message || '未知错误'}`);
     } finally {
@@ -624,7 +606,7 @@ export const SettingsView: React.FC = () => {
     <>
       <div className="h-4"></div>
       <SettingsGroup title="同步与备份">
-        <SettingsItem icon="Cloud" label="云同步与备份" value={state.settings.syncEndpoint ? '已配置' : '未配置'} onClick={() => setPage('security')} />
+        <SettingsItem icon="Cloud" label="云同步与备份" value={isAuthenticated ? authSession?.user.username : '本地模式'} onClick={() => setPage('security')} />
         <SettingsItem icon="FileText" label="同步日志" onClick={() => setShowSyncLog(true)} isLast />
       </SettingsGroup>
 
@@ -854,47 +836,31 @@ export const SettingsView: React.FC = () => {
       <div className="bg-white dark:bg-zinc-900 rounded-2xl mx-4 shadow-sm border border-ios-border p-4 space-y-4">
         <div className="flex items-center justify-between">
           <div>
-            <div className="font-semibold">CloudFlare 云同步</div>
-            <p className="text-xs text-ios-subtext">填写 Worker 地址和 AUTH_TOKEN，修改数据自动同步，也可手动同步。</p>
+            <div className="font-semibold">账号同步</div>
           </div>
-          <span className="text-xs text-ios-subtext">{state.settings.syncEndpoint ? '已配置' : '未配置'}</span>
+          <span className="text-xs text-ios-subtext">{isAuthenticated ? '已登录' : '本地模式'}</span>
         </div>
 
-        <form onSubmit={(e) => e.preventDefault()} className="space-y-3">
-          <div>
-            <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">同步地址</label>
-            <input
-              type="text"
-              name="d1-endpoint"
-              placeholder="https://sync.xxx.workers.dev"
-              className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
-              value={d1Form.endpoint}
-              onChange={(e) => setD1Form({ ...d1Form, endpoint: e.target.value })}
-            />
-          </div>
-          <div>
-            <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">AUTH_TOKEN</label>
-            <input
-              type="password"
-              name="d1-token"
-              placeholder="云端设置的密钥"
-              className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
-              value={d1Form.token}
-              onChange={(e) => setD1Form({ ...d1Form, token: e.target.value })}
-            />
-          </div>
-          <div>
-            <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">用户标识（多设备保持一致）</label>
-            <input
-              type="text"
-              name="d1-user"
-              placeholder="default"
-              className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
-              value={d1Form.userId}
-              onChange={(e) => setD1Form({ ...d1Form, userId: e.target.value })}
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
+        {isAuthenticated ? (
+          <div className="space-y-4">
+            <div className="rounded-xl bg-gray-50 dark:bg-zinc-800 p-3 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-ios-text">{authSession?.user.username}</p>
+                <p className="text-xs text-ios-subtext">到期：{authSession?.expiresAt ? format(authSession.expiresAt, 'yyyy/MM/dd HH:mm') : '-'}</p>
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!window.confirm('退出登录后不会删除本地账本数据，确认退出？')) return;
+                  await logoutAccount();
+                }}
+                className="px-3 py-2 rounded-xl bg-red-500/10 text-red-500 text-xs font-medium active:scale-95 transition-transform"
+              >
+                退出登录
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">自动同步延时（秒）</label>
               <input
@@ -925,18 +891,9 @@ export const SettingsView: React.FC = () => {
                 onChange={(e) => setD1Form({ ...d1Form, versionCheckIntervalBg: Number(e.target.value) || 0 })}
               />
             </div>
-            <div className="flex items-end">
-              <button
-                type="button"
-                onClick={() => setShowUsageStats(true)}
-                className="w-full h-[46px] bg-gray-100 dark:bg-zinc-800 text-ios-text text-sm font-medium rounded-xl active:bg-gray-200 dark:active:bg-zinc-700 transition-colors flex items-center justify-center gap-2"
-              >
-                <Icon name="Database" className="w-4 h-4" />
-                <span>数据库用量</span>
-              </button>
-            </div>
           </div>
-          <div className="flex gap-3 pt-2">
+
+          <div className="grid grid-cols-2 gap-3 pt-2">
             <button
               type="button"
               disabled={isTestingConnection}
@@ -945,7 +902,7 @@ export const SettingsView: React.FC = () => {
             >
               {isTestingConnection ? '测试中...' : '测试连接'}
             </button>
-            <CloudSyncButton className="!p-3 !bg-gray-100 dark:!bg-zinc-800 !rounded-xl !shadow-none !w-auto" />
+            <CloudSyncButton showLabel className="!p-3 !bg-gray-100 dark:!bg-zinc-800 !rounded-xl !shadow-none !w-full" />
             <button
               type="button"
               disabled={isManualSyncing}
@@ -959,18 +916,28 @@ export const SettingsView: React.FC = () => {
               onClick={handleSaveD1}
               className="flex-1 py-3 bg-ios-primary text-white font-medium rounded-xl active:scale-95 transition-transform shadow-lg shadow-ios-primary/20"
             >
-              保存配置
+              保存设置
             </button>
           </div>
-        </form>
+        </div>
+        ) : (
+          <div className="space-y-4">
+            <AuthPanel />
+            <p className="text-xs text-ios-subtext">未登录时应用保持本地模式，账目会继续保存在本机 IndexedDB，不会尝试 D1 同步。</p>
+          </div>
+        )}
       </div>
 
       <div className="bg-white dark:bg-zinc-900 rounded-2xl mx-4 mt-6 shadow-sm border border-ios-border p-4 space-y-4">
         <div className="flex items-center justify-between">
           <div>
             <div className="font-semibold">WebDAV 手动备份</div>
-            <p className="text-xs text-ios-subtext">已关闭自动同步，仅保留手动备份/恢复，并可提醒。</p>
+            <p className="text-xs text-ios-subtext">支持手动备份/恢复，也可开启定期自动备份。</p>
           </div>
+        </div>
+        <div className="rounded-xl bg-gray-50 dark:bg-zinc-800 p-3 flex items-center justify-between">
+          <span className="text-sm text-ios-subtext">上次自动备份</span>
+          <span className="text-sm font-medium text-ios-text">{lastAutoBackupLabel}</span>
         </div>
 
         <form onSubmit={(e) => e.preventDefault()} className="space-y-3">
@@ -1932,13 +1899,6 @@ export const SettingsView: React.FC = () => {
       </div>
 
       {showSyncLog && <SyncLogModal onClose={() => setShowSyncLog(false)} />}
-      <UsageStatsModal
-        isOpen={showUsageStats}
-        onClose={() => setShowUsageStats(false)}
-        endpoint={d1Form.endpoint}
-        token={d1Form.token}
-        userId={d1Form.userId}
-      />
     </div>
   );
 };

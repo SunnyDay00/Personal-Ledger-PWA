@@ -2,6 +2,18 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '7.4.4',
+      date: '2026/05/16',
+      content: [
+          '新增固定域名账号同步，普通用户通过用户名和密码登录，不再输入 Worker 地址、全局同步密钥或手动 userId。',
+          'Cloudflare Worker 改为 session-token 鉴权，账本、分类、分类组、账目、设置和图片按登录账号隔离同步。',
+          '新增 D1 邀请码表注册机制，密码使用 PBKDF2-SHA-256 哈希保存，session 仅保存 token 哈希。',
+          '完成旧云端数据绑定到账号 3226991989，并移除旧 D1 表、旧 R2 根路径图片、旧 legacy 同步接口和用量统计入口。',
+          'WebDAV 地址、账号和密码/应用密钥现在会随登录账号同步，WebDAV 页面新增上次自动备份时间显示。',
+          '搜索筛选新增账本范围，可在全部账本中筛选有图账目，便于查找跨账本图片附件。'
+      ]
+  },
+  {
       version: '7.4.3',
       date: '2026/05/15',
       content: [

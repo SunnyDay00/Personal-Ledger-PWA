@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect, useMemo } from 'react';
 import { HomeView } from './HomeView';
 import { SettingsView } from './SettingsView';
 import { AddView } from './AddView';
@@ -33,6 +33,12 @@ export const Layout: React.FC = () => {
     const [initialAddData, setInitialAddData] = useState<Partial<Transaction> | undefined>(undefined);
     const [clipboardImage, setClipboardImage] = useState<string | undefined>(undefined);
     const [homeJumpTarget, setHomeJumpTarget] = useState<HomeJumpTarget | null>(null);
+    const latestTransactionDeleteId = useMemo(() => {
+        const latest = state.operationLogs[0];
+        if (!latest || latest.type !== 'delete') return '';
+        const details = latest.details || '';
+        return details.startsWith('Delete ') || details.startsWith('批量删除 ') ? latest.id : '';
+    }, [state.operationLogs]);
 
     // Handle Deep Links (URL Scheme)
     useEffect(() => {
@@ -101,10 +107,10 @@ export const Layout: React.FC = () => {
 
     // Show toast when canUndo becomes true
     useEffect(() => {
-        if (canUndo) {
+        if (canUndo && latestTransactionDeleteId) {
             setShowToast(true);
         }
-    }, [canUndo]);
+    }, [canUndo, latestTransactionDeleteId]);
 
     // Initialize AudioContext on first user interaction
     // Must be synchronous to satisfy browser autoplay policy

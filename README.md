@@ -1,6 +1,6 @@
 # Personal Ledger PWA
 
-> 当前版本：7.4.3。本版本修复 7.4.2 iOS IPA 安装后白屏问题，并保留账目本地持久化可靠性、离线待同步队列、旧 IndexedDB 迁移保护等修复。
+> 当前版本：7.4.4。本版本引入固定域名账号同步、多用户会话隔离、D1 邀请码注册、账号 WebDAV 配置同步，以及跨账本图片账目筛选。
 
 Personal Ledger PWA 是一个以本地优先为核心的个人记账应用，支持离线使用、PWA 安装、多账本管理、统计分析、图片附件、WebDAV 备份，以及基于 Cloudflare Worker + D1 + KV + R2 的可选云同步能力。
 
@@ -11,7 +11,7 @@ Personal Ledger PWA 是一个以本地优先为核心的个人记账应用，支
 - 前端基于 React + Vite 构建
 - 本地数据默认存储在 IndexedDB 中，离线可用
 - 可选接入 WebDAV 做文件备份
-- 可选接入 Cloudflare Worker 作为同步后端
+- 可选登录固定 Cloudflare 同步服务作为同步后端
 - 可通过 Capacitor 封装为 Android / iOS 应用
 
 如果不配置任何云端能力，它也可以作为纯本地记账本使用。
@@ -30,6 +30,7 @@ Personal Ledger PWA 是一个以本地优先为核心的个人记账应用，支
 - 分类明细页点击记录可编辑，长按记录可跳回首页定位该记录
 - 预算展示与进度追踪
 - 搜索、批量编辑、批量删除、撤回删除
+- 搜索筛选支持按“有图/无图”查找图片账目，并可切换当前账本或全部账本范围
 - 操作历史记录记账、分类、账本与排序等关键操作
 - JSON / CSV 导入导出
 - 首次启动引导与数据恢复
@@ -97,7 +98,7 @@ Personal Ledger PWA 是一个以本地优先为核心的个人记账应用，支
 
 应用的核心操作首先写入本地 IndexedDB，因此即使离线也能完成记账、查看、编辑与统计。新增、修改、删除和批量编辑账目时，会先等待 IndexedDB 写入成功，再更新界面并提示成功，避免出现“界面看起来保存了，但重开后丢失”的情况。
 
-账目变更还会写入本地 `syncQueue` 待同步队列。网络不可用、Worker 超时、Token 错误或云端同步失败时，账目仍保留在本地，下次启动、恢复联网或回到前台后继续尝试同步。
+账目变更还会写入本地 `syncQueue` 待同步队列。网络不可用、Worker 超时、登录会话失效或云端同步失败时，账目仍保留在本地，下次启动、恢复联网、重新登录或回到前台后继续尝试同步。
 
 本地数据库主要表包括：
 
@@ -126,13 +127,19 @@ Personal Ledger PWA 是一个以本地优先为核心的个人记账应用，支
 cloudflareworker/worker.js
 ```
 
-同步流程大致如下：
+普通用户同步流程大致如下：
 
-- 前端通过 `Authorization: Bearer AUTH_TOKEN` 调用 Worker
-- Worker 将结构化数据写入 D1
-- KV 维护每个用户的同步版本号
+- 前端同步地址固定为 `https://sync.sssr.edu.kg`
+- 用户通过用户名、密码登录；新账号需要邀请码注册
+- 登录后前端通过 `Authorization: Bearer <session-token>` 调用 Worker 的普通同步与图片接口
+- 前端普通用户不再填写 Worker 地址、旧版全局同步密钥或手动 `userId`
+- session token 存在本地 IndexedDB 的 `settings.authSession` 中，应用启动时会调用 `/auth/me` 校验；无效或过期 session 会清除并回到本地模式
+- 注册邀请码保存在 D1 `invite_codes` 表中，每个邀请码使用后会写入 `used_at` 与 `used_by_user_id`，不能再次注册
+- Worker 从 D1 `sessions` / `users` 推导当前 `user_id`，普通同步、版本探测、图片上传、图片读取和图片删除都不再信任前端传入的 `user_id`
+- Worker 将结构化数据写入 D1 的 `ledgers_v2`、`categories_v2`、`groups_v2`、`transactions_v2`、`settings_v2` 表，用户拥有的数据以 `(user_id, id)` 作为逻辑唯一键
+- KV 继续维护每个用户的同步版本号，key 为 `version:<user_id>`，其中 `user_id` 来自登录 session
 - 客户端比较版本号后执行 push / pull 同步，并把 `syncQueue` 中的待同步账目作为增量同步的兜底来源
-- 图片二进制存储在 R2，交易记录中只保存附件 key
+- 图片二进制存储在 R2，普通上传写入 `users/<user_id>/<imageKey>`，交易记录中只保存附件 key
 
 同步成功并完成云端拉取合并后，客户端才会清理本地待同步队列；同步失败不会删除队列项，也不会回滚本地账目。
 
@@ -148,11 +155,9 @@ WebDAV 方案更偏向文件式备份，主要保存：
 
 实现中使用了 ETag 乐观锁和重试逻辑，用来降低并发覆盖风险。
 
-在 iOS 原生壳中，WebDAV 备份会优先走 Capacitor 的原生 HTTP 通道，因此可以直接填写坚果云官方 WebDAV 地址而不依赖浏览器跨域能力。浏览器/PWA 端如果无法直连某些 WebDAV 服务，仍可继续使用代理方案。
+在 iOS 原生壳中，WebDAV 备份会优先走 Capacitor 的原生 HTTP 通道，因此可以直接填写坚果云官方 WebDAV 地址而不依赖浏览器跨域能力。当前 Cloudflare 登录同步 Worker 只提供账号、D1/KV 同步和 R2 图片接口，不再提供旧版同步或用量统计兼容接口。
 
 `备份提醒天数` 支持设置为 `0` 来彻底关闭提醒；应用会在读取本地设置和合并云端设置时保留这个关闭状态，避免旧的同步配置把提醒重新打开。
-
-如果浏览器无法直接访问某些 WebDAV 服务（例如坚果云），当前 Cloudflare Worker 还提供了一个可选的 `/webdav/*` 代理路由。该路由会将 `GET`、`PUT`、`DELETE`、`PROPFIND` 请求转发到坚果云 WebDAV，并透传 `Authorization`、`Depth`、`If-Match` 等备份所需请求头。
 
 ### 5. 图片附件流程
 
@@ -234,7 +239,13 @@ npm run build
 
 ### 方案二：部署 Cloudflare 同步后端
 
-如果需要 D1 + KV + R2 同步，需要部署 `cloudflareworker/` 目录中的 Worker。
+普通用户不需要在应用内配置同步地址。当前前端固定连接：
+
+```text
+https://sync.sssr.edu.kg
+```
+
+如果需要自托管同等能力，需要部署 `cloudflareworker/` 目录中的 Worker，并让固定域名或等价路由指向该 Worker。
 
 Worker 名称：
 
@@ -248,33 +259,66 @@ personal-ledger-sync
 cloudflareworker/wrangler.toml
 ```
 
-需要的绑定：
+需要的绑定和 secret：
 
 - `DB`：Cloudflare D1 数据库
 - `SYNC_KV`：Cloudflare KV 命名空间
 - `IMAGES_BUCKET`：Cloudflare R2 Bucket
-- `AUTH_TOKEN`：Worker 密钥
 
-部署命令：
+当前同步 Worker 不再需要旧版全局同步密钥。普通同步、图片上传、图片读取和图片删除全部使用登录 session token 鉴权。
+
+首次部署或补充邀请码时，先把邀请码表和初始邀请码写入 D1：
 
 ```bash
-npx wrangler secret put AUTH_TOKEN --config cloudflareworker/wrangler.toml
+npx wrangler d1 execute personal --remote --file cloudflareworker/invite-codes.sql --config cloudflareworker/wrangler.toml
+```
+
+然后部署 Worker：
+
+```bash
 npx wrangler deploy --config cloudflareworker/wrangler.toml
 ```
 
-部署完成后，在应用内配置：
+Worker 登录与账号隔离同步接口：
 
-- Worker 地址
-- `AUTH_TOKEN`
-- 多设备共用的稳定 `userId`
+- `POST /auth/register` 使用 `username`、`password`、`inviteCode` 创建受邀账号。
+- `POST /auth/login` 创建 D1-backed session，并只在响应中返回一次原始 session token。
+- `POST /auth/logout` 撤销当前 session token。
+- `GET /auth/me` 返回当前登录用户。
+- 注册要求邀请码存在于 D1 `invite_codes` 表、未使用且未禁用；注册成功后该邀请码会被标记为已使用。
+- 密码只保存为带用户独立 salt 的 PBKDF2-SHA-256 哈希，迭代次数为 100000。
+- session token 默认 30 天过期，D1 只保存 `sha256(token)`。
+- 普通 `/sync/version`、`/sync/pull`、`/sync/push`、`/upload/image`、`/image/:key` 必须使用 `Authorization: Bearer <session-token>`。
+- 普通同步接口会忽略 URL 中的 `user_id` 参数，实际用户只来自 session。
+- 新的账号隔离 D1 表为 `*_v2`，账本、分类、分组、交易均使用 `PRIMARY KEY (user_id, id)`，设置表使用 `user_id` 主键。
+- 普通 R2 图片对象写入 `users/<user_id>/<imageKey>`，读取和删除也只访问当前 session 用户作用域内的对象。
 
-如果你还需要给坚果云 WebDAV 备份做浏览器侧中转，可以直接复用同一个 Worker。部署完成后，将应用里的 WebDAV 地址改为：
+部署完成后，普通用户在应用内通过“设置 > 云同步与备份”登录或注册账号即可启用同步；前端固定使用：
 
 ```text
-https://<你的-worker-域名>/webdav
+https://sync.sssr.edu.kg
 ```
 
-此时用户名和密码仍填写你的坚果云 WebDAV 账号信息，Worker 会把备份请求中转到 `https://dav.jianguoyun.com/dav`。
+应用不会要求普通用户输入 Worker 地址、旧版全局同步密钥或 `userId`。登录获得的 session token 只保存在本地 IndexedDB 设置中，D1 同步和图片接口会自动使用该 token。未登录时应用保持本地模式，所有账目继续保存在当前设备的 IndexedDB 中，不会尝试 D1 同步。
+
+当前生产数据已从旧 D1 表和 R2 根路径迁移到账号 `3226991989` 对应的内部用户 `user_3226991989`：
+
+- 账本：`ledgers_v2`
+- 分类：`categories_v2`
+- 分类组：`groups_v2`
+- 账目：`transactions_v2`
+- 软件设置：`settings_v2`
+- 图片附件：`users/user_3226991989/<imageKey>`
+- 同步版本：`SYNC_KV` 中的 `version:user_3226991989`
+
+登录后的账号接管流程：
+
+- 客户端会先使用当前账号 session 执行一次 `since=0` 全量拉取。
+- 如果账号云端已有数据，优先把云端账本、分类、分类组、账目、设置合并到本地，不再尝试旧版云端接口。
+- 如果账号云端为空而本地已有数据，客户端会把本地账本、分类、分类组、账目和本地缓存图片加入同步队列，并作为该账号的初始云端数据推送。
+- WebDAV 地址、账号和“密码 / 应用密钥”会随账号设置同步，登录同一账号后可直接使用 WebDAV 备份配置。
+- 同步到云端的设置会剔除本地 auth/session、旧同步凭据和 Cloudflare API 配置；WebDAV 密码会写入账号云设置，便于跨设备使用。
+- 操作日志、备份日志、本地图片缓存、待上传队列只保留在本地，不作为账号业务数据写入 D1。
 
 ### 方案三：只使用 WebDAV 备份
 
@@ -283,13 +327,14 @@ https://<你的-worker-域名>/webdav
 有两种方式：
 
 - 直接填写 WebDAV 服务地址
-- 如果浏览器无法直连坚果云，则先部署上面的 Worker，再填写 `https://<你的-worker-域名>/webdav`
+- 浏览器/PWA 端如果受跨域限制，需要使用支持浏览器访问的 WebDAV 服务或另行部署专用代理；当前登录同步 Worker 不再提供 WebDAV 代理路由
 
 需要配置：
 
 - WebDAV 地址
 - 用户名
 - 密码
+- WebDAV 手动备份界面会显示上次自动备份时间；手动备份不会覆盖这个自动备份时间。
 
 ## Android 与 iOS 打包
 
@@ -337,7 +382,7 @@ build-ios-github.cmd
 - 选择 `3` 时，会立即退出脚本
 - 选择“搭建并下载”时，会列出远端分支并按编号选择
 - 选择“下载已有构建”时，会列出 GitHub 上最近成功的 iOS 构建记录，并显示构建时间、分支和运行 ID
-- 下载成功后，会优先从 GitHub 远端项目的 `package.json` 读取版本号命名文件，例如 `7.4.3` 会保存为 `builds/ios/7.4.3.ipa`；如果读取失败，则回退为 `builds/ios/run-<运行ID>.ipa`
+- 下载成功后，会优先从 GitHub 远端项目的 `package.json` 读取版本号命名文件，例如 `7.4.4` 会保存为 `builds/ios/7.4.4.ipa`；如果读取失败，则回退为 `builds/ios/run-<运行ID>.ipa`
 
 ## 使用说明
 
@@ -346,8 +391,15 @@ build-ios-github.cmd
 首次启动时，用户可以：
 
 - 创建新账本
+- 登录或注册账号以启用固定服务的云同步
+- 暂不登录，本地使用
 - 从本地 JSON 备份恢复
-- 从 Cloudflare D1 + KV 恢复
+- 登录账号后从 Cloudflare D1 + KV 恢复
+
+### 账目操作
+
+- 账目新增、编辑、删除优先写入本地 IndexedDB。
+- 删除账目或批量删除账目后会显示撤销提示；提示关闭后，再次删除会重新显示撤销入口。
 
 ### 建议的备份策略
 
@@ -357,9 +409,11 @@ build-ios-github.cmd
 
 ## 安全说明
 
-- 不要在前端跟踪文件中写死 `AUTH_TOKEN`
-- WebDAV 账号密码由用户运行时自行填写
-- Cloudflare 统计接口使用的 API 凭据应保持为用户自行管理
+- 不要在前端跟踪文件中写死 session token、账号密码或注册邀请码
+- 普通用户界面不提供 Worker 地址或手动 `userId` 输入入口
+- WebDAV 账号密码由用户运行时填写，并会随登录账号设置同步到 D1
+- Cloudflare API 配置不会作为账号云设置同步
+- Worker 不再提供旧版 `/legacy/*` 同步接口或 `/usage` 用量统计接口
 - 若要公网部署 Worker，应额外加强来源限制、密钥管理和访问控制
 
 ## 许可证

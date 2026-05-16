@@ -18,6 +18,7 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
     const [selectedGroupId, setSelectedGroupId] = useState<string>('');
     const [amountFilter, setAmountFilter] = useState<{ type: 'none' | 'gt' | 'lt'; value: string }>({ type: 'none', value: '' });
     const [imageFilter, setImageFilter] = useState<'all' | 'has_image' | 'no_image'>('all');
+    const [ledgerScope, setLedgerScope] = useState<'current' | 'all'>('current');
     const [showFilters, setShowFilters] = useState(false);
     const [previewKeys, setPreviewKeys] = useState<string[]>([]);
 
@@ -74,12 +75,13 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
     }, []);
 
     // Check if any filter is active
-    const hasActiveFilters = dateRange.start || dateRange.end || selectedType !== 'all' || selectedCategoryId || selectedGroupId || (amountFilter.type !== 'none' && amountFilter.value) || imageFilter !== 'all';
+    const hasActiveFilters = dateRange.start || dateRange.end || selectedType !== 'all' || selectedCategoryId || selectedGroupId || (amountFilter.type !== 'none' && amountFilter.value) || imageFilter !== 'all' || ledgerScope !== 'current';
 
     // Filter and search results
     const results = useMemo(() => {
-        // Start with current ledger transactions
-        let filtered = state.transactions.filter(t => t.ledgerId === state.currentLedgerId);
+        let filtered = ledgerScope === 'all'
+            ? state.transactions
+            : state.transactions.filter(t => t.ledgerId === state.currentLedgerId);
 
         // Date range filter
         if (dateRange.start) {
@@ -97,12 +99,12 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
         }
 
         // Category filter
-        if (selectedCategoryId) {
+        if (ledgerScope === 'current' && selectedCategoryId) {
             filtered = filtered.filter(t => t.categoryId === selectedCategoryId);
         }
 
         // Category group filter
-        if (selectedGroupId) {
+        if (ledgerScope === 'current' && selectedGroupId) {
             const group = state.categoryGroups.find(g => g.id === selectedGroupId);
             if (group && group.categoryIds) {
                 filtered = filtered.filter(t => group.categoryIds.includes(t.categoryId));
@@ -141,7 +143,7 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
         }
 
         return filtered.sort((a, b) => b.date - a.date);
-    }, [query, state.transactions, state.categories, state.categoryGroups, state.currentLedgerId, dateRange, selectedType, selectedCategoryId, selectedGroupId, amountFilter, imageFilter]);
+    }, [query, state.transactions, state.categories, state.categoryGroups, state.currentLedgerId, dateRange, selectedType, selectedCategoryId, selectedGroupId, amountFilter, imageFilter, ledgerScope]);
 
     const handleSearch = (term: string) => {
         setQuery(term);
@@ -157,6 +159,7 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
         setSelectedGroupId('');
         setAmountFilter({ type: 'none', value: '' });
         setImageFilter('all');
+        setLedgerScope('current');
     };
 
     return (
@@ -310,6 +313,35 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
                             </div>
                         </div>
 
+                        {/* Ledger Scope Filter */}
+                        <div>
+                            <label className="text-xs text-ios-subtext mb-1.5 block">账本范围</label>
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={() => setLedgerScope('current')}
+                                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${ledgerScope === 'current'
+                                        ? 'bg-ios-primary text-white'
+                                        : 'bg-gray-100 dark:bg-zinc-800 text-ios-text'
+                                        }`}
+                                >
+                                    当前账本
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        setLedgerScope('all');
+                                        setSelectedCategoryId('');
+                                        setSelectedGroupId('');
+                                    }}
+                                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${ledgerScope === 'all'
+                                        ? 'bg-ios-primary text-white'
+                                        : 'bg-gray-100 dark:bg-zinc-800 text-ios-text'
+                                        }`}
+                                >
+                                    全部账本
+                                </button>
+                            </div>
+                        </div>
+
                         {/* Type Filter */}
                         <div>
                             <label className="text-xs text-ios-subtext mb-1.5 block">类型</label>
@@ -349,36 +381,38 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
                         </div>
 
                         {/* Category Filter */}
-                        <div>
-                            <label className="text-xs text-ios-subtext mb-1.5 block">分类</label>
-                            <div className="flex gap-2 flex-wrap">
-                                <button
-                                    onClick={() => setSelectedCategoryId('')}
-                                    className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${!selectedCategoryId
-                                        ? 'bg-ios-primary text-white'
-                                        : 'bg-gray-100 dark:bg-zinc-800 text-ios-text'
-                                        }`}
-                                >
-                                    全部
-                                </button>
-                                {ledgerCategories.map(cat => (
+                        {ledgerScope === 'current' && (
+                            <div>
+                                <label className="text-xs text-ios-subtext mb-1.5 block">分类</label>
+                                <div className="flex gap-2 flex-wrap">
                                     <button
-                                        key={cat.id}
-                                        onClick={() => setSelectedCategoryId(cat.id)}
-                                        className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors flex items-center gap-1 ${selectedCategoryId === cat.id
+                                        onClick={() => setSelectedCategoryId('')}
+                                        className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${!selectedCategoryId
                                             ? 'bg-ios-primary text-white'
                                             : 'bg-gray-100 dark:bg-zinc-800 text-ios-text'
                                             }`}
                                     >
-                                        <Icon name={cat.icon || 'Circle'} className="w-3 h-3" />
-                                        {cat.name}
+                                        全部
                                     </button>
-                                ))}
+                                    {ledgerCategories.map(cat => (
+                                        <button
+                                            key={cat.id}
+                                            onClick={() => setSelectedCategoryId(cat.id)}
+                                            className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors flex items-center gap-1 ${selectedCategoryId === cat.id
+                                                ? 'bg-ios-primary text-white'
+                                                : 'bg-gray-100 dark:bg-zinc-800 text-ios-text'
+                                                }`}
+                                        >
+                                            <Icon name={cat.icon || 'Circle'} className="w-3 h-3" />
+                                            {cat.name}
+                                        </button>
+                                    ))}
+                                </div>
                             </div>
-                        </div>
+                        )}
 
                         {/* Category Group Filter */}
-                        {ledgerGroups.length > 0 && (
+                        {ledgerScope === 'current' && ledgerGroups.length > 0 && (
                             <div>
                                 <label className="text-xs text-ios-subtext mb-1.5 block">分类组</label>
                                 <div className="flex gap-2 flex-wrap">
