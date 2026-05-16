@@ -77,11 +77,25 @@ export const logout = async (token: string): Promise<void> => {
   }
 };
 
-export const getMe = async (token: string): Promise<MeResponse> => {
-  const res = await fetch(`${endpoint()}/auth/me`, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${token}` },
-  });
+export const getMe = async (token: string, timeoutMs = 2500): Promise<MeResponse> => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res: Response;
+  try {
+    res = await fetch(`${endpoint()}/auth/me`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    });
+  } catch (e: any) {
+    if (e?.name === 'AbortError') {
+      throw new AuthApiError('登录状态校验超时，请稍后重试', 0);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!res.ok) {
     throw new AuthApiError(await parseError(res), res.status);

@@ -133,7 +133,7 @@ cloudflareworker/worker.js
 - 用户通过用户名、密码登录；新账号需要邀请码注册
 - 登录后前端通过 `Authorization: Bearer <session-token>` 调用 Worker 的普通同步与图片接口
 - 前端普通用户不再填写 Worker 地址、旧版全局同步密钥或手动 `userId`
-- session token 存在本地 IndexedDB 的 `settings.authSession` 中，应用启动时会调用 `/auth/me` 校验；无效或过期 session 会清除并回到本地模式
+- session token 存在本地 IndexedDB 的 `settings.authSession` 中，应用启动时先恢复本地会话，随后在后台调用 `/auth/me` 校验；无效或过期 session 会清除并回到本地模式
 - 注册邀请码保存在 D1 `invite_codes` 表中，每个邀请码使用后会写入 `used_at` 与 `used_by_user_id`，不能再次注册
 - Worker 从 D1 `sessions` / `users` 推导当前 `user_id`，普通同步、版本探测、图片上传、图片读取和图片删除都不再信任前端传入的 `user_id`
 - Worker 将结构化数据写入 D1 的 `ledgers_v2`、`categories_v2`、`groups_v2`、`transactions_v2`、`settings_v2` 表，用户拥有的数据以 `(user_id, id)` 作为逻辑唯一键

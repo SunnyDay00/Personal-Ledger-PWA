@@ -227,29 +227,13 @@ const withoutLocalAuthSecrets = (settings: AppSettings): Partial<AppSettings> =>
     return syncable as Partial<AppSettings>;
 };
 
-const validateStoredAuthSettings = async (settings: AppSettings): Promise<AppSettings> => {
+const restoreStoredAuthSettings = (settings: AppSettings): AppSettings => {
     const session = settings.authSession;
     if (!session?.token || session.expiresAt <= Date.now()) {
         return normalizeAppSettings({ ...settings, authSession: undefined, authMode: 'guest' }, DEFAULT_SETTINGS);
     }
 
-    try {
-        const me = await getMe(session.token);
-        return normalizeAppSettings({
-            ...settings,
-            authMode: 'authenticated',
-            authSession: {
-                user: me.user,
-                token: session.token,
-                expiresAt: me.expiresAt,
-            },
-        }, DEFAULT_SETTINGS);
-    } catch (e) {
-        if (isUnauthorizedError(e)) {
-            return normalizeAppSettings({ ...settings, authSession: undefined, authMode: 'guest' }, DEFAULT_SETTINGS);
-        }
-        return normalizeAppSettings({ ...settings, authMode: 'authenticated' }, DEFAULT_SETTINGS);
-    }
+    return normalizeAppSettings({ ...settings, authMode: 'authenticated' }, DEFAULT_SETTINGS);
 };
 
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
@@ -262,7 +246,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const accountTakeoverRunningRef = useRef(false);
     const [isRestoring, setIsRestoring] = useState(false);
     const versionCheckTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const versionCheckDelayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const versionVisibilityDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const versionCheckRunningRef = useRef(false);
+    const authValidationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const validatedAuthTokenRef = useRef<string | null>(null);
     const autoBackupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const autoBackupRunningRef = useRef(false);
     const autoBackupRef = useRef(false);
@@ -316,7 +304,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     groupStoreAvailableRef.current ? dbAPI.getCategoryGroups() : Promise.resolve([])
                 ]);
 
-                const loadedSettings = await validateStoredAuthSettings(normalizeAppSettings(settings, DEFAULT_SETTINGS));
+                const loadedSettings = restoreStoredAuthSettings(normalizeAppSettings(settings, DEFAULT_SETTINGS));
                 if (loadedSettings.enableCloudSync === undefined) loadedSettings.enableCloudSync = false;
 
                 const lastLedgerId = typeof window !== 'undefined' ? localStorage.getItem('lastLedgerId') : null;
@@ -408,11 +396,60 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const clearAuthSession = useCallback(async () => {
         if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
         if (versionCheckTimerRef.current) clearInterval(versionCheckTimerRef.current);
+        if (versionCheckDelayTimerRef.current) clearTimeout(versionCheckDelayTimerRef.current);
+        if (versionVisibilityDebounceRef.current) clearTimeout(versionVisibilityDebounceRef.current);
+        if (authValidationTimerRef.current) clearTimeout(authValidationTimerRef.current);
+        validatedAuthTokenRef.current = null;
         await persistAuthSettings({
             authSession: undefined,
             authMode: 'guest',
         });
     }, [persistAuthSettings]);
+
+    useEffect(() => {
+        if (!isDBLoaded) return;
+
+        const session = state.settings.authSession;
+        if (state.settings.authMode !== 'authenticated' || !session?.token) {
+            validatedAuthTokenRef.current = null;
+            return;
+        }
+
+        if (validatedAuthTokenRef.current === session.token) return;
+        if (authValidationTimerRef.current) clearTimeout(authValidationTimerRef.current);
+
+        authValidationTimerRef.current = setTimeout(async () => {
+            try {
+                const me = await getMe(session.token);
+                validatedAuthTokenRef.current = session.token;
+
+                const current = stateRef.current.settings.authSession;
+                if (current?.token !== session.token) return;
+
+                if (current.user.id !== me.user.id || current.user.username !== me.user.username || current.expiresAt !== me.expiresAt) {
+                    await persistAuthSettings({
+                        authSession: {
+                            user: me.user,
+                            token: session.token,
+                            expiresAt: me.expiresAt,
+                        },
+                        authMode: 'authenticated',
+                    });
+                }
+            } catch (e) {
+                if (isUnauthorizedError(e)) {
+                    await clearAuthSession();
+                    dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: '登录已失效，请重新登录' });
+                    return;
+                }
+                console.warn('Background auth validation skipped', e);
+            }
+        }, 3000);
+
+        return () => {
+            if (authValidationTimerRef.current) clearTimeout(authValidationTimerRef.current);
+        };
+    }, [isDBLoaded, state.settings.authMode, state.settings.authSession?.token, clearAuthSession, persistAuthSettings]);
 
     // 便于在浏览器 Console 调试：window.__state
     useEffect(() => {
@@ -1184,6 +1221,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // Version lightweight polling
     useEffect(() => {
         if (versionCheckTimerRef.current) clearInterval(versionCheckTimerRef.current);
+        if (versionCheckDelayTimerRef.current) clearTimeout(versionCheckDelayTimerRef.current);
+        if (versionVisibilityDebounceRef.current) clearTimeout(versionVisibilityDebounceRef.current);
+        if (!isDBLoaded) return;
         const { authSession, authMode, versionCheckIntervalFg, versionCheckIntervalBg } = state.settings;
         if (authMode !== 'authenticated' || !authSession?.token || !state.isOnline) return;
         const fg = Math.max(3, versionCheckIntervalFg ?? 10);
@@ -1220,21 +1260,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
         };
 
-        // initial immediate probe
-        checkVersion();
+        const scheduleDelayedCheck = (delayMs: number) => {
+            if (versionCheckDelayTimerRef.current) clearTimeout(versionCheckDelayTimerRef.current);
+            versionCheckDelayTimerRef.current = setTimeout(checkVersion, delayMs);
+        };
+
+        scheduleDelayedCheck(5000);
         versionCheckTimerRef.current = setInterval(checkVersion, getInterval());
 
         const handleVisibility = () => {
             if (versionCheckTimerRef.current) clearInterval(versionCheckTimerRef.current);
+            if (versionVisibilityDebounceRef.current) clearTimeout(versionVisibilityDebounceRef.current);
             versionCheckTimerRef.current = setInterval(checkVersion, getInterval());
-            if (document.visibilityState === 'visible') checkVersion();
+            if (document.visibilityState === 'visible') {
+                versionVisibilityDebounceRef.current = setTimeout(checkVersion, 1500);
+            }
         };
         document.addEventListener('visibilitychange', handleVisibility);
         return () => {
             if (versionCheckTimerRef.current) clearInterval(versionCheckTimerRef.current);
+            if (versionCheckDelayTimerRef.current) clearTimeout(versionCheckDelayTimerRef.current);
+            if (versionVisibilityDebounceRef.current) clearTimeout(versionVisibilityDebounceRef.current);
             document.removeEventListener('visibilitychange', handleVisibility);
         };
-    }, [state.settings.authMode, state.settings.authSession?.token, state.settings.versionCheckIntervalFg, state.settings.versionCheckIntervalBg, state.isOnline, performCloudSync, clearAuthSession]);
+    }, [isDBLoaded, state.settings.authMode, state.settings.authSession?.token, state.settings.versionCheckIntervalFg, state.settings.versionCheckIntervalBg, state.isOnline, performCloudSync, clearAuthSession]);
 
     // 自动备份：先同步 D1/KV 再执行 WebDAV 备份，并记录日志
     const runAutoBackup = useCallback(async () => {
@@ -1503,7 +1552,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 </div>
             );
         }
-        return null;
+        return (
+            <div className="min-h-screen bg-ios-bg text-ios-text flex items-center justify-center p-6">
+                <div className="flex flex-col items-center gap-3 text-ios-subtext">
+                    <div className="h-6 w-6 rounded-full border-2 border-ios-border border-t-ios-primary animate-spin" />
+                    <p className="text-sm">正在打开账本...</p>
+                </div>
+            </div>
+        );
     }
 
     return (

@@ -5,9 +5,19 @@ import Capacitor
 class AppDelegate: UIResponder, UIApplicationDelegate {
 
     var window: UIWindow?
+    private let addTransactionShortcutType = "add_transaction"
+    private let addTransactionShortcutURL = URL(string: "personalledger://add")!
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // Override point for customization after application launch.
+        if let shortcutItem = launchOptions?[.shortcutItem] as? UIApplicationShortcutItem,
+           shortcutItem.type == addTransactionShortcutType {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                _ = self.openAddTransactionShortcut(application)
+            }
+            return false
+        }
         return true
     }
 
@@ -47,19 +57,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func application(_ application: UIApplication, performActionFor shortcutItem: UIApplicationShortcutItem, completionHandler: @escaping (Bool) -> Void) {
-        if shortcutItem.type == "add_transaction" {
-            if let url = URL(string: "personalledger://add") {
-                // Determine if we should open it immediately or wait
-                // In iOS 13+, SceneDelegate might handle this, but for Capacitor apps often AppDelegate is enough
-                UIApplication.shared.open(url, options: [:]) { success in
-                    completionHandler(success)
-                }
-            } else {
-                completionHandler(false)
-            }
+        if shortcutItem.type == addTransactionShortcutType {
+            completionHandler(openAddTransactionShortcut(application))
         } else {
             completionHandler(false)
         }
+    }
+
+    private func openAddTransactionShortcut(_ application: UIApplication) -> Bool {
+        return ApplicationDelegateProxy.shared.application(application, open: addTransactionShortcutURL, options: [:])
     }
 
 }

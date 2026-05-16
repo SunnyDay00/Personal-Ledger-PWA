@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useMemo } from 'react';
+﻿import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { HomeView } from './HomeView';
 import { SettingsView } from './SettingsView';
 import { AddView } from './AddView';
@@ -33,6 +33,9 @@ export const Layout: React.FC = () => {
     const [initialAddData, setInitialAddData] = useState<Partial<Transaction> | undefined>(undefined);
     const [clipboardImage, setClipboardImage] = useState<string | undefined>(undefined);
     const [homeJumpTarget, setHomeJumpTarget] = useState<HomeJumpTarget | null>(null);
+    const ledgersRef = useRef(state.ledgers);
+    const categoriesRef = useRef(state.categories);
+    const currentLedgerIdRef = useRef(state.currentLedgerId);
     const latestTransactionDeleteId = useMemo(() => {
         const latest = state.operationLogs[0];
         if (!latest || latest.type !== 'delete') return '';
@@ -40,70 +43,94 @@ export const Layout: React.FC = () => {
         return details.startsWith('Delete ') || details.startsWith('批量删除 ') ? latest.id : '';
     }, [state.operationLogs]);
 
+    useEffect(() => {
+        ledgersRef.current = state.ledgers;
+        categoriesRef.current = state.categories;
+        currentLedgerIdRef.current = state.currentLedgerId;
+    }, [state.ledgers, state.categories, state.currentLedgerId]);
+
+    const openAddFromUrl = useCallback((urlStr?: string) => {
+        if (!urlStr || !urlStr.includes('add')) return;
+
+        try {
+            // Example: personalledger://add?amount=100&note=Lunch&type=expense&category=Food
+            const url = new URL(urlStr);
+            const params = url.searchParams;
+
+            const amount = parseFloat(params.get('amount') || '0');
+            const note = params.get('note') ? decodeURIComponent(params.get('note')!) : '';
+            const typeParam = params.get('type');
+            const type = (typeParam === 'income' || typeParam === 'expense') ? typeParam : 'expense';
+
+            const categoryName = params.get('category') ? decodeURIComponent(params.get('category')!) : null;
+            const ledgerName = params.get('ledger') ? decodeURIComponent(params.get('ledger')!) : null;
+
+            let categoryId: string | undefined;
+            let ledgerId: string | undefined;
+
+            if (ledgerName) {
+                const ledger = ledgersRef.current.find(l => l.name === ledgerName);
+                if (ledger) ledgerId = ledger.id;
+            }
+
+            const targetLedgerId = ledgerId || currentLedgerIdRef.current;
+            if (categoryName) {
+                const category = categoriesRef.current.find(c =>
+                    c.name === categoryName &&
+                    c.ledgerId === targetLedgerId &&
+                    c.type === type
+                );
+                if (category) categoryId = category.id;
+            }
+
+            setInitialAddData({
+                amount: amount > 0 ? amount : undefined,
+                note: note || undefined,
+                type,
+                categoryId,
+                ledgerId,
+                date: Date.now()
+            });
+
+            setShowAdd(true);
+            feedback.play('success');
+
+            Clipboard.read().then(({ type, value }) => {
+                if (type === 'image' && value) {
+                    setClipboardImage(value);
+                } else {
+                    setClipboardImage(undefined);
+                }
+            }).catch(() => setClipboardImage(undefined));
+        } catch (e) {
+            console.error('Error parsing URL:', e);
+        }
+    }, []);
+
     // Handle Deep Links (URL Scheme)
     useEffect(() => {
+        let removeListener: (() => void) | undefined;
+        let cancelled = false;
+
         App.addListener('appUrlOpen', (event: URLOpenListenerEvent) => {
-            try {
-                // Example: personalledger://add?amount=100&note=Lunch&type=expense&category=Food
-                const urlStr = event.url;
-                if (!urlStr.includes('add')) return;
-
-                const url = new URL(urlStr);
-                const params = url.searchParams;
-
-                const amount = parseFloat(params.get('amount') || '0');
-                const note = params.get('note') ? decodeURIComponent(params.get('note')!) : '';
-                const typeParam = params.get('type');
-                const type = (typeParam === 'income' || typeParam === 'expense') ? typeParam : 'expense';
-
-                const categoryName = params.get('category') ? decodeURIComponent(params.get('category')!) : null;
-                const ledgerName = params.get('ledger') ? decodeURIComponent(params.get('ledger')!) : null;
-
-                let categoryId: string | undefined;
-                let ledgerId: string | undefined;
-
-                // Find Ledger
-                if (ledgerName) {
-                    const ledger = state.ledgers.find(l => l.name === ledgerName);
-                    if (ledger) ledgerId = ledger.id;
-                }
-
-                // Find Category (in target ledger or current)
-                const targetLedgerId = ledgerId || state.currentLedgerId;
-                if (categoryName) {
-                    const category = state.categories.find(c =>
-                        c.name === categoryName &&
-                        c.ledgerId === targetLedgerId &&
-                        c.type === type
-                    );
-                    if (category) categoryId = category.id;
-                }
-
-                setInitialAddData({
-                    amount: amount > 0 ? amount : undefined,
-                    note: note || undefined,
-                    type,
-                    categoryId,
-                    ledgerId,
-                    date: Date.now() // Default to now
-                });
-
-                setShowAdd(true);
-                feedback.play('success');
-
-                // Check clipboard
-                Clipboard.read().then(({ type, value }) => {
-                    if (type === 'image' && value) {
-                        setClipboardImage(value);
-                    } else {
-                        setClipboardImage(undefined);
-                    }
-                }).catch(() => setClipboardImage(undefined));
-            } catch (e) {
-                console.error('Error parsing URL:', e);
+            openAddFromUrl(event.url);
+        }).then(handle => {
+            if (cancelled) {
+                handle.remove();
+            } else {
+                removeListener = () => handle.remove();
             }
         });
-    }, [state.ledgers, state.categories, state.currentLedgerId]);
+
+        App.getLaunchUrl()
+            .then(result => openAddFromUrl(result?.url))
+            .catch(() => undefined);
+
+        return () => {
+            cancelled = true;
+            removeListener?.();
+        };
+    }, [openAddFromUrl]);
 
     // Show toast when canUndo becomes true
     useEffect(() => {
