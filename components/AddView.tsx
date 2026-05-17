@@ -156,11 +156,11 @@ const parseDateInputValue = (value: string) => {
 
 export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, initialClipboardImage }) => {
     const { state, addTransaction, updateTransaction } = useApp();
-    const [type, setType] = useState<TransactionType>('expense');
-    const [amountStr, setAmountStr] = useState('0');
-    const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
-    const [note, setNote] = useState('');
-    const [date, setDate] = useState(new Date());
+    const [type, setType] = useState<TransactionType>(() => initialTransaction?.type || 'expense');
+    const [amountStr, setAmountStr] = useState(() => initialTransaction?.amount !== undefined ? initialTransaction.amount.toString() : '0');
+    const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(() => initialTransaction?.categoryId || null);
+    const [note, setNote] = useState(() => initialTransaction?.note || '');
+    const [date, setDate] = useState(() => initialTransaction?.date ? new Date(initialTransaction.date) : new Date());
     const [isNoteFocused, setIsNoteFocused] = useState(false);
     const noteInputRef = useRef<HTMLInputElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);

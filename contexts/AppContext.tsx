@@ -10,6 +10,7 @@ import { SyncService } from '../services/sync';
 import { feedback } from '../services/feedback';
 import { imageService } from '../services/imageService';
 import { normalizeAppSettings, normalizeBackupReminderDays } from '../services/settingsUtils';
+import { checkSystemTimeSkew } from '../services/timeSkew';
 
 const initialState: AppState = {
     ledgers: INITIAL_LEDGERS,
@@ -249,6 +250,8 @@ const withoutLocalAuthSecrets = (settings: AppSettings): Partial<AppSettings> =>
 };
 
 const SETTINGS_SYNC_ENTITY_ID = 'main';
+type CloudSyncMode = 'incremental' | 'full-repair' | 'migration';
+type CloudSyncTrigger = 'auto' | 'manual' | 'migration';
 
 const createSettingsSyncHash = (settings: AppSettings) => JSON.stringify(withoutLocalAuthSecrets(settings));
 
@@ -360,7 +363,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const versionCheckDelayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const versionVisibilityDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const versionCheckRunningRef = useRef(false);
+    const cloudSyncPromiseRef = useRef<Promise<void> | null>(null);
     const authValidationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const timeSkewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const validatedAuthTokenRef = useRef<string | null>(null);
     const autoBackupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const autoBackupRunningRef = useRef(false);
@@ -708,6 +713,40 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             hasRemindedRef.current = true;
         }
     }, [isDBLoaded, state.settings.lastBackupTime, state.settings.webdavUrl, state.settings.webdavUser, state.settings.webdavPass, state.settings.backupReminderDays]);
+
+    // 启动后后台校验系统时间，避免错误本机时间影响多设备冲突判断。
+    useEffect(() => {
+        if (!isDBLoaded || !state.isOnline || typeof window === 'undefined') return;
+        const storageKey = 'timeSkewWarningShown';
+        try {
+            if (window.sessionStorage.getItem(storageKey) === '1') return;
+        } catch { }
+
+        if (timeSkewTimerRef.current) clearTimeout(timeSkewTimerRef.current);
+        timeSkewTimerRef.current = setTimeout(async () => {
+            try {
+                const result = await checkSystemTimeSkew();
+                if (!result) return;
+
+                try {
+                    window.sessionStorage.setItem(storageKey, '1');
+                } catch { }
+
+                const diffMinutes = Math.max(1, Math.round(result.absSkewMs / 6000) / 10);
+                const direction = result.skewMs > 0 ? '慢' : '快';
+                window.alert(
+                    `检测到本机系统时间可能不准确：与服务器相差约 ${diffMinutes} 分钟，本机时间偏${direction}。` +
+                    '这可能影响多设备同步时的冲突判断，请在系统设置中开启自动时间或手动校准。'
+                );
+            } catch (e) {
+                console.warn('Background time skew check skipped', e);
+            }
+        }, 8000);
+
+        return () => {
+            if (timeSkewTimerRef.current) clearTimeout(timeSkewTimerRef.current);
+        };
+    }, [isDBLoaded, state.isOnline]);
 
     const persistTransactionWithQueue = async (tx: Transaction, operation: 'upsert' | 'delete') => {
         const queued = createSyncQueueItem('transaction', tx.id, operation, tx.updatedAt || nextMutationTime());
@@ -1195,122 +1234,165 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         dispatch({ type: 'RESTORE_DATA', payload: { ledgers: ledgersNew, categories: catsNew, categoryGroups: groupsNew, transactions: txsNew, settings: nextSettings } });
     }, []);
 
-    const performCloudSync = useCallback(async (reason: 'auto' | 'manual' | 'migration' = 'auto') => {
-        const { lastSyncVersion } = stateRef.current.settings;
-        const authSession = getActiveAuthSession();
-
-        // Skip auto-sync if we just restored to prevent overwriting cloud with local state
-        if (reason === 'auto' && isRestoringRef.current) {
-            return;
+    const performCloudSync = useCallback(async (
+        mode: CloudSyncMode = 'incremental',
+        trigger: CloudSyncTrigger = 'auto'
+    ) => {
+        if (cloudSyncPromiseRef.current) {
+            return cloudSyncPromiseRef.current;
         }
 
-        if (!authSession || !isDBLoaded || !stateRef.current.isOnline) return;
-        const ready = await ensureStoresReady();
-        if (!ready) {
-            dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
-            dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: '本地数据库结构异常，已停止同步以保护本地数据' });
-            return;
-        }
-        dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
-        try {
-            // Priority: Sync pending images first
+        const run = (async () => {
+            const { lastSyncVersion } = stateRef.current.settings;
+            const authSession = getActiveAuthSession();
+
+            // Skip auto-sync if we just restored to prevent overwriting cloud with local state
+            if (trigger === 'auto' && isRestoringRef.current) {
+                return;
+            }
+
+            if (!authSession || !isDBLoaded || !stateRef.current.isOnline) return;
+            const ready = await ensureStoresReady();
+            if (!ready) {
+                dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
+                dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: '本地数据库结构异常，已停止同步以保护本地数据' });
+                return;
+            }
+            dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
             try {
-                await imageService.syncPendingImages();
-            } catch (e) {
-                console.warn('Image sync warning:', e);
-            }
+                // 如果本地为空（常见于重置/首次恢复），强制从云端全量拉取，避免 lastSyncVersion 过大导致云端数据未拉取
+                const forceFullSync = mode === 'full-repair' || mode === 'migration';
+                let sinceForPull = forceFullSync ? 0 : (lastSyncVersion || 0);
+                const queuedSyncItems = await dbAPI.getSyncQueueItems();
+                const latestQueueItems = (entityType: SyncQueueItem['entityType']) => {
+                    const items = new Map<string, SyncQueueItem>();
+                    for (const item of queuedSyncItems) {
+                        if (item.entityType !== entityType) continue;
+                        const existing = items.get(item.entityId);
+                        if (!existing || item.updatedAt > existing.updatedAt) {
+                            items.set(item.entityId, item);
+                        }
+                    }
+                    return Array.from(items.values());
+                };
 
-            // 如果本地为空（常见于重置/首次恢复），强制从云端全量拉取，避免 lastSyncVersion 过大导致云端数据未拉取
-            const forceFullSync = reason === 'manual' || reason === 'migration';
-            let sinceForPull = forceFullSync ? 0 : (lastSyncVersion || 0);
-            const [txAll, ledgersAll, catsAll, groupsAll, queuedSyncItems] = await Promise.all([
-                dbAPI.getAllTransactionsIncludingDeleted(),
-                dbAPI.getAllLedgersIncludingDeleted(),
-                dbAPI.getAllCategoriesIncludingDeleted(),
-                dbAPI.getAllCategoryGroupsIncludingDeleted(),
-                dbAPI.getSyncQueueItems(),
-            ]);
-            const isLocalEmpty = txAll.length === 0 && ledgersAll.length === 0 && catsAll.length === 0 && groupsAll.length === 0;
-            if (isLocalEmpty) {
-                sinceForPull = 0;
-            }
-            const latestQueueItems = (entityType: SyncQueueItem['entityType']) => {
-                const items = new Map<string, SyncQueueItem>();
-                for (const item of queuedSyncItems) {
-                    if (item.entityType !== entityType) continue;
-                    const existing = items.get(item.entityId);
-                    if (!existing || item.updatedAt > existing.updatedAt) {
-                        items.set(item.entityId, item);
+                const materializeQueuedItems = <T extends { id?: string; updatedAt?: number; updated_at?: number; isDeleted?: boolean; is_deleted?: boolean }>(
+                    records: (T | undefined)[],
+                    queueItems: SyncQueueItem[],
+                    tombstone: (item: SyncQueueItem) => T
+                ) => {
+                    const byId = new Map(records.filter(Boolean).map(item => [(item as T).id as string, item as T]));
+                    return queueItems.map(item => {
+                        const current = byId.get(item.entityId);
+                        if (!current) return tombstone(item);
+                        const updatedAt = Math.max(Number(current.updatedAt ?? current.updated_at ?? 0), item.updatedAt);
+                        return {
+                            ...current,
+                            updatedAt,
+                            isDeleted: item.operation === 'delete' ? true : !!(current.isDeleted ?? current.is_deleted),
+                        } as T;
+                    });
+                };
+
+                const transactionQueue = latestQueueItems('transaction');
+                const ledgerQueue = latestQueueItems('ledger');
+                const categoryQueue = latestQueueItems('category');
+                const groupQueue = latestQueueItems('categoryGroup');
+                const settingsQueueItem = latestQueueItems('settings')
+                    .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+
+                let txFiltered: Transaction[] = [];
+                let ledgersFiltered: Ledger[] = [];
+                let catsFiltered: Category[] = [];
+                let groupsFiltered: CategoryGroup[] = [];
+                let ledgersAllForDefault: Ledger[] = [];
+
+                if (forceFullSync) {
+                    const [txAll, ledgersAll, catsAll, groupsAll] = await Promise.all([
+                        dbAPI.getAllTransactionsIncludingDeleted(),
+                        dbAPI.getAllLedgersIncludingDeleted(),
+                        dbAPI.getAllCategoriesIncludingDeleted(),
+                        dbAPI.getAllCategoryGroupsIncludingDeleted(),
+                    ]);
+                    txFiltered = txAll;
+                    ledgersFiltered = ledgersAll;
+                    catsFiltered = catsAll;
+                    groupsFiltered = groupsAll;
+                    ledgersAllForDefault = ledgersAll;
+                    if (txAll.length === 0 && ledgersAll.length === 0 && catsAll.length === 0 && groupsAll.length === 0) {
+                        sinceForPull = 0;
+                    }
+                } else {
+                    const [txRecords, ledgerRecords, categoryRecords, groupRecords, txCount, ledgerCount, categoryCount, groupCount, defaultLedgers] = await Promise.all([
+                        transactionQueue.length ? db.transactions.bulkGet(transactionQueue.map(item => item.entityId)) : Promise.resolve([]),
+                        ledgerQueue.length ? db.ledgers.bulkGet(ledgerQueue.map(item => item.entityId)) : Promise.resolve([]),
+                        categoryQueue.length ? db.categories.bulkGet(categoryQueue.map(item => item.entityId)) : Promise.resolve([]),
+                        groupQueue.length ? db.categoryGroups.bulkGet(groupQueue.map(item => item.entityId)) : Promise.resolve([]),
+                        db.transactions.count(),
+                        db.ledgers.count(),
+                        db.categories.count(),
+                        db.categoryGroups.count(),
+                        db.ledgers.limit(1).toArray(),
+                    ]);
+                    txFiltered = materializeQueuedItems(txRecords as (Transaction | undefined)[], transactionQueue, item => ({
+                        id: item.entityId,
+                        ledgerId: '',
+                        amount: 0,
+                        type: 'expense',
+                        categoryId: '',
+                        date: item.updatedAt,
+                        note: '',
+                        attachments: [],
+                        createdAt: item.updatedAt,
+                        updatedAt: item.updatedAt,
+                        isDeleted: true,
+                    } as Transaction));
+                    ledgersFiltered = materializeQueuedItems(ledgerRecords as (Ledger | undefined)[], ledgerQueue, item => ({
+                        id: item.entityId,
+                        name: '',
+                        themeColor: '#007AFF',
+                        createdAt: item.updatedAt,
+                        updatedAt: item.updatedAt,
+                        isDeleted: true,
+                    } as Ledger));
+                    catsFiltered = materializeQueuedItems(categoryRecords as (Category | undefined)[], categoryQueue, item => ({
+                        id: item.entityId,
+                        ledgerId: stateRef.current.currentLedgerId || 'default',
+                        name: '',
+                        icon: 'Circle',
+                        type: 'expense',
+                        order: 0,
+                        isCustom: true,
+                        updatedAt: item.updatedAt,
+                        isDeleted: true,
+                    } as Category));
+                    groupsFiltered = materializeQueuedItems(groupRecords as (CategoryGroup | undefined)[], groupQueue, item => ({
+                        id: item.entityId,
+                        ledgerId: stateRef.current.currentLedgerId || 'default',
+                        name: '',
+                        categoryIds: [],
+                        order: 0,
+                        updatedAt: item.updatedAt,
+                        isDeleted: true,
+                    } as CategoryGroup));
+                    ledgersAllForDefault = defaultLedgers;
+                    if (txCount === 0 && ledgerCount === 0 && categoryCount === 0 && groupCount === 0) {
+                        sinceForPull = 0;
                     }
                 }
-                return items;
-            };
 
-            const selectForSync = <T extends { id?: string; updatedAt?: number; updated_at?: number; isDeleted?: boolean; is_deleted?: boolean }>(
-                arr: T[],
-                entityType: SyncQueueItem['entityType'],
-                tombstone: (item: SyncQueueItem) => T
-            ) => {
-                if (forceFullSync) return arr;
-                const byId = new Map(arr.filter(item => item.id).map(item => [item.id as string, item]));
-                return Array.from(latestQueueItems(entityType).values()).map(item => {
-                    const current = byId.get(item.entityId);
-                    if (!current) return tombstone(item);
-                    const updatedAt = Math.max(Number(current.updatedAt ?? current.updated_at ?? 0), item.updatedAt);
-                    return {
-                        ...current,
-                        updatedAt,
-                        isDeleted: item.operation === 'delete' ? true : !!(current.isDeleted ?? current.is_deleted),
-                    };
-                });
-            };
-
-            const txFiltered = selectForSync(txAll, 'transaction', item => ({
-                id: item.entityId,
-                ledgerId: '',
-                amount: 0,
-                type: 'expense',
-                categoryId: '',
-                date: item.updatedAt,
-                note: '',
-                attachments: [],
-                createdAt: item.updatedAt,
-                updatedAt: item.updatedAt,
-                isDeleted: true,
-            } as Transaction));
-            const ledgersFiltered = selectForSync(ledgersAll, 'ledger', item => ({
-                id: item.entityId,
-                name: '',
-                themeColor: '#007AFF',
-                createdAt: item.updatedAt,
-                updatedAt: item.updatedAt,
-                isDeleted: true,
-            } as Ledger));
-            const catsFiltered = selectForSync(catsAll, 'category', item => ({
-                id: item.entityId,
-                ledgerId: stateRef.current.currentLedgerId || 'default',
-                name: '',
-                icon: 'Circle',
-                type: 'expense',
-                order: 0,
-                isCustom: true,
-                updatedAt: item.updatedAt,
-                isDeleted: true,
-            } as Category));
-            const groupsFiltered = selectForSync(groupsAll, 'categoryGroup', item => ({
-                id: item.entityId,
-                ledgerId: stateRef.current.currentLedgerId || 'default',
-                name: '',
-                categoryIds: [],
-                order: 0,
-                updatedAt: item.updatedAt,
-                isDeleted: true,
-            } as CategoryGroup));
-            const settingsQueueItem = Array.from(latestQueueItems('settings').values())
-                .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+                const imageKeysForThisSync = Array.from(new Set(
+                    txFiltered.flatMap(t => Array.isArray(t.attachments) ? t.attachments : [])
+                        .filter(key => typeof key === 'string' && key.trim() !== '')
+                ));
+                try {
+                    await imageService.syncPendingImages(forceFullSync ? undefined : imageKeysForThisSync);
+                } catch (e) {
+                    console.warn('Image sync warning:', e);
+                }
 
             // Fallback to the first available ledger if current is missing
-            const defaultLedgerId = ledgersAll[0]?.id || 'default';
+            const defaultLedgerId = ledgersAllForDefault[0]?.id || 'default';
 
             const mapLedger = (l: any) => ({
                 id: l.id,
@@ -1387,12 +1469,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             const groupsReloaded = await dbAPI.getCategoryGroups();
             dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groupsReloaded } });
             setSyncDirty(pendingAfterSync > 0);
-            const logType: BackupLog['type'] = reason === 'auto' ? 'incremental' : 'full';
-            const logMessage = reason === 'auto'
-                ? `增量同步成功：上传 ${uploadedCount} 项，拉取 ${pulledCount} 项`
-                : reason === 'manual'
-                    ? `手动全量同步成功：上传 ${uploadedCount} 项，拉取 ${pulledCount} 项`
-                    : `账号接管全量同步成功：上传 ${uploadedCount} 项，拉取 ${pulledCount} 项`;
+            const logType: BackupLog['type'] = forceFullSync ? 'full' : 'incremental';
+            const logMessage = mode === 'migration'
+                ? `账号接管全量同步成功：上传 ${uploadedCount} 项，拉取 ${pulledCount} 项`
+                : mode === 'full-repair'
+                    ? `全量修复同步成功：上传 ${uploadedCount} 项，拉取 ${pulledCount} 项`
+                    : trigger === 'manual'
+                        ? `手动增量同步成功：上传 ${uploadedCount} 项，拉取 ${pulledCount} 项`
+                        : `增量同步成功：上传 ${uploadedCount} 项，拉取 ${pulledCount} 项`;
             logBackup({ id: generateId(), timestamp: Date.now(), type: logType, action: 'upload', status: 'success', file: 'D1 Sync', message: logMessage });
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'success' });
             dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: undefined });
@@ -1404,11 +1488,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
             dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: e?.status === 401 ? '登录已失效，请重新登录' : (e?.message || '同步失败') });
-            logBackup({ id: generateId(), timestamp: Date.now(), type: reason === 'auto' ? 'incremental' : 'full', action: 'upload', status: 'failure', file: 'D1 Sync', message: e?.message || '同步失败' });
-            if (reason === 'manual') alert('Sync failed: ' + (e?.message || 'unknown error'));
+            logBackup({ id: generateId(), timestamp: Date.now(), type: mode === 'incremental' ? 'incremental' : 'full', action: 'upload', status: 'failure', file: 'D1 Sync', message: e?.message || '同步失败' });
+            if (trigger === 'manual') alert('Sync failed: ' + (e?.message || 'unknown error'));
             await refreshPendingSyncCount();
             setSyncDirty(true);
-            if (reason === 'migration') throw e;
+            if (mode === 'migration') throw e;
+        }
+        })();
+
+        cloudSyncPromiseRef.current = run;
+        try {
+            await run;
+        } finally {
+            cloudSyncPromiseRef.current = null;
         }
     }, [isDBLoaded, mergeFromCloud, refreshPendingSyncCount, clearAuthSession]);
 
@@ -1464,7 +1556,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 await markAllLocalDataForSync();
                 await refreshPendingSyncCount();
                 try {
-                    await performCloudSync('migration');
+                    await performCloudSync('migration', 'migration');
                 } catch (e: any) {
                     pushError = e?.message || '账号接管同步失败';
                 }
@@ -1476,7 +1568,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     const restoreGuard = isRestoringRef.current;
                     try {
                         isRestoringRef.current = false;
-                        await performCloudSync('auto');
+                        await performCloudSync('incremental', 'auto');
                     } catch (e: any) {
                         pushError = e?.message || '账号同步失败';
                     } finally {
@@ -1550,7 +1642,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const delaySec = syncDebounceSeconds ?? 3;
 
         syncTimerRef.current = setTimeout(async () => {
-            if (hasD1) await performCloudSync('auto');
+            if (hasD1) await performCloudSync('incremental', 'auto');
             // WebDAV only for manual backup or scheduled auto-backup, not real-time sync
             // if (hasWebDAV) await performUpload(true);
         }, Math.max(1000, delaySec * 1000));
@@ -1591,7 +1683,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 // 3. Trigger Sync if needed
                 if (remoteVersion > localVersion || hasLocalChanges) {
                     console.log(`[AutoSync] Triggering sync. Remote: ${remoteVersion}, Local: ${localVersion}, HasChanges: ${hasLocalChanges}`);
-                    await performCloudSync('auto');
+                    await performCloudSync('incremental', 'auto');
                 }
             } catch (e) {
                 // silent fail
@@ -1637,7 +1729,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
             // 先同步 D1/KV（若已配置）
             try {
-                await performCloudSync('auto');
+                await performCloudSync('incremental', 'auto');
             } catch (e) {
                 // 同步失败也继续备份，但会记录失败日志
             }
@@ -1781,7 +1873,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     const manualCloudSync = async () => {
-        await performCloudSync('manual');
+        await performCloudSync('incremental', 'manual');
     };
 
     // D1/KV 只拉取恢复（不会推送本地），适合首次“恢复数据”

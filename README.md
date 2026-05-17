@@ -1,6 +1,6 @@
 # Personal Ledger PWA
 
-> 当前版本：7.4.5。本版本修复 D1 多设备同步一致性：引入 `updated_at` / `server_updated_at` 双时间模型，自动同步改为实体级增量保存，并避免旧设备 settings 覆盖新设备设置。
+> 当前版本：7.4.6。本版本优化云同步增量与慢路径性能：图片同步仅阻塞相关附件、同步任务增加 in-flight guard，Worker 降低固定开销并提供 `/time` 时间校准；同时新增系统时间误差提醒、首页收入/支出筛选与账目布局压缩，并修复编辑账目时原分类回填问题。
 
 Personal Ledger PWA 是一个以本地优先为核心的个人记账应用，支持离线使用、PWA 安装、多账本管理、统计分析、图片附件、WebDAV 备份，以及基于 Cloudflare Worker + D1 + KV + R2 的可选云同步能力。
 
@@ -20,6 +20,7 @@ Personal Ledger PWA 是一个以本地优先为核心的个人记账应用，支
 
 - 多账本管理
 - 收入 / 支出记录
+- 首页账目列表支持按全部、收入、支出筛选，顶部周期汇总仍显示当前账本当前时间范围的完整收入、支出和结余
 - 添加 / 修改账目时可直接点击日期并选择日期，编辑时默认带出原账目日期
 - 金额小键盘支持加减乘除表达式输入，长按减号可切换为 ÷，长按加号可切换为 ×
 - 自定义分类与分类分组
@@ -138,9 +139,11 @@ cloudflareworker/worker.js
 - Worker 从 D1 `sessions` / `users` 推导当前 `user_id`，普通同步、版本探测、图片上传、图片读取和图片删除都不再信任前端传入的 `user_id`
 - Worker 将结构化数据写入 D1 的 `ledgers_v2`、`categories_v2`、`groups_v2`、`transactions_v2`、`settings_v2` 表，用户拥有的数据以 `(user_id, id)` 作为逻辑唯一键
 - 每张同步表都有两个时间字段：`updated_at` 是客户端本地修改时间，用于实体冲突判断；`server_updated_at` 是 Worker 写入时生成的服务端单调版本，用于 `/sync/pull?since=` 的跨设备增量游标
-- `/sync/version` 返回 KV 版本与当前用户各表 `server_updated_at` 最大值；`/sync/pull?since=` 只按 `server_updated_at > since` 拉取账本、分类、分组、账目和设置
-- 自动 D1 同步只按本地 `syncQueue` 上传本轮变化实体：编辑一条账目只上传这一条账目，新建账本只上传该账本和自动创建的默认分类，修改设置只上传可同步设置
-- 手动同步、首次账号接管和迁移恢复会上传账本、分类、分组、账目做全量对账；设置只有本地设置队列存在时才上传，避免旧设备手动同步覆盖新设备设置
+- `/sync/version` 优先返回当前用户已发布的同步版本，缺失时才回退扫描各表 `server_updated_at` 最大值；`/sync/pull?since=` 只按 `server_updated_at > since` 拉取账本、分类、分组、账目和设置
+- 自动 D1 同步和“立即同步”都默认只按本地 `syncQueue` 上传本轮变化实体：编辑一条账目只读取并上传这一条账目，新建账本只上传该账本和自动创建的默认分类，修改设置只上传可同步设置
+- 首次账号接管、迁移恢复和内部修复流程才会上传账本、分类、分组、账目做全量对账；设置只有本地设置队列存在时才上传，避免旧设备覆盖新设备设置
+- 增量同步只会阻塞上传本轮变化账目实际引用的待同步图片，历史遗留图片待上传队列不会拖慢一条普通账目编辑
+- 应用启动后会在后台轻量请求固定同步服务的 `/time` 接口检测本机系统时间；若与服务器时间相差约 2 分钟以上，会弹窗提醒用户开启自动时间或手动校准，避免多设备冲突判断受错误本机时间影响
 - 冲突策略是实体级 last-write-wins：`updated_at` 较新的实体胜出；同一毫秒时删除优先，非删除的同时间戳写入不会覆盖服务端已有行
 - 图片二进制存储在 R2，普通上传写入 `users/<user_id>/<imageKey>`，交易记录中只保存附件 key
 
@@ -294,9 +297,10 @@ Worker 登录与账号隔离同步接口：
 - 密码只保存为带用户独立 salt 的 PBKDF2-SHA-256 哈希，迭代次数为 100000。
 - session token 默认 30 天过期，D1 只保存 `sha256(token)`。
 - 普通 `/sync/version`、`/sync/pull`、`/sync/push`、`/upload/image`、`/image/:key` 必须使用 `Authorization: Bearer <session-token>`。
+- `GET /time` 是公开轻量接口，仅返回 Worker 当前 `serverTime`，用于客户端后台系统时间误差检测，不访问 D1/KV/R2。
 - 普通同步接口会忽略 URL 中的 `user_id` 参数，实际用户只来自 session。
 - 新的账号隔离 D1 表为 `*_v2`，账本、分类、分组、交易均使用 `PRIMARY KEY (user_id, id)`，设置表使用 `user_id` 主键。
-- Worker 会在首次请求时为旧 D1 表自动补齐 `server_updated_at` 列和 `(user_id, server_updated_at)` 索引，并把历史行回填到当前服务端时间，避免旧客户端游标漏拉历史数据。
+- Worker 会在每个运行实例的首次请求时为旧 D1 表自动补齐 `server_updated_at` 列和 `(user_id, server_updated_at)` 索引，并把历史行回填到当前服务端时间，避免旧客户端游标漏拉历史数据；后续同步请求复用初始化结果，减少固定 D1 开销。
 - `/sync/push` 返回每条实体的 `accepted` 和 `superseded` 结果；前端只在 push 成功、pull 合并完成后清理这些被确认的队列项。
 - 普通 R2 图片对象写入 `users/<user_id>/<imageKey>`，读取和删除也只访问当前 session 用户作用域内的对象。
 

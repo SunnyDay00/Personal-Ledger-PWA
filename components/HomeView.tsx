@@ -17,6 +17,8 @@ interface HomeViewProps {
     onJumpTargetHandled?: () => void;
 }
 
+type TransactionTypeFilter = 'all' | 'income' | 'expense';
+
 export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, jumpTarget, onJumpTargetHandled }) => {
     const { state, deleteTransaction, dispatch, batchDeleteTransactions, batchUpdateTransactions } = useApp();
     const { currentLedgerId, transactions, categories, ledgers, settings, timeRange, currentDate: currentDateTs } = state;
@@ -31,6 +33,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
     const [showBatchEdit, setShowBatchEdit] = useState(false);
     const [previewKeys, setPreviewKeys] = useState<string[] | null>(null);
     const [highlightedTransactionId, setHighlightedTransactionId] = useState<string | null>(null);
+    const [typeFilter, setTypeFilter] = useState<TransactionTypeFilter>('all');
     const transactionRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
     useEffect(() => {
@@ -75,11 +78,16 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
     const startTime = start.getTime();
     const endTime = end.getTime();
 
-    const filteredTransactions = useMemo(() => {
+    const periodTransactions = useMemo(() => {
         return transactions
             .filter(t => t.ledgerId === currentLedgerId && t.date >= startTime && t.date <= endTime)
             .sort((a, b) => b.date - a.date);
     }, [transactions, currentLedgerId, startTime, endTime]);
+
+    const filteredTransactions = useMemo(() => {
+        if (typeFilter === 'all') return periodTransactions;
+        return periodTransactions.filter(t => t.type === typeFilter);
+    }, [periodTransactions, typeFilter]);
 
     useEffect(() => {
         if (!jumpTarget) return;
@@ -124,7 +132,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
     }, [filteredTransactions]);
 
     const { income, expense, balance } = useMemo(() => {
-        return filteredTransactions.reduce(
+        return periodTransactions.reduce(
             (acc, t) => {
                 if (t.type === 'income') acc.income += t.amount;
                 else acc.expense += t.amount;
@@ -132,7 +140,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
             },
             { income: 0, expense: 0, balance: 0 }
         );
-    }, [filteredTransactions]);
+    }, [periodTransactions]);
 
     const currentBalance = income - expense;
     const budgetTarget = settings.budget.enabled ? settings.budget.targets[timeRange].expense : 0;
@@ -140,6 +148,12 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
     const isOverBudget = remainingBudget < 0;
     const budgetProgress = settings.budget.enabled && budgetTarget > 0 ? (expense / budgetTarget) * 100 : 0;
     const displayProgress = Math.min(budgetProgress, 100);
+
+    const handleTypeFilterChange = (filter: TransactionTypeFilter) => {
+        feedback.play('switch');
+        setTypeFilter(filter);
+        setSelectedIds(new Set());
+    };
 
     const toggleSelection = (id: string) => {
         const newSet = new Set(selectedIds);
@@ -243,7 +257,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                     </div>
                 </div>
 
-                <div className="grid grid-cols-3 gap-3 mb-6">
+                <div className={clsx("grid grid-cols-3 gap-3", settings.budget.enabled ? "mb-3" : "mb-6")}>
                     <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
                         <span className="text-xs text-ios-subtext mb-1">收入</span>
                         <span className="text-sm font-bold text-green-500 tabular-nums">{formatCurrency(income)}</span>
@@ -259,7 +273,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                 </div>
 
                 {settings.budget.enabled && (
-                    <div className={clsx("bg-white dark:bg-zinc-900 rounded-2xl p-4 shadow-sm border mb-6 animate-fade-in cursor-pointer relative overflow-hidden", isOverBudget ? "border-red-200 dark:border-red-900/30 ring-1 ring-red-100 dark:ring-red-900/20" : "border-ios-border")} onClick={onOpenBudget}>
+                    <div className={clsx("bg-white dark:bg-zinc-900 rounded-2xl p-4 shadow-sm border mb-3 animate-fade-in cursor-pointer relative overflow-hidden", isOverBudget ? "border-red-200 dark:border-red-900/30 ring-1 ring-red-100 dark:ring-red-900/20" : "border-ios-border")} onClick={onOpenBudget}>
                         {isOverBudget && <div className="absolute inset-0 bg-red-50/50 dark:bg-red-900/10 pointer-events-none"></div>}
                         <div className="relative z-10">
                             <div className="flex justify-between text-[10px] text-ios-subtext mb-1.5">
@@ -280,6 +294,30 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                         </div>
                     </div>
                 )}
+
+                <div className="mb-1 flex justify-start">
+                    <div className="inline-flex bg-gray-200/50 dark:bg-zinc-800/50 p-0.5 rounded-lg">
+                        {([
+                            { key: 'all', label: '全部' },
+                            { key: 'income', label: '收入' },
+                            { key: 'expense', label: '支出' },
+                        ] as { key: TransactionTypeFilter; label: string }[]).map(item => (
+                            <button
+                                key={item.key}
+                                type="button"
+                                onClick={() => handleTypeFilterChange(item.key)}
+                                className={clsx(
+                                    'min-w-9 px-2 py-0.5 text-[10px] font-medium rounded-md transition-all',
+                                    typeFilter === item.key
+                                        ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text'
+                                        : 'text-ios-subtext'
+                                )}
+                            >
+                                {item.label}
+                            </button>
+                        ))}
+                    </div>
+                </div>
 
                 <div>
                     {Object.keys(groupedTransactions).map(dateKey => {

@@ -10,7 +10,7 @@ export const imageService = {
     return this.uploadImageWithKey(key, blob);
   },
 
-  async uploadImageWithKey(key: string, blob: Blob): Promise<string> {
+  async uploadImageWithKey(key: string, blob: Blob, timeoutMs: number = 20000): Promise<string> {
       const settings = await dbAPI.getSettings();
       const token = settings?.authMode === 'authenticated' ? settings.authSession?.token : undefined;
   
@@ -19,28 +19,40 @@ export const imageService = {
       }
   
       const workerUrl = FIXED_SYNC_ENDPOINT.replace(/\/$/, '');
-      
-      const res = await fetch(`${workerUrl}/upload/image`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': blob.type,
-          'Authorization': `Bearer ${token}`,
-          'X-Image-Key': key
-        },
-        body: blob
-      });
-  
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Upload failed: ${res.status} ${text}`);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+      try {
+        const res = await fetch(`${workerUrl}/upload/image`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': blob.type,
+            'Authorization': `Bearer ${token}`,
+            'X-Image-Key': key
+          },
+          body: blob,
+          signal: controller.signal
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`Upload failed: ${res.status} ${text}`);
+        }
+
+        const data = await res.json();
+        const finalKey = data.key;
+
+        await this.cacheImage(finalKey, blob);
+
+        return finalKey;
+      } catch (e: any) {
+        if (e?.name === 'AbortError') {
+          throw new Error(`Image upload timed out after ${timeoutMs}ms`);
+        }
+        throw e;
+      } finally {
+        clearTimeout(timeout);
       }
-  
-      const data = await res.json();
-      const finalKey = data.key;
-      
-      await this.cacheImage(finalKey, blob);
-      
-      return finalKey;
   },
 
   async deleteRemoteImage(key: string): Promise<void> {
@@ -82,8 +94,15 @@ export const imageService = {
       return key;
   },
 
-  async syncPendingImages(): Promise<number> {
-      const pending = await db.pending_uploads.toArray();
+  async syncPendingImages(imageKeys?: string[]): Promise<number> {
+      const scopedKeys = imageKeys
+          ? Array.from(new Set(imageKeys.filter(key => typeof key === 'string' && key.trim() !== '')))
+          : undefined;
+      if (scopedKeys && scopedKeys.length === 0) return 0;
+
+      const pending = scopedKeys
+          ? (await db.pending_uploads.bulkGet(scopedKeys)).filter(Boolean) as { key: string; blob: Blob; createdAt: number }[]
+          : await db.pending_uploads.toArray();
       if (pending.length === 0) return 0;
 
       let successCount = 0;

@@ -7,6 +7,7 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const USERNAME_RE = /^[a-z0-9_.-]{3,40}$/;
 const INVITE_CODE_RE = /^\d{6}$/;
 const DEFAULT_ALLOW_ORIGIN = '*'; // 不在白名单时用这个，测试可暂设为 '*'
+const tableInitPromises = new WeakMap();
 
 // ---- CORS 工具 ----
 function makeCorsHeaders(origin) {
@@ -186,6 +187,14 @@ async function requireSessionUser(request, env, origin) {
     return { response: json({ error: 'Unauthorized' }, 401, origin) };
   }
   return sessionUser;
+}
+
+async function requirePreparedSessionUser(request, env, origin) {
+  if (!getBearerToken(request)) {
+    return { response: json({ error: 'Unauthorized' }, 401, origin) };
+  }
+  await ensureTables(env);
+  return requireSessionUser(request, env, origin);
 }
 
 async function createSessionForUser(userId, request, env) {
@@ -369,6 +378,9 @@ export default {
 
     // 健康检查
     if (url.pathname === '/health') return text('ok', 200, origin);
+    if (url.pathname === '/time' && request.method === 'GET') {
+      return json({ serverTime: Date.now() }, 200, origin);
+    }
 
     if (url.pathname === '/auth/register' && request.method === 'POST') {
       await ensureTables(env);
@@ -389,39 +401,33 @@ export default {
 
     // Normal cloud data routes trust only the authenticated session user.
     if (url.pathname === '/sync/version' && request.method === 'GET') {
-      await ensureTables(env);
-      const sessionUser = await requireSessionUser(request, env, origin);
+      const sessionUser = await requirePreparedSessionUser(request, env, origin);
       if (sessionUser.response) return sessionUser.response;
       return versionHandler(sessionUser.user.id, env, origin, ctx);
     }
     if (url.pathname === '/sync/pull' && request.method === 'GET') {
-      await ensureTables(env);
-      const sessionUser = await requireSessionUser(request, env, origin);
+      const sessionUser = await requirePreparedSessionUser(request, env, origin);
       if (sessionUser.response) return sessionUser.response;
       return pullHandler(url, sessionUser.user.id, env, origin, ctx, AUTH_SYNC_TABLES);
     }
     if (url.pathname === '/sync/push' && request.method === 'POST') {
-      await ensureTables(env);
-      const sessionUser = await requireSessionUser(request, env, origin);
+      const sessionUser = await requirePreparedSessionUser(request, env, origin);
       if (sessionUser.response) return sessionUser.response;
       return pushHandler(request, sessionUser.user.id, env, origin, ctx, AUTH_SYNC_TABLES);
     }
     if (url.pathname === '/upload/image' && request.method === 'POST') {
-      await ensureTables(env);
-      const sessionUser = await requireSessionUser(request, env, origin);
+      const sessionUser = await requirePreparedSessionUser(request, env, origin);
       if (sessionUser.response) return sessionUser.response;
       return uploadImageHandler(request, sessionUser.user.id, env, origin);
     }
     if (url.pathname.startsWith('/image/') && request.method === 'GET') {
-      await ensureTables(env);
-      const sessionUser = await requireSessionUser(request, env, origin);
+      const sessionUser = await requirePreparedSessionUser(request, env, origin);
       if (sessionUser.response) return sessionUser.response;
       const key = imageKeyFromPath(url.pathname, '/image/');
       return getImageHandler(key, sessionUser.user.id, env, origin);
     }
     if (url.pathname.startsWith('/image/') && request.method === 'DELETE') {
-      await ensureTables(env);
-      const sessionUser = await requireSessionUser(request, env, origin);
+      const sessionUser = await requirePreparedSessionUser(request, env, origin);
       if (sessionUser.response) return sessionUser.response;
       const key = imageKeyFromPath(url.pathname, '/image/');
       return deleteImageHandler(key, sessionUser.user.id, env, origin);
@@ -433,6 +439,18 @@ export default {
 
 // ---- 辅助：确保表存在 ----
 async function ensureTables(env) {
+    let promise = tableInitPromises.get(env.DB);
+    if (!promise) {
+      promise = initializeTables(env).catch(error => {
+        tableInitPromises.delete(env.DB);
+        throw error;
+      });
+      tableInitPromises.set(env.DB, promise);
+    }
+    return promise;
+}
+
+async function initializeTables(env) {
     const stmts = CREATE_SQL.split(';').map(s => s.trim()).filter(Boolean);
     for (const sql of stmts) await env.DB.prepare(sql).run();
     await ensureServerUpdatedAtColumns(env);
@@ -617,9 +635,8 @@ async function getMaxServerUpdatedAt(env, userId, tableName) {
   return Number(row?.version || 0);
 }
 
-async function getServerVersion(userId, env, tables) {
-  const [versionStr, ...tableVersions] = await Promise.all([
-    env.SYNC_KV.get(`version:${userId}`),
+async function scanServerVersion(userId, env, tables) {
+  const tableVersions = await Promise.all([
     getMaxServerUpdatedAt(env, userId, tables.ledgers),
     getMaxServerUpdatedAt(env, userId, tables.categories),
     getMaxServerUpdatedAt(env, userId, tables.groups),
@@ -628,9 +645,18 @@ async function getServerVersion(userId, env, tables) {
   ]);
 
   return Math.max(
-    Number(versionStr || 0),
     ...tableVersions.map(value => Number(value || 0))
   );
+}
+
+async function getServerVersion(userId, env, tables) {
+  const [versionStr, versionRow] = await Promise.all([
+    env.SYNC_KV.get(`version:${userId}`),
+    env.DB.prepare(`SELECT version FROM ${tables.syncVersions} WHERE user_id=?`).bind(userId).first(),
+  ]);
+  const storedVersion = Math.max(Number(versionStr || 0), Number(versionRow?.version || 0));
+  if (storedVersion > 0) return storedVersion;
+  return scanServerVersion(userId, env, tables);
 }
 
 async function reserveSyncVersion(userId, env, tables) {
@@ -998,7 +1024,7 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
     await publishSyncVersion(userId, newVersion, env, tables);
   }
 
-  const version = await getServerVersion(userId, env, tables);
+  const version = accepted.length > 0 ? newVersion : await getServerVersion(userId, env, tables);
 
   // 统计写入: 
   
