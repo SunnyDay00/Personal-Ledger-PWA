@@ -18,6 +18,8 @@ import { AuthPanel } from './AuthPanel';
 import { getCloudVersion } from '../services/d1Sync';
 import { getLedgerTypeLabel, isTradingLedger, normalizeLedgerType } from '../services/ledgerUtils';
 import { getSortedHomeQuickActions } from '../services/homeQuickActions';
+import { Keyboard } from '@capacitor/keyboard';
+import { Capacitor } from '@capacitor/core';
 
 type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'history' | 'layout' | 'theme' | 'shortcuts' | 'about' | 'storage';
 
@@ -199,6 +201,7 @@ export const SettingsView: React.FC = () => {
     height: typeof window !== 'undefined' ? window.innerHeight : 800,
     offsetTop: 0
   });
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   useEffect(() => {
     const handleResize = () => {
@@ -231,6 +234,36 @@ export const SettingsView: React.FC = () => {
       } else {
         window.removeEventListener('resize', handleResize);
       }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+
+    let showListener: { remove: () => Promise<void> } | undefined;
+    let hideListener: { remove: () => Promise<void> } | undefined;
+    let isMounted = true;
+
+    const setupListeners = async () => {
+      showListener = await Keyboard.addListener('keyboardWillShow', info => {
+        if (isMounted) {
+          setKeyboardHeight(Math.max(0, info.keyboardHeight || 0));
+        }
+      });
+
+      hideListener = await Keyboard.addListener('keyboardWillHide', () => {
+        if (isMounted) {
+          setKeyboardHeight(0);
+        }
+      });
+    };
+
+    setupListeners();
+
+    return () => {
+      isMounted = false;
+      void showListener?.remove();
+      void hideListener?.remove();
     };
   }, []);
 
@@ -2512,11 +2545,17 @@ export const SettingsView: React.FC = () => {
       {showSyncLog && <SyncLogModal onClose={() => setShowSyncLog(false)} />}
       {quickActionModal.isOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 backdrop-blur-sm p-4 animate-in fade-in duration-200"
+          className="fixed left-0 z-50 flex w-full items-end justify-center bg-black/40 backdrop-blur-sm p-4 animate-in fade-in duration-200 transition-[height,top,padding] ease-out"
+          style={{
+            height: visualViewport.height,
+            top: visualViewport.offsetTop,
+            paddingBottom: keyboardHeight > 0 ? `${keyboardHeight + 16}px` : '1rem'
+          }}
           onClick={() => setQuickActionModal({ isOpen: false, mode: 'create', title: '', ledgerId: '', type: 'expense' })}
         >
           <div
-            className="w-full max-w-md rounded-2xl bg-white dark:bg-zinc-900 p-4 shadow-xl"
+            className="w-full max-w-md rounded-2xl bg-white dark:bg-zinc-900 p-4 shadow-xl max-h-full overflow-y-auto no-scrollbar"
+            style={{ WebkitOverflowScrolling: 'touch' }}
             onClick={event => event.stopPropagation()}
           >
             <div className="mb-4 flex items-center justify-between">
