@@ -29,7 +29,7 @@ public class HomeQuickActionsPlugin: CAPPlugin, CAPBridgedPlugin {
                 type: "home_quick_action:\(id)",
                 localizedTitle: title
             )
-            shortcut.shortcutIcon = UIApplicationShortcutIcon(
+            shortcut.icon = UIApplicationShortcutIcon(
                 systemImageName: actionType == "income" ? "arrow.down.circle" : "arrow.up.circle"
             )
             shortcut.userInfo = [
