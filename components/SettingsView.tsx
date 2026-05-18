@@ -10,15 +10,16 @@ import { WebDAVService } from '../services/webdav';
 import { db } from '../services/db';
 import { format } from 'date-fns';
 import { SyncLogModal } from './SyncLogModal';
-import { Ledger, Category, CategoryType, LedgerType } from '../types';
+import { Ledger, Category, CategoryType, LedgerType, TradeItemType, HomeQuickAction, TransactionType } from '../types';
 import { feedback } from '../services/feedback';
 import { imageService } from '../services/imageService';
 import { normalizeAppSettings, normalizeBackupAutoEnabled, normalizeBackupIntervalDays, normalizeBackupReminderDays } from '../services/settingsUtils';
 import { AuthPanel } from './AuthPanel';
 import { getCloudVersion } from '../services/d1Sync';
 import { getLedgerTypeLabel, isTradingLedger, normalizeLedgerType } from '../services/ledgerUtils';
+import { getSortedHomeQuickActions } from '../services/homeQuickActions';
 
-type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'history' | 'layout' | 'theme' | 'about' | 'storage';
+type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'history' | 'layout' | 'theme' | 'shortcuts' | 'about' | 'storage';
 
 
 const SettingsGroup: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
@@ -127,6 +128,9 @@ export const SettingsView: React.FC = () => {
   const [ledgerModal, setLedgerModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; color: string; ledgerType: LedgerType }>(
     { isOpen: false, mode: 'create', name: '', color: '#007AFF', ledgerType: 'accounting' }
   );
+  const [quickActionModal, setQuickActionModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; title: string; ledgerId: string; type: TransactionType }>(
+    { isOpen: false, mode: 'create', title: '', ledgerId: '', type: 'expense' }
+  );
   const [selectedLedgerId, setSelectedLedgerId] = useState(state.currentLedgerId || state.ledgers[0]?.id || '');
   const [catType, setCatType] = useState<CategoryType>('expense');
   const [isAddingCat, setIsAddingCat] = useState(false);
@@ -135,6 +139,7 @@ export const SettingsView: React.FC = () => {
   const [newCatIcon, setNewCatIcon] = useState('Circle');
   const [newCatBuyFeeRate, setNewCatBuyFeeRate] = useState('0');
   const [newCatSellFeeRate, setNewCatSellFeeRate] = useState('0');
+  const [newCatTradeItemType, setNewCatTradeItemType] = useState<TradeItemType>('normal');
   const [isReordering, setIsReordering] = useState(false);
   const [dragCategoryId, setDragCategoryId] = useState<string | null>(null);
   const [dragOverCategoryId, setDragOverCategoryId] = useState<string | null>(null);
@@ -151,8 +156,17 @@ export const SettingsView: React.FC = () => {
   const [systemPrefersDark, setSystemPrefersDark] = useState(getSystemPrefersDark);
   const authSession = state.settings.authMode === 'authenticated' ? state.settings.authSession : undefined;
   const isAuthenticated = !!authSession?.token;
+  const homeQuickActions = useMemo(
+    () => getSortedHomeQuickActions(state.settings.homeQuickActions),
+    [state.settings.homeQuickActions]
+  );
   const selectedLedger = state.ledgers.find(ledger => ledger.id === selectedLedgerId);
   const isSelectedTradingLedger = isTradingLedger(selectedLedger);
+  const quickActionModalLedger = state.ledgers.find(ledger => ledger.id === quickActionModal.ledgerId);
+  const editingCatHasTransactions = useMemo(
+    () => !!editingCat && state.transactions.some(transaction => !transaction.isDeleted && transaction.categoryId === editingCat.id),
+    [editingCat, state.transactions]
+  );
   const selectedLedgerTypeIntro = LEDGER_TYPE_INTRO.find(option => option.type === ledgerModal.ledgerType) || LEDGER_TYPE_INTRO[0];
   const effectiveImageTheme: 'light' | 'dark' = state.settings.themeMode === 'auto'
     ? systemPrefersDark ? 'dark' : 'light'
@@ -420,6 +434,134 @@ export const SettingsView: React.FC = () => {
     feedback.vibrate('medium');
   };
 
+  const getQuickActionTypeLabel = (ledger: Ledger | undefined, type: TransactionType) => {
+    if (isTradingLedger(ledger)) return type === 'income' ? '卖出' : '买入';
+    return type === 'income' ? '收入' : '支出';
+  };
+
+  const getQuickActionTitle = (ledger: Ledger | undefined, type: TransactionType) =>
+    `${ledger?.name || '账本'} ${getQuickActionTypeLabel(ledger, type)}`;
+
+  const saveQuickActions = (actions: HomeQuickAction[]) => {
+    dispatch({
+      type: 'UPDATE_SETTINGS',
+      payload: { homeQuickActions: getSortedHomeQuickActions(actions) },
+    });
+  };
+
+  const openCreateQuickAction = () => {
+    if (homeQuickActions.length >= 4) {
+      window.alert('最多只能添加 4 个快捷方式');
+      return;
+    }
+
+    const ledger = state.ledgers.find(item => item.id === state.currentLedgerId) || state.ledgers[0];
+    if (!ledger) {
+      window.alert('请先创建账本');
+      return;
+    }
+
+    const type: TransactionType = 'expense';
+    setQuickActionModal({
+      isOpen: true,
+      mode: 'create',
+      title: getQuickActionTitle(ledger, type),
+      ledgerId: ledger.id,
+      type,
+    });
+  };
+
+  const openEditQuickAction = (action: HomeQuickAction) => {
+    const ledger = state.ledgers.find(item => item.id === action.ledgerId);
+    setQuickActionModal({
+      isOpen: true,
+      mode: 'edit',
+      id: action.id,
+      title: action.title || getQuickActionTitle(ledger, action.type),
+      ledgerId: action.ledgerId,
+      type: action.type,
+    });
+  };
+
+  const updateQuickActionLedger = (ledgerId: string) => {
+    setQuickActionModal(prev => {
+      const previousLedger = state.ledgers.find(item => item.id === prev.ledgerId);
+      const nextLedger = state.ledgers.find(item => item.id === ledgerId);
+      const shouldRefreshTitle = !prev.title.trim() || prev.title === getQuickActionTitle(previousLedger, prev.type);
+      return {
+        ...prev,
+        ledgerId,
+        title: shouldRefreshTitle ? getQuickActionTitle(nextLedger, prev.type) : prev.title,
+      };
+    });
+  };
+
+  const updateQuickActionType = (type: TransactionType) => {
+    setQuickActionModal(prev => {
+      const ledger = state.ledgers.find(item => item.id === prev.ledgerId);
+      const shouldRefreshTitle = !prev.title.trim() || prev.title === getQuickActionTitle(ledger, prev.type);
+      return {
+        ...prev,
+        type,
+        title: shouldRefreshTitle ? getQuickActionTitle(ledger, type) : prev.title,
+      };
+    });
+  };
+
+  const saveQuickActionModal = () => {
+    const ledger = state.ledgers.find(item => item.id === quickActionModal.ledgerId);
+    if (!ledger) {
+      window.alert('请选择账本');
+      return;
+    }
+
+    if (quickActionModal.mode === 'create' && homeQuickActions.length >= 4) {
+      window.alert('最多只能添加 4 个快捷方式');
+      return;
+    }
+
+    const now = Date.now();
+    const title = quickActionModal.title.trim() || getQuickActionTitle(ledger, quickActionModal.type);
+    const nextAction: HomeQuickAction = {
+      id: quickActionModal.id || generateId(),
+      title,
+      ledgerId: ledger.id,
+      type: quickActionModal.type,
+      order: quickActionModal.mode === 'edit'
+        ? homeQuickActions.find(item => item.id === quickActionModal.id)?.order ?? homeQuickActions.length
+        : homeQuickActions.length,
+      updatedAt: now,
+    };
+
+    const nextActions = quickActionModal.mode === 'edit'
+      ? homeQuickActions.map(item => item.id === nextAction.id ? nextAction : item)
+      : [...homeQuickActions, nextAction];
+
+    saveQuickActions(nextActions);
+    setQuickActionModal({ isOpen: false, mode: 'create', title: '', ledgerId: '', type: 'expense' });
+    feedback.play('success');
+    feedback.vibrate('light');
+  };
+
+  const deleteQuickAction = (id: string) => {
+    if (!window.confirm('删除这个快捷方式？')) return;
+    saveQuickActions(homeQuickActions.filter(item => item.id !== id));
+    feedback.play('delete');
+    feedback.vibrate('medium');
+  };
+
+  const moveQuickAction = (id: string, delta: number) => {
+    const index = homeQuickActions.findIndex(item => item.id === id);
+    const targetIndex = index + delta;
+    if (index < 0 || targetIndex < 0 || targetIndex >= homeQuickActions.length) return;
+
+    const next = [...homeQuickActions];
+    [next[index], next[targetIndex]] = [next[targetIndex], next[index]];
+    saveQuickActions(next.map((item, itemIndex) => ({ ...item, order: itemIndex, updatedAt: Date.now() })));
+    feedback.play('switch');
+    feedback.vibrate('light');
+  };
+
   const openExportDialog = (l?: Ledger) => {
     const targetIds = l ? [l.id] : state.ledgers.map((x) => x.id);
     const startMs = exportStart ? new Date(exportStart).setHours(0, 0, 0, 0) : Number.NEGATIVE_INFINITY;
@@ -448,6 +590,7 @@ export const SettingsView: React.FC = () => {
         name: newCatName,
         icon: newCatIcon,
         type: catType,
+        tradeItemType: isSelectedTradingLedger ? newCatTradeItemType : undefined,
         buyFeeRate: isSelectedTradingLedger ? Number(newCatBuyFeeRate || 0) : 0,
         sellFeeRate: isSelectedTradingLedger ? Number(newCatSellFeeRate || 0) : 0,
         order,
@@ -460,6 +603,7 @@ export const SettingsView: React.FC = () => {
     setNewCatIcon('Circle');
     setNewCatBuyFeeRate('0');
     setNewCatSellFeeRate('0');
+    setNewCatTradeItemType('normal');
     feedback.play('success');
     feedback.vibrate('success');
   };
@@ -470,16 +614,22 @@ export const SettingsView: React.FC = () => {
     setNewCatIcon(c.icon);
     setNewCatBuyFeeRate(String(c.buyFeeRate ?? 0));
     setNewCatSellFeeRate(String(c.sellFeeRate ?? 0));
+    setNewCatTradeItemType(c.tradeItemType ?? 'normal');
   };
 
   const saveEditCategory = () => {
     if (!editingCat) return;
-    dispatch({ type: 'UPDATE_CATEGORY', payload: { ...editingCat, name: newCatName, icon: newCatIcon, buyFeeRate: Number(newCatBuyFeeRate || 0), sellFeeRate: Number(newCatSellFeeRate || 0), updatedAt: Date.now() } });
+    if (isSelectedTradingLedger && editingCatHasTransactions && (editingCat.tradeItemType ?? 'normal') !== newCatTradeItemType) {
+      window.alert('已有交易的买卖类目不能切换普通/卡密类型');
+      return;
+    }
+    dispatch({ type: 'UPDATE_CATEGORY', payload: { ...editingCat, name: newCatName, icon: newCatIcon, tradeItemType: isSelectedTradingLedger ? newCatTradeItemType : editingCat.tradeItemType, buyFeeRate: Number(newCatBuyFeeRate || 0), sellFeeRate: Number(newCatSellFeeRate || 0), updatedAt: Date.now() } });
     setEditingCat(null);
     setNewCatName('');
     setNewCatIcon('Circle');
     setNewCatBuyFeeRate('0');
     setNewCatSellFeeRate('0');
+    setNewCatTradeItemType('normal');
   };
 
   const handleDeleteCategory = (id: string) => {
@@ -715,6 +865,7 @@ export const SettingsView: React.FC = () => {
 
       <SettingsGroup title="个性化">
         <SettingsItem icon="Palette" label="主题设置" value={state.settings.themeMode === 'auto' ? '跟随系统' : state.settings.themeMode === 'dark' ? '深色' : '浅色'} onClick={() => setPage('theme')} />
+        <SettingsItem icon="Zap" label="快捷方式" value={`${homeQuickActions.length}/4`} onClick={() => setPage('shortcuts')} />
 
         {/* Haptic Settings with Slider */}
         <div className="bg-white dark:bg-zinc-900 border-b border-gray-100 dark:border-zinc-800/50">
@@ -1500,6 +1651,7 @@ export const SettingsView: React.FC = () => {
           name: cat.name,
           icon: cat.icon,
           type: isSelectedTradingLedger ? 'trade' : cat.type,
+          tradeItemType: isSelectedTradingLedger ? cat.tradeItemType ?? 'normal' : undefined,
           buyFeeRate: cat.buyFeeRate ?? 0,
           sellFeeRate: cat.sellFeeRate ?? 0,
           order: order++,
@@ -1733,7 +1885,7 @@ export const SettingsView: React.FC = () => {
                 <span className="text-xs text-center truncate w-full">{c.name}</span>
                 {isSelectedTradingLedger && (
                   <span className="text-[10px] text-ios-subtext text-center leading-tight">
-                    买 {c.buyFeeRate ?? 0}% / 卖 {c.sellFeeRate ?? 0}%
+                    {(c.tradeItemType ?? 'normal') === 'cardKey' ? '卡密' : '普通'} · 买 {c.buyFeeRate ?? 0}% / 卖 {c.sellFeeRate ?? 0}%
                   </span>
                 )}
                 {isReordering && (
@@ -1777,7 +1929,10 @@ export const SettingsView: React.FC = () => {
 
           {!isReordering && (
             <button
-              onClick={() => setIsAddingCat(true)}
+              onClick={() => {
+                setNewCatTradeItemType('normal');
+                setIsAddingCat(true);
+              }}
               className="bg-gray-50 dark:bg-zinc-800/50 rounded-xl p-3 flex flex-col items-center justify-center gap-2 border border-dashed border-gray-300 dark:border-zinc-700 aspect-square text-ios-subtext hover:text-ios-primary hover:bg-gray-100 dark:hover:bg-zinc-800 transition-colors"
             >
               <Icon name="Plus" className="w-6 h-6" />
@@ -1803,6 +1958,7 @@ export const SettingsView: React.FC = () => {
                 setNewCatIcon('Circle');
                 setNewCatBuyFeeRate('0');
                 setNewCatSellFeeRate('0');
+                setNewCatTradeItemType('normal');
               }} className="text-ios-subtext">取消</button>
               <h3 className="font-bold text-lg">添加{isSelectedTradingLedger ? '类目' : catType === 'expense' ? '支出' : '收入'}分类</h3>
               <button onClick={handleAddCategory} className="text-ios-primary font-bold">完成</button>
@@ -1823,6 +1979,27 @@ export const SettingsView: React.FC = () => {
                 name="categoryName"
               />
             </div>
+
+            {isSelectedTradingLedger && (
+              <div className="mb-4">
+                <div className="text-xs text-ios-subtext mb-2">物品类型</div>
+                <div className="flex p-1 bg-gray-100 dark:bg-zinc-800 rounded-xl">
+                  {(['normal', 'cardKey'] as TradeItemType[]).map(itemType => (
+                    <button
+                      key={itemType}
+                      type="button"
+                      onClick={() => setNewCatTradeItemType(itemType)}
+                      className={cn(
+                        'flex-1 py-2 rounded-lg text-sm font-medium transition-all',
+                        newCatTradeItemType === itemType ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext'
+                      )}
+                    >
+                      {itemType === 'cardKey' ? '卡密' : '普通物品'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {isSelectedTradingLedger && (
               <div className="grid grid-cols-2 gap-3 mb-4">
@@ -1888,6 +2065,7 @@ export const SettingsView: React.FC = () => {
                   setNewCatIcon('Circle');
                   setNewCatBuyFeeRate('0');
                   setNewCatSellFeeRate('0');
+                  setNewCatTradeItemType('normal');
                 }}
                 className="text-ios-subtext"
               >
@@ -1912,6 +2090,31 @@ export const SettingsView: React.FC = () => {
                 name="editCategoryName"
               />
             </div>
+
+            {isSelectedTradingLedger && (
+              <div className="mb-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs text-ios-subtext">物品类型</span>
+                  {editingCatHasTransactions && <span className="text-[11px] text-ios-subtext">已有交易后不可切换</span>}
+                </div>
+                <div className="flex p-1 bg-gray-100 dark:bg-zinc-800 rounded-xl">
+                  {(['normal', 'cardKey'] as TradeItemType[]).map(itemType => (
+                    <button
+                      key={itemType}
+                      type="button"
+                      disabled={editingCatHasTransactions}
+                      onClick={() => setNewCatTradeItemType(itemType)}
+                      className={cn(
+                        'flex-1 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-60',
+                        newCatTradeItemType === itemType ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext'
+                      )}
+                    >
+                      {itemType === 'cardKey' ? '卡密' : '普通物品'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {isSelectedTradingLedger && (
               <div className="grid grid-cols-2 gap-3 mb-4">
@@ -2085,6 +2288,81 @@ export const SettingsView: React.FC = () => {
     </div>
   );
 
+  const renderShortcuts = () => (
+    <div className="px-4 pb-10">
+      <div className="h-4"></div>
+      <SettingsGroup title="桌面快捷方式">
+        {homeQuickActions.length === 0 ? (
+          <div className="p-4 text-sm text-ios-subtext">暂无快捷方式</div>
+        ) : (
+          homeQuickActions.map((action, index) => {
+            const ledger = state.ledgers.find(item => item.id === action.ledgerId);
+            const isMissingLedger = !ledger;
+            return (
+              <div key={action.id} className="p-4 border-b border-gray-100 dark:border-zinc-800/50 last:border-b-0">
+                <div className="flex items-start justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => openEditQuickAction(action)}
+                    className="min-w-0 flex-1 text-left"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-sm text-ios-text truncate">{action.title || getQuickActionTitle(ledger, action.type)}</span>
+                      {isMissingLedger && <span className="text-[10px] rounded-full bg-red-50 px-2 py-0.5 text-red-500 dark:bg-red-950/30">失效</span>}
+                    </div>
+                    <div className="mt-1 text-xs text-ios-subtext truncate">
+                      {ledger?.name || '账本已删除'} · {getQuickActionTypeLabel(ledger, action.type)}
+                    </div>
+                  </button>
+
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      aria-label="上移快捷方式"
+                      disabled={index === 0}
+                      onClick={() => moveQuickAction(action.id, -1)}
+                      className="w-8 h-8 rounded-full bg-gray-100 dark:bg-zinc-800 text-ios-subtext flex items-center justify-center disabled:opacity-30 active:scale-95"
+                    >
+                      <Icon name="ChevronUp" className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="下移快捷方式"
+                      disabled={index === homeQuickActions.length - 1}
+                      onClick={() => moveQuickAction(action.id, 1)}
+                      className="w-8 h-8 rounded-full bg-gray-100 dark:bg-zinc-800 text-ios-subtext flex items-center justify-center disabled:opacity-30 active:scale-95"
+                    >
+                      <Icon name="ChevronDown" className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="删除快捷方式"
+                      onClick={() => deleteQuickAction(action.id)}
+                      className="w-8 h-8 rounded-full bg-red-50 dark:bg-red-950/30 text-red-500 flex items-center justify-center active:scale-95"
+                    >
+                      <Icon name="Trash2" className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })
+        )}
+
+        {homeQuickActions.length < 4 && (
+          <button
+            type="button"
+            onClick={openCreateQuickAction}
+            className="w-full p-4 flex items-center justify-center gap-2 text-sm font-medium text-ios-primary active:bg-gray-50 dark:active:bg-zinc-800"
+          >
+            <Icon name="Plus" className="w-4 h-4" />
+            新建快捷方式
+          </button>
+        )}
+      </SettingsGroup>
+    </div>
+  );
+
   const renderTheme = () => (
     <div className="px-4 pb-10">
       <div className="h-4"></div>
@@ -2172,6 +2450,8 @@ export const SettingsView: React.FC = () => {
         return '界面布局';
       case 'theme':
         return '主题设置';
+      case 'shortcuts':
+        return '快捷方式';
       case 'about':
         return '关于';
       case 'storage':
@@ -2199,6 +2479,12 @@ export const SettingsView: React.FC = () => {
           </button>
         )}
 
+        {page === 'shortcuts' && homeQuickActions.length < 4 && (
+          <button onClick={openCreateQuickAction} className="absolute right-4 text-ios-primary text-sm font-medium active:opacity-60">
+            新建
+          </button>
+        )}
+
         {page === 'main' && (
           <div className="absolute right-4">
             <CloudSyncButton />
@@ -2218,11 +2504,87 @@ export const SettingsView: React.FC = () => {
         {page === 'history' && renderHistory()}
         {page === 'layout' && renderLayout()}
         {page === 'theme' && renderTheme()}
+        {page === 'shortcuts' && renderShortcuts()}
         {page === 'storage' && renderStorage()}
         {page === 'about' && renderAbout()}
       </div>
 
       {showSyncLog && <SyncLogModal onClose={() => setShowSyncLog(false)} />}
+      {quickActionModal.isOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 backdrop-blur-sm p-4 animate-in fade-in duration-200"
+          onClick={() => setQuickActionModal({ isOpen: false, mode: 'create', title: '', ledgerId: '', type: 'expense' })}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white dark:bg-zinc-900 p-4 shadow-xl"
+            onClick={event => event.stopPropagation()}
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => setQuickActionModal({ isOpen: false, mode: 'create', title: '', ledgerId: '', type: 'expense' })}
+                className="text-sm font-medium text-ios-subtext"
+              >
+                取消
+              </button>
+              <h3 className="text-base font-semibold text-ios-text">
+                {quickActionModal.mode === 'edit' ? '编辑快捷方式' : '新建快捷方式'}
+              </h3>
+              <button
+                type="button"
+                onClick={saveQuickActionModal}
+                className="text-sm font-semibold text-ios-primary"
+              >
+                保存
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <label className="block">
+                <span className="mb-1 block text-xs text-ios-subtext">名称</span>
+                <input
+                  type="text"
+                  value={quickActionModal.title}
+                  onChange={event => setQuickActionModal(prev => ({ ...prev, title: event.target.value }))}
+                  className="w-full rounded-xl border border-ios-border bg-gray-50 dark:bg-zinc-800 px-3 py-2 text-sm text-ios-text outline-none focus:border-ios-primary"
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-1 block text-xs text-ios-subtext">账本</span>
+                <select
+                  value={quickActionModal.ledgerId}
+                  onChange={event => updateQuickActionLedger(event.target.value)}
+                  className="w-full rounded-xl border border-ios-border bg-gray-50 dark:bg-zinc-800 px-3 py-2 text-sm text-ios-text outline-none focus:border-ios-primary"
+                >
+                  {state.ledgers.map(ledger => (
+                    <option key={ledger.id} value={ledger.id}>{ledger.name}</option>
+                  ))}
+                </select>
+              </label>
+
+              <div>
+                <span className="mb-1 block text-xs text-ios-subtext">动作</span>
+                <div className="flex rounded-xl bg-gray-100 dark:bg-zinc-800 p-1">
+                  {(['expense', 'income'] as TransactionType[]).map(type => (
+                    <button
+                      key={type}
+                      type="button"
+                      onClick={() => updateQuickActionType(type)}
+                      className={cn(
+                        'flex-1 rounded-lg py-2 text-sm font-medium transition-all',
+                        quickActionModal.type === type ? 'bg-white text-ios-text shadow-sm dark:bg-zinc-700' : 'text-ios-subtext'
+                      )}
+                    >
+                      {getQuickActionTypeLabel(quickActionModalLedger, type)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

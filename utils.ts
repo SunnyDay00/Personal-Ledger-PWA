@@ -1,7 +1,7 @@
 
 import { ClassValue, clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { AppState, Transaction, Category, Ledger, CategoryType } from './types';
+import { AppState, Transaction, Category, Ledger, CategoryType, TradeItemType } from './types';
 import { format } from 'date-fns';
 
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
@@ -71,8 +71,8 @@ export function transactionsToCsv(transactions: Transaction[], categories: Categ
     const headers = [
         'Time', 'Category', 'Amount', 'Type', 'Note', 'Ledger',
         'id', 'ledgerId', 'categoryId', 'rawType', 'ledgerType',
-        'tradeAction', 'tradeQuantity', 'tradeGrossAmount', 'tradeFeeRate', 'tradeFeeAmount', 'tradeAllocations',
-        'categoryBuyFeeRate', 'categorySellFeeRate',
+        'tradeAction', 'tradeQuantity', 'tradeGrossAmount', 'tradeFeeRate', 'tradeFeeAmount', 'tradeAllocations', 'tradeKeys', 'tradeKeyAllocations',
+        'categoryBuyFeeRate', 'categorySellFeeRate', 'categoryTradeItemType',
         'dateTs', 'createdAtTs', 'updatedAtTs', 'isDeleted', 'attachments'
     ];
     
@@ -107,8 +107,11 @@ export function transactionsToCsv(transactions: Transaction[], categories: Categ
             t.tradeFeeRate || '',
             t.tradeFeeAmount || '',
             t.tradeAllocations && t.tradeAllocations.length > 0 ? `"${JSON.stringify(t.tradeAllocations).replace(/"/g, '""')}"` : '',
+            t.tradeKeys && t.tradeKeys.length > 0 ? `"${JSON.stringify(t.tradeKeys).replace(/"/g, '""')}"` : '',
+            t.tradeKeyAllocations && t.tradeKeyAllocations.length > 0 ? `"${JSON.stringify(t.tradeKeyAllocations).replace(/"/g, '""')}"` : '',
             cat?.buyFeeRate ?? '',
             cat?.sellFeeRate ?? '',
+            cat?.tradeItemType ?? 'normal',
             t.date,
             t.createdAt,
             t.updatedAt || '',
@@ -150,7 +153,7 @@ const detectDelimiter = (headerLine: string): ',' | '\t' => {
     return headerLine.includes('\t') ? '\t' : ',';
 };
 
-export function extractCategoriesFromCsv(csvContent: string): { id: string, name: string, type: CategoryType, buyFeeRate?: number, sellFeeRate?: number }[] {
+export function extractCategoriesFromCsv(csvContent: string): { id: string, name: string, type: CategoryType, buyFeeRate?: number, sellFeeRate?: number, tradeItemType?: TradeItemType }[] {
     let content = csvContent;
     if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
     
@@ -166,12 +169,13 @@ export function extractCategoriesFromCsv(csvContent: string): { id: string, name
         cnType: headers.indexOf('Type'),
         ledgerType: headers.indexOf('ledgerType'),
         buyFeeRate: headers.indexOf('categoryBuyFeeRate'),
-        sellFeeRate: headers.indexOf('categorySellFeeRate')
+        sellFeeRate: headers.indexOf('categorySellFeeRate'),
+        tradeItemType: headers.indexOf('categoryTradeItemType')
     };
 
     if (idx.name === -1) return [];
 
-    const uniqueMap = new Map<string, { id: string, name: string, type: CategoryType, buyFeeRate?: number, sellFeeRate?: number }>();
+    const uniqueMap = new Map<string, { id: string, name: string, type: CategoryType, buyFeeRate?: number, sellFeeRate?: number, tradeItemType?: TradeItemType }>();
 
     for (let i = 1; i < lines.length; i++) {
         try {
@@ -187,11 +191,14 @@ export function extractCategoriesFromCsv(csvContent: string): { id: string, name
             if (idx.ledgerType !== -1 && cols[idx.ledgerType] === 'trading') type = 'trade';
             const buyFeeRate = idx.buyFeeRate !== -1 ? Number(cols[idx.buyFeeRate] || 0) : 0;
             const sellFeeRate = idx.sellFeeRate !== -1 ? Number(cols[idx.sellFeeRate] || 0) : 0;
+            const tradeItemType: TradeItemType = idx.tradeItemType !== -1 && (cols[idx.tradeItemType] === 'cardKey' || cols[idx.tradeItemType] === 'card_key')
+                ? 'cardKey'
+                : 'normal';
 
             if (name) {
                 const key = id || name; 
                 if (!uniqueMap.has(key)) {
-                    uniqueMap.set(key, { id: id || `auto_${Date.now()}_${Math.floor(Math.random()*1000)}`, name, type, buyFeeRate, sellFeeRate });
+                    uniqueMap.set(key, { id: id || `auto_${Date.now()}_${Math.floor(Math.random()*1000)}`, name, type, buyFeeRate, sellFeeRate, tradeItemType });
                 }
             }
         } catch (e) { continue; }
@@ -215,7 +222,8 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
     let idx = {
         id: 0, ledgerId: 1, amount: 2, type: 3, categoryId: 4, date: 5, note: 6, createdAt: 7, updatedAt: 8,
         timeStr: -1, isDeleted: -1, catName: -1, ledgerName: -1, attachments: -1,
-        tradeAction: -1, tradeQuantity: -1, tradeGrossAmount: -1, tradeFeeRate: -1, tradeFeeAmount: -1, tradeAllocations: -1
+        tradeAction: -1, tradeQuantity: -1, tradeGrossAmount: -1, tradeFeeRate: -1, tradeFeeAmount: -1, tradeAllocations: -1,
+        tradeKeys: -1, tradeKeyAllocations: -1
     };
 
     if (headers.includes('id') && (headers.includes('dateTs') || headers.includes('Time'))) {
@@ -239,7 +247,9 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
             tradeGrossAmount: headers.indexOf('tradeGrossAmount'),
             tradeFeeRate: headers.indexOf('tradeFeeRate'),
             tradeFeeAmount: headers.indexOf('tradeFeeAmount'),
-            tradeAllocations: headers.indexOf('tradeAllocations')
+            tradeAllocations: headers.indexOf('tradeAllocations'),
+            tradeKeys: headers.indexOf('tradeKeys'),
+            tradeKeyAllocations: headers.indexOf('tradeKeyAllocations')
         };
     }
 
@@ -295,6 +305,20 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
                     if (Array.isArray(parsedAllocations)) tradeAllocations = parsedAllocations;
                 } catch {}
             }
+            let tradeKeys;
+            if (idx.tradeKeys !== -1 && cols[idx.tradeKeys]) {
+                try {
+                    const parsedKeys = JSON.parse(cols[idx.tradeKeys]);
+                    if (Array.isArray(parsedKeys)) tradeKeys = parsedKeys;
+                } catch {}
+            }
+            let tradeKeyAllocations;
+            if (idx.tradeKeyAllocations !== -1 && cols[idx.tradeKeyAllocations]) {
+                try {
+                    const parsedKeyAllocations = JSON.parse(cols[idx.tradeKeyAllocations]);
+                    if (Array.isArray(parsedKeyAllocations)) tradeKeyAllocations = parsedKeyAllocations;
+                } catch {}
+            }
 
             transactions.push({
                 id: txId,
@@ -308,6 +332,8 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
                 tradeFeeRate: idx.tradeFeeRate !== -1 && cols[idx.tradeFeeRate] ? Number(cols[idx.tradeFeeRate]) : undefined,
                 tradeFeeAmount: idx.tradeFeeAmount !== -1 && cols[idx.tradeFeeAmount] ? Number(cols[idx.tradeFeeAmount]) : undefined,
                 tradeAllocations,
+                tradeKeys,
+                tradeKeyAllocations,
                 date: dateTs,
                 note: note || '',
                 createdAt: (idx.createdAt !== -1 && parseInt(cols[idx.createdAt])) || Date.now(),

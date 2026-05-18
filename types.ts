@@ -4,9 +4,27 @@ export type TransactionType = 'expense' | 'income';
 export type CategoryType = TransactionType | 'trade';
 export type LedgerType = 'accounting' | 'trading';
 export type TradeAction = 'buy' | 'sell';
+export type TradeItemType = 'normal' | 'cardKey';
+export interface HomeQuickAction {
+  id: string;
+  title: string;
+  ledgerId: string;
+  type: TransactionType;
+  order: number;
+  updatedAt?: number;
+}
 export interface TradeAllocation {
   buyTransactionId: string;
   quantity: number;
+}
+export interface TradeKey {
+  id: string;
+  value: string;
+}
+export interface TradeKeyAllocation {
+  buyTransactionId: string;
+  keyId: string;
+  value: string;
 }
 export type BudgetType = 'week' | 'month' | 'year';
 
@@ -39,6 +57,7 @@ export interface Category {
   name: string;
   icon: string; // Lucide icon name
   type: CategoryType;
+  tradeItemType?: TradeItemType;
   buyFeeRate?: number;
   sellFeeRate?: number;
   isCustom?: boolean;
@@ -69,6 +88,8 @@ export interface Transaction {
   tradeFeeRate?: number;
   tradeFeeAmount?: number;
   tradeAllocations?: TradeAllocation[];
+  tradeKeys?: TradeKey[];
+  tradeKeyAllocations?: TradeKeyAllocation[];
   date: number; // Timestamp
   note: string;
   attachments: string[]; // R2 keys
@@ -175,6 +196,7 @@ export interface AppSettings {
   lastSyncVersion?: number;
   settingsUpdatedAt?: number;
   defaultLedgerId?: string;
+  homeQuickActions: HomeQuickAction[];
   isFirstRun: boolean;
   exportStartDate?: string;
   exportEndDate?: string;

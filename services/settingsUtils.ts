@@ -1,5 +1,5 @@
 import { DEFAULT_SETTINGS } from '../constants';
-import { AppSettings } from '../types';
+import { AppSettings, HomeQuickAction, TransactionType } from '../types';
 
 const BACKUP_REMINDER_MIN_DAYS = 0;
 const BACKUP_REMINDER_MAX_DAYS = 60;
@@ -35,6 +35,33 @@ export const normalizeBackupAutoEnabled = (
   return fallback;
 };
 
+const normalizeHomeQuickActions = (value: unknown): HomeQuickAction[] => {
+  if (!Array.isArray(value)) return [];
+  const now = Date.now();
+  return value
+    .map((item, index) => {
+      const raw = item as Partial<HomeQuickAction> & Record<string, unknown>;
+      const id = String(raw.id || `quick_${now}_${index}`).trim();
+      const ledgerId = String(raw.ledgerId || '').trim();
+      const type: TransactionType = raw.type === 'income' ? 'income' : 'expense';
+      const title = String(raw.title || '').trim();
+      const order = Number.isFinite(Number(raw.order)) ? Number(raw.order) : index;
+      const updatedAt = Number(raw.updatedAt);
+      return {
+        id,
+        title,
+        ledgerId,
+        type,
+        order,
+        updatedAt: Number.isFinite(updatedAt) ? updatedAt : undefined,
+      };
+    })
+    .filter(item => item.id && item.ledgerId)
+    .sort((a, b) => a.order - b.order)
+    .slice(0, 4)
+    .map((item, index) => ({ ...item, order: index }));
+};
+
 export const normalizeAppSettings = (
   settings?: Partial<AppSettings> | null,
   baseSettings: AppSettings = DEFAULT_SETTINGS
@@ -61,5 +88,6 @@ export const normalizeAppSettings = (
       merged.backupIntervalDays,
       baseSettings.backupIntervalDays ?? DEFAULT_SETTINGS.backupIntervalDays ?? 7
     ),
+    homeQuickActions: normalizeHomeQuickActions(merged.homeQuickActions),
   };
 };

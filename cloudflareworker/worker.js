@@ -330,6 +330,7 @@ CREATE TABLE IF NOT EXISTS categories_v2 (
   name TEXT,
   icon TEXT,
   type TEXT,
+  trade_item_type TEXT DEFAULT 'normal',
   buy_fee_rate REAL DEFAULT 0,
   sell_fee_rate REAL DEFAULT 0,
   "order" INTEGER,
@@ -364,6 +365,8 @@ CREATE TABLE IF NOT EXISTS transactions_v2 (
   trade_fee_rate REAL,
   trade_fee_amount REAL,
   trade_allocations TEXT,
+  trade_keys TEXT,
+  trade_key_allocations TEXT,
   date INTEGER,
   note TEXT,
   attachments TEXT,
@@ -502,6 +505,7 @@ async function ensureServerUpdatedAtColumns(env) {
 async function ensureStructuredCompatibilityColumns(env) {
   const columns = [
     { table: AUTH_SYNC_TABLES.ledgers, name: 'ledger_type', ddl: "TEXT DEFAULT 'accounting'" },
+    { table: AUTH_SYNC_TABLES.categories, name: 'trade_item_type', ddl: "TEXT DEFAULT 'normal'" },
     { table: AUTH_SYNC_TABLES.categories, name: 'buy_fee_rate', ddl: 'REAL DEFAULT 0' },
     { table: AUTH_SYNC_TABLES.categories, name: 'sell_fee_rate', ddl: 'REAL DEFAULT 0' },
     { table: AUTH_SYNC_TABLES.transactions, name: 'trade_action', ddl: 'TEXT' },
@@ -510,6 +514,8 @@ async function ensureStructuredCompatibilityColumns(env) {
     { table: AUTH_SYNC_TABLES.transactions, name: 'trade_fee_rate', ddl: 'REAL' },
     { table: AUTH_SYNC_TABLES.transactions, name: 'trade_fee_amount', ddl: 'REAL' },
     { table: AUTH_SYNC_TABLES.transactions, name: 'trade_allocations', ddl: 'TEXT' },
+    { table: AUTH_SYNC_TABLES.transactions, name: 'trade_keys', ddl: 'TEXT' },
+    { table: AUTH_SYNC_TABLES.transactions, name: 'trade_key_allocations', ddl: 'TEXT' },
   ];
 
   for (const column of columns) {
@@ -905,13 +911,14 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
   // Categories
   if (Array.isArray(payload.categories) && payload.categories.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO ${tables.categories} (id,user_id,ledger_id,name,icon,type,buy_fee_rate,sell_fee_rate,"order",is_custom,updated_at,server_updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO ${tables.categories} (id,user_id,ledger_id,name,icon,type,trade_item_type,buy_fee_rate,sell_fee_rate,"order",is_custom,updated_at,server_updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT${tables.recordConflict} DO UPDATE SET
          ledger_id=excluded.ledger_id, 
          name=excluded.name, 
          icon=excluded.icon, 
          type=excluded.type, 
+          trade_item_type=excluded.trade_item_type,
          buy_fee_rate=excluded.buy_fee_rate,
          sell_fee_rate=excluded.sell_fee_rate,
          "order"=excluded."order", 
@@ -938,6 +945,7 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
         c.name || '',
         c.icon || 'Circle',
         c.type || 'expense',
+        c.tradeItemType || c.trade_item_type || 'normal',
         Number(c.buyFeeRate ?? c.buy_fee_rate ?? 0) || 0,
         Number(c.sellFeeRate ?? c.sell_fee_rate ?? 0) || 0,
         c.order ?? 0,
@@ -1002,8 +1010,8 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
   // Transactions
   if (Array.isArray(payload.transactions) && payload.transactions.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO ${tables.transactions} (id,user_id,ledger_id,amount,type,category_id,trade_action,trade_quantity,trade_gross_amount,trade_fee_rate,trade_fee_amount,trade_allocations,date,note,attachments,created_at,updated_at,server_updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO ${tables.transactions} (id,user_id,ledger_id,amount,type,category_id,trade_action,trade_quantity,trade_gross_amount,trade_fee_rate,trade_fee_amount,trade_allocations,trade_keys,trade_key_allocations,date,note,attachments,created_at,updated_at,server_updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT${tables.recordConflict} DO UPDATE SET
          ledger_id=excluded.ledger_id, 
          amount=excluded.amount, 
@@ -1012,11 +1020,13 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
          trade_action=excluded.trade_action,
          trade_quantity=excluded.trade_quantity,
          trade_gross_amount=excluded.trade_gross_amount,
-         trade_fee_rate=excluded.trade_fee_rate,
-         trade_fee_amount=excluded.trade_fee_amount,
-         trade_allocations=excluded.trade_allocations,
-         date=excluded.date, 
-         note=excluded.note, 
+          trade_fee_rate=excluded.trade_fee_rate,
+          trade_fee_amount=excluded.trade_fee_amount,
+          trade_allocations=excluded.trade_allocations,
+          trade_keys=excluded.trade_keys,
+          trade_key_allocations=excluded.trade_key_allocations,
+          date=excluded.date,
+          note=excluded.note,
          attachments=excluded.attachments,
          created_at=excluded.created_at, 
          updated_at=excluded.updated_at, 
@@ -1047,6 +1057,8 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
         t.tradeFeeRate ?? t.trade_fee_rate ?? null,
         t.tradeFeeAmount ?? t.trade_fee_amount ?? null,
         stringifyJsonArrayField(t.tradeAllocations ?? t.trade_allocations),
+        stringifyJsonArrayField(t.tradeKeys ?? t.trade_keys),
+        stringifyJsonArrayField(t.tradeKeyAllocations ?? t.trade_key_allocations),
         t.date || now,
         t.note || '',
         JSON.stringify(t.attachments || []),

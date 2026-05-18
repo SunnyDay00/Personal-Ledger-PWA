@@ -16,6 +16,7 @@ import { Clipboard } from '@capacitor/clipboard';
 import { Transaction, TransactionType } from '../types';
 import { LiquidFilter } from './LiquidFilter';
 import { isTradingLedger } from '../services/ledgerUtils';
+import { syncIosHomeQuickActions } from '../services/homeQuickActions';
 
 type HomeJumpTarget = {
     transactionId: string;
@@ -35,6 +36,7 @@ export const Layout: React.FC = () => {
     const [showToast, setShowToast] = useState(false);
     const [initialAddData, setInitialAddData] = useState<Partial<Transaction> | undefined>(undefined);
     const [initialAddType, setInitialAddType] = useState<TransactionType | undefined>(undefined);
+    const [initialAddLedgerId, setInitialAddLedgerId] = useState<string | undefined>(undefined);
     const [clipboardImage, setClipboardImage] = useState<string | undefined>(undefined);
     const [homeJumpTarget, setHomeJumpTarget] = useState<HomeJumpTarget | null>(null);
     const [showAddQuickMenu, setShowAddQuickMenu] = useState(false);
@@ -79,6 +81,7 @@ export const Layout: React.FC = () => {
         setShowAddQuickMenu(false);
         setInitialAddData(undefined);
         setInitialAddType(type);
+        setInitialAddLedgerId(undefined);
         setClipboardImage(undefined);
         setShowAdd(true);
         feedback.play('success');
@@ -130,6 +133,10 @@ export const Layout: React.FC = () => {
         currentLedgerIdRef.current = state.currentLedgerId;
     }, [state.ledgers, state.categories, state.currentLedgerId]);
 
+    useEffect(() => {
+        void syncIosHomeQuickActions(state.settings.homeQuickActions, state.ledgers);
+    }, [state.settings.homeQuickActions, state.ledgers]);
+
     useEffect(() => () => {
         clearAddLongPressTimer();
     }, [clearAddLongPressTimer]);
@@ -149,9 +156,14 @@ export const Layout: React.FC = () => {
 
             const categoryName = params.get('category') ? decodeURIComponent(params.get('category')!) : null;
             const ledgerName = params.get('ledger') ? decodeURIComponent(params.get('ledger')!) : null;
+            const ledgerIdParam = params.get('ledgerId') || params.get('ledger_id');
 
             let categoryId: string | undefined;
             let ledgerId: string | undefined;
+
+            if (ledgerIdParam && ledgersRef.current.some(l => l.id === ledgerIdParam)) {
+                ledgerId = ledgerIdParam;
+            }
 
             if (ledgerName) {
                 const ledger = ledgersRef.current.find(l => l.name === ledgerName);
@@ -159,11 +171,13 @@ export const Layout: React.FC = () => {
             }
 
             const targetLedgerId = ledgerId || currentLedgerIdRef.current;
+            const targetLedger = ledgersRef.current.find(l => l.id === targetLedgerId);
+            const targetCategoryType = isTradingLedger(targetLedger) ? 'trade' : type;
             if (categoryName) {
                 const category = categoriesRef.current.find(c =>
                     c.name === categoryName &&
                     c.ledgerId === targetLedgerId &&
-                    c.type === type
+                    c.type === targetCategoryType
                 );
                 if (category) categoryId = category.id;
             }
@@ -177,6 +191,7 @@ export const Layout: React.FC = () => {
                 date: Date.now()
             });
             setInitialAddType(undefined);
+            setInitialAddLedgerId(targetLedgerId);
 
             setShowAdd(true);
             feedback.play('success');
@@ -283,10 +298,11 @@ export const Layout: React.FC = () => {
                 // Keep search modal open so we return to it after editing
                 setInitialAddData(t);
                 setInitialAddType(undefined);
+                setInitialAddLedgerId(undefined);
                 // Also propagate clipboard image if needed? No, usually edit is just existing data.
                 setShowAdd(true);
             }} />}
-            {showAdd && <AddView onClose={() => { setShowAdd(false); setInitialAddData(undefined); setInitialAddType(undefined); setClipboardImage(undefined); }} initialTransaction={initialAddData} initialClipboardImage={clipboardImage} initialType={initialAddType} />}
+            {showAdd && <AddView onClose={() => { setShowAdd(false); setInitialAddData(undefined); setInitialAddType(undefined); setInitialAddLedgerId(undefined); setClipboardImage(undefined); }} initialTransaction={initialAddData} initialClipboardImage={clipboardImage} initialType={initialAddType} targetLedgerId={initialAddLedgerId} />}
             {showBudget && <BudgetModal onClose={() => setShowBudget(false)} />}
             {showAddQuickMenu && (
                 <button

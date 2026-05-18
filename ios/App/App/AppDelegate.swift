@@ -7,14 +7,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
     private let addTransactionShortcutType = "add_transaction"
     private let addTransactionShortcutURL = URL(string: "personalledger://add")!
+    private let homeQuickActionShortcutPrefix = "home_quick_action:"
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // Override point for customization after application launch.
         if let shortcutItem = launchOptions?[.shortcutItem] as? UIApplicationShortcutItem,
-           shortcutItem.type == addTransactionShortcutType {
+           canHandleShortcut(shortcutItem) {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
-                _ = self.openAddTransactionShortcut(application)
+                _ = self.openShortcut(application, shortcutItem)
             }
             return false
         }
@@ -57,15 +58,51 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func application(_ application: UIApplication, performActionFor shortcutItem: UIApplicationShortcutItem, completionHandler: @escaping (Bool) -> Void) {
-        if shortcutItem.type == addTransactionShortcutType {
-            completionHandler(openAddTransactionShortcut(application))
+        if canHandleShortcut(shortcutItem) {
+            completionHandler(openShortcut(application, shortcutItem))
         } else {
             completionHandler(false)
         }
     }
 
+    private func canHandleShortcut(_ shortcutItem: UIApplicationShortcutItem) -> Bool {
+        return shortcutItem.type == addTransactionShortcutType || shortcutItem.type.hasPrefix(homeQuickActionShortcutPrefix)
+    }
+
+    private func openShortcut(_ application: UIApplication, _ shortcutItem: UIApplicationShortcutItem) -> Bool {
+        if shortcutItem.type == addTransactionShortcutType {
+            return openAddTransactionShortcut(application)
+        }
+
+        guard let url = urlForHomeQuickAction(shortcutItem) else {
+            return false
+        }
+        return ApplicationDelegateProxy.shared.application(application, open: url, options: [:])
+    }
+
     private func openAddTransactionShortcut(_ application: UIApplication) -> Bool {
         return ApplicationDelegateProxy.shared.application(application, open: addTransactionShortcutURL, options: [:])
+    }
+
+    private func urlForHomeQuickAction(_ shortcutItem: UIApplicationShortcutItem) -> URL? {
+        guard
+            let userInfo = shortcutItem.userInfo,
+            let ledgerId = userInfo["ledgerId"] as? String,
+            let type = userInfo["type"] as? String,
+            !ledgerId.isEmpty,
+            (type == "expense" || type == "income")
+        else {
+            return nil
+        }
+
+        var components = URLComponents()
+        components.scheme = "personalledger"
+        components.host = "add"
+        components.queryItems = [
+            URLQueryItem(name: "ledgerId", value: ledgerId),
+            URLQueryItem(name: "type", value: type)
+        ]
+        return components.url
     }
 
 }

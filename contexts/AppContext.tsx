@@ -11,7 +11,7 @@ import { feedback } from '../services/feedback';
 import { imageService } from '../services/imageService';
 import { normalizeAppSettings, normalizeBackupReminderDays } from '../services/settingsUtils';
 import { checkSystemTimeSkew } from '../services/timeSkew';
-import { getAvailableTradeBuyLots, getTradeInventory, getTransactionTypeLabel, isTradingLedger, normalizeCategory, normalizeLedger, normalizeLedgerType, normalizeTradeAllocations, normalizeTransaction } from '../services/ledgerUtils';
+import { getAvailableTradeBuyLots, getAvailableTradeCardKeys, getTradeInventory, getTransactionTypeLabel, isTradingLedger, normalizeCategory, normalizeLedger, normalizeLedgerType, normalizeTradeAllocations, normalizeTradeKeyAllocations, normalizeTradeKeys, normalizeTransaction, tradeKeyAllocationsToTradeAllocations } from '../services/ledgerUtils';
 
 const initialState: AppState = {
     ledgers: INITIAL_LEDGERS,
@@ -238,6 +238,7 @@ const SYNCABLE_SETTINGS_KEYS: (keyof AppSettings)[] = [
     'exportStartDate',
     'exportEndDate',
     'defaultLedgerId',
+    'homeQuickActions',
 ];
 
 const withoutLocalAuthSecrets = (settings: AppSettings): Partial<AppSettings> => {
@@ -783,6 +784,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 tradeFeeRate: undefined,
                 tradeFeeAmount: undefined,
                 tradeAllocations: undefined,
+                tradeKeys: undefined,
+                tradeKeyAllocations: undefined,
             };
         }
 
@@ -794,6 +797,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const grossAmount = Number(normalized.tradeGrossAmount || normalized.amount || 0);
         if (!Number.isFinite(quantity) || quantity <= 0) throw new Error('请输入有效数量');
         if (!Number.isFinite(grossAmount) || grossAmount <= 0) throw new Error('请输入有效交易金额');
+        const isCardKeyCategory = category.tradeItemType === 'cardKey';
+        const integerQuantity = Math.floor(quantity);
+        if (isCardKeyCategory && Math.abs(quantity - integerQuantity) > 0.0001) {
+            throw new Error('卡密数量必须是整数');
+        }
 
         const inputFeeRate = Number(normalized.tradeFeeRate);
         const feeRate = Number.isFinite(inputFeeRate)
@@ -802,13 +810,93 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const feeAmount = Math.round((grossAmount * feeRate / 100 + Number.EPSILON) * 100) / 100;
         const amount = Math.max(0, Math.round(((tradeAction === 'sell' ? grossAmount - feeAmount : grossAmount + feeAmount) + Number.EPSILON) * 100) / 100);
 
-        const allocations = tradeAction === 'sell'
+        let allocations = tradeAction === 'sell'
             ? normalizeTradeAllocations(normalized.tradeAllocations)
             : undefined;
+        let tradeKeys = tradeAction === 'buy' && isCardKeyCategory
+            ? normalizeTradeKeys(normalized.tradeKeys) || []
+            : undefined;
+        let tradeKeyAllocations = tradeAction === 'sell' && isCardKeyCategory
+            ? normalizeTradeKeyAllocations(normalized.tradeKeyAllocations) || []
+            : undefined;
+
+        if (isCardKeyCategory && tradeAction === 'buy') {
+            if (!tradeKeys || tradeKeys.length !== integerQuantity) {
+                throw new Error('卡密数量与密钥数量不一致');
+            }
+
+            const values = tradeKeys.map(item => item.value.trim()).filter(Boolean);
+            if (values.length !== tradeKeys.length) throw new Error('请输入完整卡密');
+            if (new Set(values).size !== values.length) throw new Error('同一买入记录中不能重复录入卡密');
+
+            const existingDuplicate = stateRef.current.transactions
+                .filter(transaction =>
+                    !transaction.isDeleted &&
+                    transaction.ledgerId === normalized.ledgerId &&
+                    transaction.categoryId === normalized.categoryId &&
+                    transaction.id !== normalized.id &&
+                    (transaction.tradeAction || (transaction.type === 'income' ? 'sell' : 'buy')) === 'buy'
+                )
+                .some(transaction => {
+                    const existingValues = normalizeTradeKeys(transaction.tradeKeys)?.map(item => item.value) || [];
+                    return existingValues.some(value => values.includes(value));
+                });
+            if (existingDuplicate) throw new Error('同一类目中不能重复录入卡密');
+
+            const soldKeys = new Map<string, string>();
+            stateRef.current.transactions
+                .filter(transaction =>
+                    !transaction.isDeleted &&
+                    transaction.id !== excludeTransactionId &&
+                    transaction.ledgerId === normalized.ledgerId &&
+                    transaction.categoryId === normalized.categoryId &&
+                    (transaction.tradeAction || (transaction.type === 'income' ? 'sell' : 'buy')) === 'sell'
+                )
+                .forEach(transaction => {
+                    normalizeTradeKeyAllocations(transaction.tradeKeyAllocations)
+                        ?.filter(allocation => allocation.buyTransactionId === normalized.id)
+                        .forEach(allocation => soldKeys.set(allocation.keyId, allocation.value));
+                });
+
+            if (soldKeys.size > 0) {
+                const nextKeyMap = new Map(tradeKeys.map(item => [item.id, item.value]));
+                for (const [keyId, value] of soldKeys.entries()) {
+                    if (nextKeyMap.get(keyId) !== value) {
+                        throw new Error('已卖出的卡密不能删除或修改');
+                    }
+                }
+            }
+        }
 
         if (tradeAction === 'sell') {
             const inventory = getTradeInventory(stateRef.current.transactions, normalized.ledgerId, normalized.categoryId, excludeTransactionId);
             if (quantity > inventory) throw new Error(`库存不足，当前可卖数量为 ${inventory}`);
+
+            if (isCardKeyCategory) {
+                if (!tradeKeyAllocations || tradeKeyAllocations.length !== integerQuantity) {
+                    throw new Error('卡密数量与卖出密钥数量不一致');
+                }
+
+                const seenKeyIds = new Set<string>();
+                for (const allocation of tradeKeyAllocations) {
+                    const key = `${allocation.buyTransactionId}:${allocation.keyId}`;
+                    if (seenKeyIds.has(key)) throw new Error('同一次卖出不能重复选择卡密');
+                    seenKeyIds.add(key);
+                }
+
+                const availableKeys = getAvailableTradeCardKeys(stateRef.current.transactions, normalized.ledgerId, normalized.categoryId, excludeTransactionId);
+                const availableKeyMap = new Map(availableKeys.map(item => [`${item.buyTransactionId}:${item.keyId}`, item]));
+                tradeKeyAllocations = tradeKeyAllocations.map(allocation => {
+                    const available = availableKeyMap.get(`${allocation.buyTransactionId}:${allocation.keyId}`);
+                    if (!available) throw new Error('卡密已卖出或不存在，不能重复卖出');
+                    return {
+                        buyTransactionId: available.buyTransactionId,
+                        keyId: available.keyId,
+                        value: available.value,
+                    };
+                });
+                allocations = tradeKeyAllocationsToTradeAllocations(tradeKeyAllocations);
+            }
 
             if (allocations && allocations.length > 0) {
                 const allocatedQuantity = Math.round((allocations.reduce((sum, item) => sum + item.quantity, 0) + Number.EPSILON) * 100) / 100;
@@ -836,6 +924,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             tradeFeeRate: feeRate,
             tradeFeeAmount: feeAmount,
             tradeAllocations: tradeAction === 'sell' ? allocations : undefined,
+            tradeKeys: tradeAction === 'buy' && isCardKeyCategory ? tradeKeys : undefined,
+            tradeKeyAllocations: tradeAction === 'sell' && isCardKeyCategory ? tradeKeyAllocations : undefined,
         };
     };
 
@@ -1477,6 +1567,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 name: c.name,
                 icon: c.icon,
                 type: c.type,
+                trade_item_type: c.tradeItemType || c.trade_item_type || 'normal',
                 buy_fee_rate: Number(c.buyFeeRate ?? c.buy_fee_rate ?? 0) || 0,
                 sell_fee_rate: Number(c.sellFeeRate ?? c.sell_fee_rate ?? 0) || 0,
                 order: c.order ?? 0,
@@ -1506,6 +1597,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 trade_fee_rate: Number(t.tradeFeeRate ?? t.trade_fee_rate ?? 0) || null,
                 trade_fee_amount: Number(t.tradeFeeAmount ?? t.trade_fee_amount ?? 0) || null,
                 trade_allocations: t.tradeAllocations || t.trade_allocations || null,
+                trade_keys: t.tradeKeys || t.trade_keys || null,
+                trade_key_allocations: t.tradeKeyAllocations || t.trade_key_allocations || null,
                 date: t.date,
                 note: t.note || '',
                 attachments: t.attachments || [],
@@ -1912,7 +2005,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 trade: Math.max(-1, ...state.categories.filter(c => c.type === 'trade').map(c => c.order ?? 0)) + 1,
             };
 
-            const registerCat = (nameRaw: string, typeRaw: 'expense' | 'income'): string => {
+            const registerCat = (nameRaw: string, typeRaw: 'expense' | 'income', tradeItemType: Category['tradeItemType'] = 'normal'): string => {
                 const type = isTradingImport ? 'trade' : (typeRaw === 'income' ? 'income' : 'expense');
                 const name = (nameRaw || 'Other').trim();
                 const key = type + ':' + name;
@@ -1922,21 +2015,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     catMap.set(key, existing.id);
                     return existing.id;
                 }
-                const newCat: Category = { id: generateId(), ledgerId: targetLedgerId, name, icon: 'Circle', type, order: nextOrder[type]++, isCustom: true, buyFeeRate: 0, sellFeeRate: 0, updatedAt: Date.now(), isDeleted: false };
+                const newCat: Category = { id: generateId(), ledgerId: targetLedgerId, name, icon: 'Circle', type, tradeItemType: isTradingImport ? tradeItemType : undefined, order: nextOrder[type]++, isCustom: true, buyFeeRate: 0, sellFeeRate: 0, updatedAt: Date.now(), isDeleted: false };
                 newCats.push(newCat);
                 catMap.set(key, newCat.id);
                 return newCat.id;
             };
 
             // Register categories first
-            csvCats.forEach(c => registerCat(c.name, c.type === 'income' ? 'income' : 'expense'));
+            csvCats.forEach(c => registerCat(c.name, c.type === 'income' ? 'income' : 'expense', c.tradeItemType || 'normal'));
 
             // Persist new categories
             newCats.forEach(c => enhancedDispatch({ type: 'ADD_CATEGORY', payload: c }));
 
             // Normalize and persist transactions
             for (const tx of parsedTxs) {
-                const mappedCatId = registerCat(tx.categoryId || 'Other', tx.type === 'income' ? 'income' : 'expense');
+                const csvCat = csvCats.find(c => c.id === tx.categoryId || c.name === tx.categoryId);
+                const mappedCatId = registerCat(csvCat?.name || tx.categoryId || 'Other', tx.type === 'income' ? 'income' : 'expense', csvCat?.tradeItemType || 'normal');
                 const normalized: Transaction = {
                     ...normalizeTransaction(tx),
                     id: tx.id || generateId(),
@@ -2022,6 +2116,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             id: `${generateId()}_${timestamp}_${idx}`, // Ensure unique ID
             ledgerId: savedLedger.id,
             type: savedLedger.ledgerType === 'trading' ? 'trade' as const : c.type,
+            tradeItemType: savedLedger.ledgerType === 'trading' ? c.tradeItemType ?? 'normal' : undefined,
             buyFeeRate: c.buyFeeRate ?? 0,
             sellFeeRate: c.sellFeeRate ?? 0,
             order: idx,

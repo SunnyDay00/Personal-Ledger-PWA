@@ -29,10 +29,10 @@
 	<string>APPL</string>
 
 	<key>CFBundleShortVersionString</key>
-	<string>7.5.0</string>
+	<string>7.6.0</string>
 
 	<key>CFBundleVersion</key>
-	<string>13</string>
+	<string>14</string>
 
 	<key>LSRequiresIPhoneOS</key>
 	<true />
@@ -78,16 +78,5 @@
         </dict>
     </array>
 
-    <key>UIApplicationShortcutItems</key>
-    <array>
-        <dict>
-            <key>UIApplicationShortcutItemType</key>
-            <string>add_transaction</string>
-            <key>UIApplicationShortcutItemTitle</key>
-            <string>记一笔</string>
-            <key>UIApplicationShortcutItemIconType</key>
-            <string>UIApplicationShortcutIconTypeCompose</string>
-        </dict>
-    </array>
 </dict>
 </plist>

@@ -1,4 +1,4 @@
-import { Category, CategoryType, Ledger, LedgerType, TradeAction, TradeAllocation, Transaction } from '../types';
+import { Category, CategoryType, Ledger, LedgerType, TradeAction, TradeAllocation, TradeItemType, TradeKey, TradeKeyAllocation, Transaction } from '../types';
 
 export const normalizeLedgerType = (value: unknown): LedgerType =>
   value === 'trading' ? 'trading' : 'accounting';
@@ -8,23 +8,27 @@ export const normalizeCategoryType = (value: unknown): CategoryType => {
   return 'expense';
 };
 
+export const normalizeTradeItemType = (value: unknown): TradeItemType =>
+  value === 'cardKey' || value === 'card_key' ? 'cardKey' : 'normal';
+
 export const normalizeTradeAction = (value: unknown): TradeAction | undefined => {
   if (value === 'buy' || value === 'sell') return value;
   return undefined;
 };
 
+const parseJsonArrayField = (value: unknown): any[] => {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string' || value.trim() === '') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
 export const normalizeTradeAllocations = (value: unknown): TradeAllocation[] | undefined => {
-  const raw = Array.isArray(value)
-    ? value
-    : (() => {
-        if (typeof value !== 'string' || value.trim() === '') return [];
-        try {
-          const parsed = JSON.parse(value);
-          return Array.isArray(parsed) ? parsed : [];
-        } catch {
-          return [];
-        }
-      })();
+  const raw = parseJsonArrayField(value);
 
   const allocations = raw
     .map((item: any) => ({
@@ -32,6 +36,33 @@ export const normalizeTradeAllocations = (value: unknown): TradeAllocation[] | u
       quantity: roundMoney(Number(item?.quantity ?? 0)),
     }))
     .filter(item => item.buyTransactionId && Number.isFinite(item.quantity) && item.quantity > 0);
+
+  return allocations.length > 0 ? allocations : undefined;
+};
+
+export const normalizeTradeKeys = (value: unknown): TradeKey[] | undefined => {
+  const keys = parseJsonArrayField(value)
+    .map((item: any, index) => {
+      const rawValue = String(item?.value ?? item?.key ?? item?.cardKey ?? '').trim();
+      const rawId = item?.id ?? item?.keyId ?? item?.key_id ?? rawValue;
+      return {
+        id: String(rawId || `key-${index}`).trim(),
+        value: rawValue,
+      };
+    })
+    .filter(item => item.id && item.value);
+
+  return keys.length > 0 ? keys : undefined;
+};
+
+export const normalizeTradeKeyAllocations = (value: unknown): TradeKeyAllocation[] | undefined => {
+  const allocations = parseJsonArrayField(value)
+    .map((item: any) => ({
+      buyTransactionId: String(item?.buyTransactionId ?? item?.buy_transaction_id ?? '').trim(),
+      keyId: String(item?.keyId ?? item?.key_id ?? item?.id ?? '').trim(),
+      value: String(item?.value ?? item?.key ?? item?.cardKey ?? '').trim(),
+    }))
+    .filter(item => item.buyTransactionId && item.keyId && item.value);
 
   return allocations.length > 0 ? allocations : undefined;
 };
@@ -65,6 +96,7 @@ export const normalizeCategory = <T extends Partial<Category> & Record<string, a
   name: category.name || '',
   icon: category.icon || 'Circle',
   type: normalizeCategoryType(category.type),
+  tradeItemType: normalizeTradeItemType(category.tradeItemType ?? category.trade_item_type),
   buyFeeRate: Number(category.buyFeeRate ?? category.buy_fee_rate ?? 0) || 0,
   sellFeeRate: Number(category.sellFeeRate ?? category.sell_fee_rate ?? 0) || 0,
   order: Number(category.order ?? 0),
@@ -86,6 +118,8 @@ export const normalizeTransaction = <T extends Partial<Transaction> & Record<str
   tradeFeeRate: Number(transaction.tradeFeeRate ?? transaction.trade_fee_rate ?? 0) || undefined,
   tradeFeeAmount: Number(transaction.tradeFeeAmount ?? transaction.trade_fee_amount ?? 0) || undefined,
   tradeAllocations: normalizeTradeAllocations(transaction.tradeAllocations ?? transaction.trade_allocations),
+  tradeKeys: normalizeTradeKeys(transaction.tradeKeys ?? transaction.trade_keys),
+  tradeKeyAllocations: normalizeTradeKeyAllocations(transaction.tradeKeyAllocations ?? transaction.trade_key_allocations),
   date: Number(transaction.date ?? Date.now()),
   note: transaction.note || '',
   attachments: Array.isArray(transaction.attachments)
@@ -134,6 +168,128 @@ export type TradeBuyLot = {
   unitCost: number;
   unitFee: number;
   totalUnitCost: number;
+};
+
+export type TradeCardKeyStockItem = {
+  buyTransactionId: string;
+  transaction: Transaction;
+  keyId: string;
+  value: string;
+};
+
+const removeFirstMatchingCardKey = (
+  stock: TradeCardKeyStockItem[],
+  predicate: (item: TradeCardKeyStockItem) => boolean
+) => {
+  const index = stock.findIndex(predicate);
+  if (index !== -1) stock.splice(index, 1);
+};
+
+const consumeFirstCardKeys = (stock: TradeCardKeyStockItem[], quantity: number) => {
+  const count = Math.max(0, Math.floor(Number(quantity || 0)));
+  if (count > 0) stock.splice(0, count);
+};
+
+const createTradeCardKeyStock = (
+  transactions: Transaction[],
+  ledgerId: string,
+  categoryId: string,
+  excludeTransactionId?: string,
+  endTime = Number.POSITIVE_INFINITY,
+  endCreatedAt = Number.POSITIVE_INFINITY
+) => {
+  const stock: TradeCardKeyStockItem[] = [];
+
+  transactions
+    .filter(transaction =>
+      !transaction.isDeleted &&
+      transaction.ledgerId === ledgerId &&
+      transaction.categoryId === categoryId &&
+      transaction.id !== excludeTransactionId &&
+      (
+        transaction.date < endTime ||
+        (transaction.date === endTime && Number(transaction.createdAt || 0) < endCreatedAt)
+      )
+    )
+    .sort((a, b) => {
+      if (a.date !== b.date) return a.date - b.date;
+      return (a.createdAt || 0) - (b.createdAt || 0);
+    })
+    .forEach(transaction => {
+      const tradeAction = transaction.tradeAction || (transaction.type === 'income' ? 'sell' : 'buy');
+      if (tradeAction === 'buy') {
+        normalizeTradeKeys(transaction.tradeKeys)?.forEach(key => {
+          stock.push({
+            buyTransactionId: transaction.id,
+            transaction,
+            keyId: key.id,
+            value: key.value,
+          });
+        });
+        return;
+      }
+
+      if (tradeAction !== 'sell') return;
+
+      const keyAllocations = normalizeTradeKeyAllocations(transaction.tradeKeyAllocations);
+      if (keyAllocations && keyAllocations.length > 0) {
+        keyAllocations.forEach(allocation => {
+          removeFirstMatchingCardKey(
+            stock,
+            item => item.buyTransactionId === allocation.buyTransactionId && item.keyId === allocation.keyId
+          );
+        });
+        return;
+      }
+
+      consumeFirstCardKeys(stock, transaction.tradeQuantity || 0);
+    });
+
+  return stock;
+};
+
+export const getAvailableTradeCardKeys = (
+  transactions: Transaction[],
+  ledgerId: string,
+  categoryId: string,
+  excludeTransactionId?: string
+): TradeCardKeyStockItem[] =>
+  createTradeCardKeyStock(transactions, ledgerId, categoryId, excludeTransactionId);
+
+export const getSuggestedTradeKeyAllocations = (
+  transactions: Transaction[],
+  ledgerId: string,
+  categoryId: string,
+  quantity: number,
+  excludeTransactionId?: string
+): TradeKeyAllocation[] => {
+  const count = Math.max(0, Math.floor(Number(quantity || 0)));
+  if (count <= 0) return [];
+
+  return createTradeCardKeyStock(transactions, ledgerId, categoryId, excludeTransactionId)
+    .slice(0, count)
+    .map(item => ({
+      buyTransactionId: item.buyTransactionId,
+      keyId: item.keyId,
+      value: item.value,
+    }));
+};
+
+export const tradeKeyAllocationsToTradeAllocations = (allocations?: TradeKeyAllocation[]): TradeAllocation[] | undefined => {
+  const normalized = normalizeTradeKeyAllocations(allocations);
+  if (!normalized) return undefined;
+
+  const grouped = new Map<string, number>();
+  normalized.forEach(allocation => {
+    grouped.set(allocation.buyTransactionId, (grouped.get(allocation.buyTransactionId) || 0) + 1);
+  });
+
+  const tradeAllocations = Array.from(grouped.entries()).map(([buyTransactionId, quantity]) => ({
+    buyTransactionId,
+    quantity,
+  }));
+
+  return tradeAllocations.length > 0 ? tradeAllocations : undefined;
 };
 
 const getBuyUnitFeeForCost = (transaction: Transaction, unitCost: number, quantity: number, buyGrossAmount: number) => {
