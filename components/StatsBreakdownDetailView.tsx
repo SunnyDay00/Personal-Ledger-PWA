@@ -8,6 +8,7 @@ import { ImagePreview } from './ImagePreview';
 import { Icon } from './ui/Icon';
 import { feedback } from '../services/feedback';
 import { formatCurrency } from '../utils';
+import { getTransactionTypeLabel, isTradingLedger } from '../services/ledgerUtils';
 
 interface StatsBreakdownDetailViewProps {
     breakdownLabel: '分类' | '分组';
@@ -81,6 +82,9 @@ export const StatsBreakdownDetailView: React.FC<StatsBreakdownDetailViewProps> =
         () => sortedTransactions.reduce((sum, transaction) => sum + transaction.amount, 0),
         [sortedTransactions]
     );
+    const detailLedger = state.ledgers.find(ledger => ledger.id === sortedTransactions[0]?.ledgerId);
+    const isTrading = isTradingLedger(detailLedger);
+    const dataTypeLabel = getTransactionTypeLabel(detailLedger, dataType);
 
     const groupedTransactions = useMemo<TransactionDayGroup[]>(() => {
         const groups = new Map<string, TransactionDayGroup>();
@@ -141,7 +145,7 @@ export const StatsBreakdownDetailView: React.FC<StatsBreakdownDetailViewProps> =
 
                         <div className="grid grid-cols-2 gap-3 mt-5">
                             <div className="rounded-2xl bg-white/38 dark:bg-zinc-800/40 backdrop-blur-[18px] p-4 border border-white/45 dark:border-white/10">
-                                <p className="text-xs text-ios-subtext">{dataType === 'expense' ? '总支出' : '总收入'}</p>
+                                <p className="text-xs text-ios-subtext">总{dataTypeLabel}</p>
                                 <p
                                     className={clsx(
                                         'mt-2 text-lg font-bold tabular-nums',
@@ -196,6 +200,8 @@ export const StatsBreakdownDetailView: React.FC<StatsBreakdownDetailViewProps> =
                                             const timeLabel = format(transaction.createdAt || transaction.date, 'HH:mm');
                                             const metaParts = [
                                                 ...(title !== category?.name && category?.name ? [category.name] : []),
+                                                ...(isTrading ? [`${getTransactionTypeLabel(detailLedger, transaction.type)} ${transaction.tradeQuantity || 0} 个`] : []),
+                                                ...(isTrading && transaction.tradeFeeAmount ? [`手续费 ${formatCurrency(transaction.tradeFeeAmount)}`] : []),
                                                 timeLabel,
                                             ];
 

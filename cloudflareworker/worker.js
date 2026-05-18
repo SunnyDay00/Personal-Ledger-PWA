@@ -41,6 +41,20 @@ async function parseJsonBody(request) {
   }
 }
 
+function stringifyJsonArrayField(value) {
+  if (Array.isArray(value)) return JSON.stringify(value);
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      return JSON.stringify(JSON.parse(trimmed));
+    } catch {
+      return trimmed;
+    }
+  }
+  return null;
+}
+
 function normalizeUsername(username) {
   return typeof username === 'string' ? username.trim().toLowerCase() : '';
 }
@@ -302,6 +316,7 @@ CREATE TABLE IF NOT EXISTS ledgers_v2 (
   id TEXT NOT NULL,
   name TEXT,
   theme_color TEXT,
+  ledger_type TEXT DEFAULT 'accounting',
   created_at INTEGER,
   updated_at INTEGER,
   server_updated_at INTEGER NOT NULL DEFAULT 0,
@@ -315,6 +330,8 @@ CREATE TABLE IF NOT EXISTS categories_v2 (
   name TEXT,
   icon TEXT,
   type TEXT,
+  buy_fee_rate REAL DEFAULT 0,
+  sell_fee_rate REAL DEFAULT 0,
   "order" INTEGER,
   is_custom INTEGER,
   updated_at INTEGER,
@@ -341,6 +358,12 @@ CREATE TABLE IF NOT EXISTS transactions_v2 (
   amount REAL,
   type TEXT,
   category_id TEXT,
+  trade_action TEXT,
+  trade_quantity REAL,
+  trade_gross_amount REAL,
+  trade_fee_rate REAL,
+  trade_fee_amount REAL,
+  trade_allocations TEXT,
   date INTEGER,
   note TEXT,
   attachments TEXT,
@@ -453,6 +476,7 @@ async function ensureTables(env) {
 async function initializeTables(env) {
     const stmts = CREATE_SQL.split(';').map(s => s.trim()).filter(Boolean);
     for (const sql of stmts) await env.DB.prepare(sql).run();
+    await ensureStructuredCompatibilityColumns(env);
     await ensureServerUpdatedAtColumns(env);
     await ensureServerUpdatedAtIndexes(env);
 }
@@ -473,6 +497,31 @@ async function ensureServerUpdatedAtColumns(env) {
       `UPDATE ${tableName} SET server_updated_at = ? WHERE server_updated_at IS NULL OR server_updated_at <= 0`
     ).bind(now).run();
   }
+}
+
+async function ensureStructuredCompatibilityColumns(env) {
+  const columns = [
+    { table: AUTH_SYNC_TABLES.ledgers, name: 'ledger_type', ddl: "TEXT DEFAULT 'accounting'" },
+    { table: AUTH_SYNC_TABLES.categories, name: 'buy_fee_rate', ddl: 'REAL DEFAULT 0' },
+    { table: AUTH_SYNC_TABLES.categories, name: 'sell_fee_rate', ddl: 'REAL DEFAULT 0' },
+    { table: AUTH_SYNC_TABLES.transactions, name: 'trade_action', ddl: 'TEXT' },
+    { table: AUTH_SYNC_TABLES.transactions, name: 'trade_quantity', ddl: 'REAL' },
+    { table: AUTH_SYNC_TABLES.transactions, name: 'trade_gross_amount', ddl: 'REAL' },
+    { table: AUTH_SYNC_TABLES.transactions, name: 'trade_fee_rate', ddl: 'REAL' },
+    { table: AUTH_SYNC_TABLES.transactions, name: 'trade_fee_amount', ddl: 'REAL' },
+    { table: AUTH_SYNC_TABLES.transactions, name: 'trade_allocations', ddl: 'TEXT' },
+  ];
+
+  for (const column of columns) {
+    const hasColumn = await tableHasColumn(env, column.table, column.name);
+    if (!hasColumn) {
+      await env.DB.prepare(`ALTER TABLE ${column.table} ADD COLUMN ${column.name} ${column.ddl}`).run();
+    }
+  }
+
+  await env.DB.prepare(
+    `UPDATE ${AUTH_SYNC_TABLES.ledgers} SET ledger_type='accounting' WHERE ledger_type IS NULL OR ledger_type=''`
+  ).run();
 }
 
 async function ensureServerUpdatedAtIndexes(env) {
@@ -816,11 +865,12 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
   // Ledgers
   if (Array.isArray(payload.ledgers) && payload.ledgers.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO ${tables.ledgers} (id,user_id,name,theme_color,created_at,updated_at,server_updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?,?)
+      `INSERT INTO ${tables.ledgers} (id,user_id,name,theme_color,ledger_type,created_at,updated_at,server_updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?,?)
        ON CONFLICT${tables.recordConflict} DO UPDATE SET
          name=excluded.name, 
          theme_color=excluded.theme_color, 
+         ledger_type=excluded.ledger_type,
          updated_at=excluded.updated_at, 
          server_updated_at=excluded.server_updated_at,
          is_deleted=excluded.is_deleted, 
@@ -841,6 +891,7 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
         userId,
         l.name || '',
         l.themeColor || l.theme_color || '#007AFF',
+        l.ledgerType || l.ledger_type || 'accounting',
         createdAt,
         updatedAt,
         newVersion,
@@ -854,13 +905,15 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
   // Categories
   if (Array.isArray(payload.categories) && payload.categories.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO ${tables.categories} (id,user_id,ledger_id,name,icon,type,"order",is_custom,updated_at,server_updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO ${tables.categories} (id,user_id,ledger_id,name,icon,type,buy_fee_rate,sell_fee_rate,"order",is_custom,updated_at,server_updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT${tables.recordConflict} DO UPDATE SET
          ledger_id=excluded.ledger_id, 
          name=excluded.name, 
          icon=excluded.icon, 
          type=excluded.type, 
+         buy_fee_rate=excluded.buy_fee_rate,
+         sell_fee_rate=excluded.sell_fee_rate,
          "order"=excluded."order", 
          is_custom=excluded.is_custom, 
          updated_at=excluded.updated_at, 
@@ -885,6 +938,8 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
         c.name || '',
         c.icon || 'Circle',
         c.type || 'expense',
+        Number(c.buyFeeRate ?? c.buy_fee_rate ?? 0) || 0,
+        Number(c.sellFeeRate ?? c.sell_fee_rate ?? 0) || 0,
         c.order ?? 0,
         isCustom ? 1 : 0,
         updatedAt,
@@ -947,13 +1002,19 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
   // Transactions
   if (Array.isArray(payload.transactions) && payload.transactions.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO ${tables.transactions} (id,user_id,ledger_id,amount,type,category_id,date,note,attachments,created_at,updated_at,server_updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO ${tables.transactions} (id,user_id,ledger_id,amount,type,category_id,trade_action,trade_quantity,trade_gross_amount,trade_fee_rate,trade_fee_amount,trade_allocations,date,note,attachments,created_at,updated_at,server_updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT${tables.recordConflict} DO UPDATE SET
          ledger_id=excluded.ledger_id, 
          amount=excluded.amount, 
          type=excluded.type, 
          category_id=excluded.category_id, 
+         trade_action=excluded.trade_action,
+         trade_quantity=excluded.trade_quantity,
+         trade_gross_amount=excluded.trade_gross_amount,
+         trade_fee_rate=excluded.trade_fee_rate,
+         trade_fee_amount=excluded.trade_fee_amount,
+         trade_allocations=excluded.trade_allocations,
          date=excluded.date, 
          note=excluded.note, 
          attachments=excluded.attachments,
@@ -980,6 +1041,12 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
         Number(t.amount || 0),
         t.type || 'expense',
         t.categoryId || t.category_id || '',
+        t.tradeAction || t.trade_action || null,
+        t.tradeQuantity ?? t.trade_quantity ?? null,
+        t.tradeGrossAmount ?? t.trade_gross_amount ?? null,
+        t.tradeFeeRate ?? t.trade_fee_rate ?? null,
+        t.tradeFeeAmount ?? t.trade_fee_amount ?? null,
+        stringifyJsonArrayField(t.tradeAllocations ?? t.trade_allocations),
         t.date || now,
         t.note || '',
         JSON.stringify(t.attachments || []),

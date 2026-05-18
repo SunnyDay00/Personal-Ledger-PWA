@@ -1,4 +1,4 @@
-import { Category, Ledger, AppSettings } from './types';
+import { Category, CategoryType, Ledger, AppSettings } from './types';
 
 export const DEFAULT_THEME_COLOR = '#007AFF';
 export const FIXED_SYNC_ENDPOINT = 'https://sync.sssr.edu.kg';
@@ -43,19 +43,19 @@ export const DEFAULT_SETTINGS: AppSettings = {
   exportStartDate: '',
   exportEndDate: '',
   isFirstRun: true,
-  version: '7.4.6',
+  version: '7.5.0',
   debugMode: typeof localStorage !== 'undefined' ? localStorage.getItem('debugMode') === 'true' : false,
   defaultLedgerId: '',
 };
 
 export const INITIAL_LEDGERS: Ledger[] = [
-  { id: 'l1', name: '个人生活', themeColor: '#007AFF', createdAt: Date.now() },
+  { id: 'l1', name: '个人生活', themeColor: '#007AFF', ledgerType: 'accounting', createdAt: Date.now() },
 ];
 
 export const DEFAULT_CATEGORY_GROUPS = [];
 
 // Helper to create category list easily
-const createCats = (type: 'expense' | 'income', list: string[], startIndex: number): Category[] => {
+const createCats = (type: CategoryType, list: string[], startIndex: number): Category[] => {
   const iconMap: Record<string, string> = {
     '餐饮': 'Utensils', '买菜': 'Carrot', '零食': 'IceCream', '日用': 'ShoppingBag',
     '数码': 'Smartphone', '娱乐': 'Gamepad2', '服饰': 'Shirt', '游玩': 'Plane',
@@ -108,6 +108,12 @@ export const DEFAULT_CATEGORIES: Category[] = [
   updatedAt: Date.now(),
   isDeleted: false
 }));
+
+export const DEFAULT_TRADE_CATEGORIES: Category[] = [
+  { id: 'trade_default_0', name: '商品', icon: 'Package', type: 'trade', order: 0, isCustom: false, buyFeeRate: 0, sellFeeRate: 0, updatedAt: Date.now(), isDeleted: false },
+  { id: 'trade_default_1', name: '原料', icon: 'Boxes', type: 'trade', order: 1, isCustom: false, buyFeeRate: 0, sellFeeRate: 0, updatedAt: Date.now(), isDeleted: false },
+  { id: 'trade_default_2', name: '其他', icon: 'MoreHorizontal', type: 'trade', order: 2, isCustom: false, buyFeeRate: 0, sellFeeRate: 0, updatedAt: Date.now(), isDeleted: false },
+];
 
 export const THEME_PRESETS = [
   '#007AFF', // Blue

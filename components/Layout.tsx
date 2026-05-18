@@ -13,13 +13,16 @@ import { clsx } from 'clsx';
 import { feedback } from '../services/feedback';
 import { App, URLOpenListenerEvent } from '@capacitor/app';
 import { Clipboard } from '@capacitor/clipboard';
-import { Transaction } from '../types';
+import { Transaction, TransactionType } from '../types';
 import { LiquidFilter } from './LiquidFilter';
+import { isTradingLedger } from '../services/ledgerUtils';
 
 type HomeJumpTarget = {
     transactionId: string;
     nonce: number;
 };
+
+const ADD_LONG_PRESS_MS = 450;
 
 const StatsView = React.lazy(() => import('./StatsView').then(module => ({ default: module.StatsView })));
 
@@ -31,8 +34,12 @@ export const Layout: React.FC = () => {
     const [showBudget, setShowBudget] = useState(false);
     const [showToast, setShowToast] = useState(false);
     const [initialAddData, setInitialAddData] = useState<Partial<Transaction> | undefined>(undefined);
+    const [initialAddType, setInitialAddType] = useState<TransactionType | undefined>(undefined);
     const [clipboardImage, setClipboardImage] = useState<string | undefined>(undefined);
     const [homeJumpTarget, setHomeJumpTarget] = useState<HomeJumpTarget | null>(null);
+    const [showAddQuickMenu, setShowAddQuickMenu] = useState(false);
+    const addLongPressTimerRef = useRef<number | null>(null);
+    const suppressAddClickRef = useRef(false);
     const ledgersRef = useRef(state.ledgers);
     const categoriesRef = useRef(state.categories);
     const currentLedgerIdRef = useRef(state.currentLedgerId);
@@ -42,12 +49,90 @@ export const Layout: React.FC = () => {
         const details = latest.details || '';
         return details.startsWith('Delete ') || details.startsWith('批量删除 ') ? latest.id : '';
     }, [state.operationLogs]);
+    const currentLedger = useMemo(
+        () => state.ledgers.find(ledger => ledger.id === state.currentLedgerId),
+        [state.ledgers, state.currentLedgerId]
+    );
+    const isCurrentTradingLedger = isTradingLedger(currentLedger);
+    const addQuickActions = useMemo(
+        () => isCurrentTradingLedger
+            ? [
+                { type: 'expense' as TransactionType, label: '添加买入', icon: 'ShoppingCart', accent: 'text-ios-primary' },
+                { type: 'income' as TransactionType, label: '添加卖出', icon: 'TrendingUp', accent: 'text-green-500' },
+            ]
+            : [
+                { type: 'expense' as TransactionType, label: '添加支出', icon: 'TrendingDown', accent: 'text-red-500' },
+                { type: 'income' as TransactionType, label: '添加收入', icon: 'TrendingUp', accent: 'text-green-500' },
+            ],
+        [isCurrentTradingLedger]
+    );
+
+    const clearAddLongPressTimer = useCallback(() => {
+        if (addLongPressTimerRef.current !== null) {
+            window.clearTimeout(addLongPressTimerRef.current);
+            addLongPressTimerRef.current = null;
+        }
+    }, []);
+
+    const openAdd = useCallback((type?: TransactionType) => {
+        clearAddLongPressTimer();
+        setShowAddQuickMenu(false);
+        setInitialAddData(undefined);
+        setInitialAddType(type);
+        setClipboardImage(undefined);
+        setShowAdd(true);
+        feedback.play('success');
+        feedback.vibrate('light');
+    }, [clearAddLongPressTimer]);
+
+    const handleAddPointerDown = useCallback(() => {
+        clearAddLongPressTimer();
+        suppressAddClickRef.current = false;
+        addLongPressTimerRef.current = window.setTimeout(() => {
+            addLongPressTimerRef.current = null;
+            suppressAddClickRef.current = true;
+            setShowAddQuickMenu(true);
+            feedback.play('switch');
+            feedback.vibrate('medium');
+        }, ADD_LONG_PRESS_MS);
+    }, [clearAddLongPressTimer]);
+
+    const handleAddPointerEnd = useCallback(() => {
+        clearAddLongPressTimer();
+    }, [clearAddLongPressTimer]);
+
+    const handleAddClick = useCallback(() => {
+        if (suppressAddClickRef.current) {
+            suppressAddClickRef.current = false;
+            return;
+        }
+
+        openAdd();
+    }, [openAdd]);
+
+    const handleAddContextMenu = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+        event.preventDefault();
+        clearAddLongPressTimer();
+        suppressAddClickRef.current = true;
+        setShowAddQuickMenu(true);
+        feedback.play('switch');
+        feedback.vibrate('medium');
+    }, [clearAddLongPressTimer]);
+
+    const handleTabSelect = useCallback((tab: 'home' | 'stats' | 'ledgers' | 'settings') => {
+        setShowAddQuickMenu(false);
+        setActiveTab(tab);
+    }, []);
 
     useEffect(() => {
         ledgersRef.current = state.ledgers;
         categoriesRef.current = state.categories;
         currentLedgerIdRef.current = state.currentLedgerId;
     }, [state.ledgers, state.categories, state.currentLedgerId]);
+
+    useEffect(() => () => {
+        clearAddLongPressTimer();
+    }, [clearAddLongPressTimer]);
 
     const openAddFromUrl = useCallback((urlStr?: string) => {
         if (!urlStr || !urlStr.includes('add')) return;
@@ -91,6 +176,7 @@ export const Layout: React.FC = () => {
                 ledgerId,
                 date: Date.now()
             });
+            setInitialAddType(undefined);
 
             setShowAdd(true);
             feedback.play('success');
@@ -171,7 +257,7 @@ export const Layout: React.FC = () => {
     }
 
     return (
-        <div className="h-full w-full flex flex-col bg-ios-bg text-ios-text overflow-hidden font-sans">
+        <div className="h-full w-full flex flex-col bg-ios-bg text-ios-text overflow-hidden font-sans relative">
             <LiquidFilter />
 
             {/* Main Content Area */}
@@ -196,11 +282,19 @@ export const Layout: React.FC = () => {
             {showSearch && <SearchModal onClose={() => setShowSearch(false)} onEdit={(t) => {
                 // Keep search modal open so we return to it after editing
                 setInitialAddData(t);
+                setInitialAddType(undefined);
                 // Also propagate clipboard image if needed? No, usually edit is just existing data.
                 setShowAdd(true);
             }} />}
-            {showAdd && <AddView onClose={() => { setShowAdd(false); setInitialAddData(undefined); setClipboardImage(undefined); }} initialTransaction={initialAddData} initialClipboardImage={clipboardImage} />}
+            {showAdd && <AddView onClose={() => { setShowAdd(false); setInitialAddData(undefined); setInitialAddType(undefined); setClipboardImage(undefined); }} initialTransaction={initialAddData} initialClipboardImage={clipboardImage} initialType={initialAddType} />}
             {showBudget && <BudgetModal onClose={() => setShowBudget(false)} />}
+            {showAddQuickMenu && (
+                <button
+                    aria-label="关闭快捷添加菜单"
+                    className="fixed inset-0 z-30 cursor-default bg-black/5 backdrop-blur-[1px] animate-fade-in dark:bg-black/20"
+                    onClick={() => setShowAddQuickMenu(false)}
+                />
+            )}
 
             {/* Undo Toast */}
             {showToast && canUndo && (
@@ -223,6 +317,23 @@ export const Layout: React.FC = () => {
             <nav
                 className="absolute bottom-6 left-4 right-4 z-40 h-16"
             >
+                {showAddQuickMenu && (
+                    <div className="animate-add-quick-menu absolute left-1/2 bottom-[4.75rem] z-50 flex -translate-x-1/2 items-center gap-2 rounded-full bg-white/35 p-1 shadow-[0_14px_38px_rgba(0,0,0,0.16)] backdrop-blur-xl dark:bg-zinc-950/30">
+                        {addQuickActions.map((action, index) => (
+                            <button
+                                key={action.type}
+                                onClick={() => openAdd(action.type)}
+                                className="animate-add-quick-action h-11 whitespace-nowrap rounded-full border border-white/70 dark:border-white/10 bg-white/95 dark:bg-zinc-900/95 px-4 text-sm font-semibold text-ios-text shadow-[0_10px_30px_rgba(0,0,0,0.18)] backdrop-blur-md active:scale-95"
+                                style={{ animationDelay: `${index * 45}ms` }}
+                            >
+                                <span className="flex items-center gap-2">
+                                    <Icon name={action.icon} className={clsx('h-4 w-4', action.accent)} />
+                                    {action.label}
+                                </span>
+                            </button>
+                        ))}
+                    </div>
+                )}
                 {/* Floating Capsule Background */}
                 <div className="absolute inset-0 overflow-hidden rounded-full bg-white/60 dark:bg-[#1c1c1e]/60 backdrop-blur-md border border-white/20 dark:border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.12)]">
                     {/* Glossy Reflection Overlay */}
@@ -239,7 +350,7 @@ export const Layout: React.FC = () => {
                     {/* 1. Home */}
                     <TabButton
                         active={activeTab === 'home'}
-                        onClick={() => setActiveTab('home')}
+                        onClick={() => handleTabSelect('home')}
                         icon="Home"
                         label="首页"
                         position="first"
@@ -248,7 +359,7 @@ export const Layout: React.FC = () => {
                     {/* 2. Stats */}
                     <TabButton
                         active={activeTab === 'stats'}
-                        onClick={() => setActiveTab('stats')}
+                        onClick={() => handleTabSelect('stats')}
                         icon="BarChart3"
                         label="统计"
                         position="second"
@@ -257,25 +368,38 @@ export const Layout: React.FC = () => {
                     {/* 3. Add (Center Green Button) */}
                     <div className="flex justify-center items-center w-[20%]">
                         <button
-                            onClick={() => {
-                                feedback.play('success');
-                                feedback.vibrate('light');
-                                setShowAdd(true);
-                            }}
-                            className="w-14 h-10 rounded-[20px] bg-[#34C759] text-white shadow-[0_4px_15px_rgba(52,199,89,0.4)] flex items-center justify-center transform transition-all hover:scale-105 active:scale-95 relative overflow-hidden group"
+                            onClick={handleAddClick}
+                            onPointerDown={handleAddPointerDown}
+                            onPointerUp={handleAddPointerEnd}
+                            onPointerLeave={handleAddPointerEnd}
+                            onPointerCancel={handleAddPointerEnd}
+                            onContextMenu={handleAddContextMenu}
+                            aria-expanded={showAddQuickMenu}
+                            aria-label="添加"
+                            className={clsx(
+                                'w-14 h-10 rounded-[20px] bg-[#34C759] text-white shadow-[0_4px_15px_rgba(52,199,89,0.4)] flex items-center justify-center transform transition-[transform,box-shadow] duration-200 hover:scale-105 active:scale-95 relative overflow-hidden group',
+                                showAddQuickMenu && 'scale-105 shadow-[0_8px_24px_rgba(52,199,89,0.5)]'
+                            )}
                         >
                             {/* Glass Shine */}
                             <div className="absolute inset-0 bg-gradient-to-b from-white/20 to-transparent pointer-events-none" />
                             <div className="absolute bottom-0 inset-x-0 h-1/2 bg-gradient-to-t from-black/10 to-transparent pointer-events-none" />
 
-                            <Icon name="Plus" className="w-6 h-6 z-10 drop-shadow-sm" strokeWidth={3} />
+                            <Icon
+                                name="Plus"
+                                className={clsx(
+                                    'w-6 h-6 z-10 drop-shadow-sm transition-transform duration-200 ease-out',
+                                    showAddQuickMenu && 'rotate-45 scale-105'
+                                )}
+                                strokeWidth={3}
+                            />
                         </button>
                     </div>
 
                     {/* 4. Ledgers (New) */}
                     <TabButton
                         active={activeTab === 'ledgers'}
-                        onClick={() => setActiveTab('ledgers')}
+                        onClick={() => handleTabSelect('ledgers')}
                         icon="List"
                         label="账本"
                         position="fourth"
@@ -284,7 +408,7 @@ export const Layout: React.FC = () => {
                     {/* 5. Settings */}
                     <TabButton
                         active={activeTab === 'settings'}
-                        onClick={() => setActiveTab('settings')}
+                        onClick={() => handleTabSelect('settings')}
                         icon="Settings"
                         label="设置"
                         position="last"

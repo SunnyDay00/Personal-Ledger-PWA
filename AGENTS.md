@@ -13,6 +13,11 @@
 - Deploy with:
   - `npx wrangler deploy --config cloudflareworker/wrangler.toml`
 
+## Verification
+
+- After code changes, do not perform browser click or interaction testing yourself.
+- If browser click or interaction testing is needed, provide the exact steps and expected result so the user can test manually.
+
 ## Git
 
 - Git commit messages for this repository must be written in Chinese.

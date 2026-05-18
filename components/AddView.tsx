@@ -2,18 +2,21 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { feedback } from '../services/feedback';
-import { TransactionType, Transaction } from '../types';
+import { TransactionType, Transaction, TradeAllocation } from '../types';
 import { generateId } from '../utils';
 import { clsx } from 'clsx';
 import { format, addDays, isSameDay } from 'date-fns';
 import { Keyboard } from '@capacitor/keyboard';
+import { Capacitor } from '@capacitor/core';
 import { imageService } from '../services/imageService';
 import { ImagePreview } from './ImagePreview';
+import { getAvailableTradeBuyLots, getSuggestedTradeAllocations, getTradingAllocationCost, isTradingLedger, normalizeTradeAllocations } from '../services/ledgerUtils';
 
 interface AddViewProps {
     onClose: () => void;
     initialTransaction?: Partial<Transaction>;
     initialClipboardImage?: string;
+    initialType?: TransactionType;
 }
 
 interface AttachmentItem {
@@ -154,10 +157,44 @@ const parseDateInputValue = (value: string) => {
     return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
 
-export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, initialClipboardImage }) => {
+const roundMoney = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
+
+const getTransactionInputAmount = (transaction?: Partial<Transaction> | null) => {
+    if (!transaction) return '0';
+    const amount = transaction.tradeGrossAmount ?? transaction.amount;
+    if (amount === undefined) return '0';
+
+    const quantity = Number(transaction.tradeQuantity || 0);
+    if (transaction.tradeGrossAmount !== undefined && Number.isFinite(quantity) && quantity > 0) {
+        return String(roundMoney(Number(transaction.tradeGrossAmount) / quantity));
+    }
+
+    return String(amount);
+};
+
+const allocationsToInputMap = (allocations?: TradeAllocation[]) =>
+    (allocations || []).reduce<Record<string, string>>((map, allocation) => {
+        map[allocation.buyTransactionId] = String(allocation.quantity);
+        return map;
+    }, {});
+
+const getCategoryFeeRate = (category: { buyFeeRate?: number; sellFeeRate?: number } | undefined, type: TransactionType) =>
+    type === 'income' ? category?.sellFeeRate ?? 0 : category?.buyFeeRate ?? 0;
+
+export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, initialClipboardImage, initialType = 'expense' }) => {
     const { state, addTransaction, updateTransaction } = useApp();
-    const [type, setType] = useState<TransactionType>(() => initialTransaction?.type || 'expense');
-    const [amountStr, setAmountStr] = useState(() => initialTransaction?.amount !== undefined ? initialTransaction.amount.toString() : '0');
+    const currentLedger = state.ledgers.find(ledger => ledger.id === state.currentLedgerId);
+    const isTrading = isTradingLedger(currentLedger);
+    const [type, setType] = useState<TransactionType>(() => initialTransaction?.type || initialType);
+    const [amountStr, setAmountStr] = useState(() => getTransactionInputAmount(initialTransaction));
+    const [quantityStr, setQuantityStr] = useState(() => initialTransaction?.tradeQuantity !== undefined ? String(initialTransaction.tradeQuantity) : '1');
+    const [feeRateStr, setFeeRateStr] = useState(() => initialTransaction?.tradeFeeRate !== undefined ? String(initialTransaction.tradeFeeRate) : '0');
+    const [sellAllocationInputs, setSellAllocationInputs] = useState<Record<string, string>>(() =>
+        allocationsToInputMap(normalizeTradeAllocations(initialTransaction?.tradeAllocations))
+    );
+    const [showSellCategoryPicker, setShowSellCategoryPicker] = useState(() =>
+        isTrading && initialTransaction?.type === 'income' && !initialTransaction?.categoryId
+    );
     const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(() => initialTransaction?.categoryId || null);
     const [note, setNote] = useState(() => initialTransaction?.note || '');
     const [date, setDate] = useState(() => initialTransaction?.date ? new Date(initialTransaction.date) : new Date());
@@ -169,8 +206,11 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     const [isUploading, setIsUploading] = useState(false);
     const [showPreview, setShowPreview] = useState(false);
     const [keyboardHeight, setKeyboardHeight] = useState(0);
+    const inferredAllocationRef = useRef<string | null>(null);
 
     useEffect(() => {
+        if (!Capacitor.isNativePlatform()) return;
+
         let showListener: any;
         let hideListener: any;
 
@@ -200,8 +240,13 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     const cols = state.settings.categoryRows || 5;
 
     const categories = useMemo(() => state.categories
-        .filter(c => c.type === type && c.ledgerId === state.currentLedgerId)
-        .sort((a, b) => a.order - b.order), [state.categories, type, state.currentLedgerId]);
+        .filter(c => (isTrading ? c.type === 'trade' : c.type === type) && c.ledgerId === state.currentLedgerId)
+        .sort((a, b) => a.order - b.order), [state.categories, type, state.currentLedgerId, isTrading]);
+
+    const selectedCategory = useMemo(
+        () => categories.find(category => category.id === selectedCategoryId),
+        [categories, selectedCategoryId]
+    );
 
     useEffect(() => {
         let cancelled = false;
@@ -231,15 +276,23 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         };
 
         if (initialTransaction) {
-            setType(initialTransaction.type || 'expense');
-            setAmountStr(initialTransaction.amount !== undefined ? initialTransaction.amount.toString() : '0');
+            setType(initialTransaction.type || initialType);
+            setAmountStr(getTransactionInputAmount(initialTransaction));
+            setQuantityStr(initialTransaction.tradeQuantity !== undefined ? String(initialTransaction.tradeQuantity) : '1');
+            setFeeRateStr(initialTransaction.tradeFeeRate !== undefined ? String(initialTransaction.tradeFeeRate) : '0');
+            setSellAllocationInputs(allocationsToInputMap(normalizeTradeAllocations(initialTransaction.tradeAllocations)));
+            setShowSellCategoryPicker(isTrading && initialTransaction.type === 'income' && !initialTransaction.categoryId);
             setSelectedCategoryId(initialTransaction.categoryId || null);
             setNote(initialTransaction.note || '');
             setDate(initialTransaction.date ? new Date(initialTransaction.date) : new Date());
             void loadInitialAttachments();
         } else {
-            setType('expense');
+            setType(initialType);
             setAmountStr('0');
+            setQuantityStr('1');
+            setFeeRateStr('0');
+            setSellAllocationInputs({});
+            setShowSellCategoryPicker(false);
             setSelectedCategoryId(null);
             setNote('');
             setDate(new Date());
@@ -249,7 +302,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         return () => {
             cancelled = true;
         };
-    }, [initialTransaction]);
+    }, [initialTransaction, initialType, isTrading]);
 
     useEffect(() => {
         if (categories.length === 0) {
@@ -258,10 +311,31 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         }
 
         const stillValid = selectedCategoryId && categories.some(c => c.id === selectedCategoryId);
+        if (isTrading && type === 'income') {
+            if (!stillValid && selectedCategoryId) setSelectedCategoryId(null);
+            return;
+        }
+
         if (!stillValid) {
             setSelectedCategoryId(categories[0].id);
         }
-    }, [categories, selectedCategoryId]);
+    }, [categories, selectedCategoryId, isTrading, type]);
+
+    useEffect(() => {
+        if (isTrading && type === 'income' && !selectedCategoryId) {
+            setShowSellCategoryPicker(true);
+        }
+    }, [isTrading, type, selectedCategoryId]);
+
+    useEffect(() => {
+        if (!isTrading || !selectedCategory) return;
+        const shouldUseSavedFeeRate =
+            initialTransaction?.id &&
+            initialTransaction.categoryId === selectedCategoryId &&
+            initialTransaction.type === type &&
+            initialTransaction.tradeFeeRate !== undefined;
+        setFeeRateStr(String(shouldUseSavedFeeRate ? initialTransaction.tradeFeeRate : getCategoryFeeRate(selectedCategory, type)));
+    }, [isTrading, selectedCategoryId, selectedCategory, type, initialTransaction?.id, initialTransaction?.categoryId, initialTransaction?.type, initialTransaction?.tradeFeeRate]);
 
     useEffect(() => {
         if (!initialClipboardImage) return;
@@ -294,6 +368,28 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         if (!selectedCategoryId) return [];
         return state.settings.categoryNotes?.[selectedCategoryId] || [];
     }, [selectedCategoryId, state.settings.categoryNotes]);
+
+    const availableSellLots = useMemo(() => {
+        if (!isTrading || type !== 'income' || !selectedCategoryId) return [];
+        return getAvailableTradeBuyLots(state.transactions, state.currentLedgerId, selectedCategoryId, initialTransaction?.id);
+    }, [isTrading, type, selectedCategoryId, state.transactions, state.currentLedgerId, initialTransaction?.id]);
+
+    useEffect(() => {
+        if (!isTrading || type !== 'income' || !initialTransaction?.id || !selectedCategoryId) return;
+        if (normalizeTradeAllocations(initialTransaction.tradeAllocations)?.length) return;
+        if (inferredAllocationRef.current === initialTransaction.id) return;
+
+        const quantity = Number(initialTransaction.tradeQuantity || 0);
+        const suggested = getSuggestedTradeAllocations(
+            state.transactions,
+            state.currentLedgerId,
+            selectedCategoryId,
+            quantity,
+            initialTransaction.id
+        );
+        setSellAllocationInputs(allocationsToInputMap(suggested));
+        inferredAllocationRef.current = initialTransaction.id;
+    }, [isTrading, type, initialTransaction?.id, initialTransaction?.tradeQuantity, initialTransaction?.tradeAllocations, selectedCategoryId, state.transactions, state.currentLedgerId]);
 
     useEffect(() => {
         const handlePaste = (event: ClipboardEvent) => {
@@ -369,16 +465,123 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         feedback.vibrate('light');
     };
 
+    const handleTypeSelect = (nextType: TransactionType) => {
+        setType(nextType);
+        feedback.play('switch');
+        feedback.vibrate('light');
+
+        if (isTrading && nextType === 'income') {
+            if (!initialTransaction?.id) {
+                setSelectedCategoryId(null);
+                setSellAllocationInputs({});
+            }
+            setShowSellCategoryPicker(true);
+            return;
+        }
+
+        setShowSellCategoryPicker(false);
+    };
+
+    const handleSellCategorySelect = (categoryId: string) => {
+        const category = categories.find(item => item.id === categoryId);
+        setSelectedCategoryId(categoryId);
+        setFeeRateStr(String(getCategoryFeeRate(category, 'income')));
+        setSellAllocationInputs({});
+        setShowSellCategoryPicker(false);
+        feedback.play('click');
+        feedback.vibrate('light');
+    };
+
+    const handleSellCategoryCancel = () => {
+        if (!initialTransaction?.id && !selectedCategoryId) {
+            onClose();
+            return;
+        }
+
+        setShowSellCategoryPicker(false);
+    };
+
+    const updateSellAllocationInput = (buyTransactionId: string, value: string, maxQuantity: number) => {
+        if (value.trim() === '') {
+            setSellAllocationInputs(prev => ({ ...prev, [buyTransactionId]: '' }));
+            return;
+        }
+
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed)) return;
+        const clamped = Math.max(0, Math.min(parsed, maxQuantity));
+        setSellAllocationInputs(prev => ({
+            ...prev,
+            [buyTransactionId]: clamped === 0 ? '' : String(clamped),
+        }));
+    };
+
+    const adjustSellAllocationInput = (buyTransactionId: string, delta: number, maxQuantity: number) => {
+        const current = Number(sellAllocationInputs[buyTransactionId] || 0);
+        const next = Math.max(0, Math.min((Number.isFinite(current) ? current : 0) + delta, maxQuantity));
+        setSellAllocationInputs(prev => ({
+            ...prev,
+            [buyTransactionId]: next === 0 ? '' : String(roundMoney(next)),
+        }));
+        feedback.play('click');
+        feedback.vibrate('light');
+    };
+
+    const handleCategorySelect = (categoryId: string) => {
+        const category = categories.find(item => item.id === categoryId);
+        setSelectedCategoryId(categoryId);
+        if (isTrading) setFeeRateStr(String(getCategoryFeeRate(category, type)));
+        feedback.play('click');
+        feedback.vibrate('light');
+    };
+
     const handleSubmit = async () => {
-        let amount = 0;
+        let inputAmount = 0;
         try {
-            amount = evaluateAmountExpression(amountStr);
+            inputAmount = evaluateAmountExpression(amountStr);
         } catch (error: any) {
             alert(error?.message || '请输入有效金额');
             return;
         }
 
-        if (amount <= 0 || !selectedCategoryId || isUploading) return;
+        const sellAllocations = isTrading && type === 'income'
+            ? availableSellLots
+                .map(lot => ({
+                    buyTransactionId: lot.buyTransactionId,
+                    quantity: roundMoney(Number(sellAllocationInputs[lot.buyTransactionId] || 0)),
+                    maxQuantity: lot.remainingQuantity,
+                }))
+                .filter(allocation => Number.isFinite(allocation.quantity) && allocation.quantity > 0)
+            : [];
+        const quantity = isTrading && type === 'income'
+            ? roundMoney(sellAllocations.reduce((sum, allocation) => sum + allocation.quantity, 0))
+            : Number(quantityStr);
+        if (inputAmount <= 0 || !selectedCategoryId || isUploading) return;
+        if (isTrading && (!Number.isFinite(quantity) || quantity <= 0)) {
+            alert(type === 'income' ? '请选择要卖出的买入批次和数量' : '请输入有效数量');
+            return;
+        }
+
+        const grossAmount = isTrading ? roundMoney(inputAmount * quantity) : inputAmount;
+        const defaultFeeRate = getCategoryFeeRate(selectedCategory, type);
+        const parsedFeeRate = feeRateStr.trim() === '' ? defaultFeeRate : Number(feeRateStr);
+        if (isTrading && (!Number.isFinite(parsedFeeRate) || parsedFeeRate < 0)) {
+            alert('请输入有效手续费率');
+            return;
+        }
+        const feeRate = isTrading ? parsedFeeRate : 0;
+        const feeAmount = roundMoney(grossAmount * feeRate / 100);
+        const amount = isTrading
+            ? Math.max(0, roundMoney(type === 'expense' ? grossAmount + feeAmount : grossAmount - feeAmount))
+            : grossAmount;
+
+        if (isTrading && type === 'income') {
+            const exceededAllocation = sellAllocations.find(allocation => allocation.quantity > allocation.maxQuantity);
+            if (exceededAllocation) {
+                alert(`批次剩余不足，当前批次可卖数量为 ${exceededAllocation.maxQuantity}`);
+                return;
+            }
+        }
 
         setIsUploading(true);
         const finalKeys: string[] = [];
@@ -412,6 +615,21 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                 amount,
                 type,
                 categoryId: selectedCategoryId,
+                ...(isTrading ? {
+                    tradeAction: type === 'income' ? 'sell' as const : 'buy' as const,
+                    tradeQuantity: quantity,
+                    tradeGrossAmount: grossAmount,
+                    tradeFeeRate: feeRate,
+                    tradeFeeAmount: feeAmount,
+                    tradeAllocations: type === 'income' ? sellAllocations.map(({ buyTransactionId, quantity }) => ({ buyTransactionId, quantity })) : undefined,
+                } : {
+                    tradeAction: undefined,
+                    tradeQuantity: undefined,
+                    tradeGrossAmount: undefined,
+                    tradeFeeRate: undefined,
+                    tradeFeeAmount: undefined,
+                    tradeAllocations: undefined,
+                }),
                 date: date.getTime(),
                 note,
                 attachments: finalKeys,
@@ -436,6 +654,9 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
             }
 
             setAmountStr('0');
+            setQuantityStr('1');
+            setFeeRateStr('0');
+            setSellAllocationInputs({});
             setNote('');
             setAttachments([]);
             feedback.play('success');
@@ -457,6 +678,45 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
             return null;
         }
     }, [amountStr]);
+    const selectedSellAllocations = useMemo<TradeAllocation[]>(() => {
+        if (!isTrading || type !== 'income') return [];
+        return availableSellLots
+            .map(lot => ({
+                buyTransactionId: lot.buyTransactionId,
+                quantity: roundMoney(Number(sellAllocationInputs[lot.buyTransactionId] || 0)),
+            }))
+            .filter(allocation => Number.isFinite(allocation.quantity) && allocation.quantity > 0);
+    }, [isTrading, type, availableSellLots, sellAllocationInputs]);
+    const sellAllocatedQuantity = selectedSellAllocations.reduce((sum, allocation) => roundMoney(sum + allocation.quantity), 0);
+    const parsedQuantity = Number(quantityStr);
+    const validTradeQuantity = isTrading && type === 'income'
+        ? sellAllocatedQuantity
+        : Number.isFinite(parsedQuantity) && parsedQuantity > 0 ? parsedQuantity : 0;
+    const tradeSubtotalAmount = isTrading && calculatedAmount !== null && validTradeQuantity > 0
+        ? roundMoney(calculatedAmount * validTradeQuantity)
+        : null;
+    const parsedTradeFeeRate = feeRateStr.trim() === '' ? getCategoryFeeRate(selectedCategory, type) : Number(feeRateStr);
+    const tradeFeeRate = isTrading && Number.isFinite(parsedTradeFeeRate) && parsedTradeFeeRate >= 0
+        ? parsedTradeFeeRate
+        : 0;
+    const tradeFeeAmount = tradeSubtotalAmount !== null
+        ? roundMoney(tradeSubtotalAmount * tradeFeeRate / 100)
+        : 0;
+    const tradeFinalAmount = tradeSubtotalAmount !== null
+        ? Math.max(0, roundMoney(type === 'expense' ? tradeSubtotalAmount + tradeFeeAmount : tradeSubtotalAmount - tradeFeeAmount))
+        : null;
+    const tradeSellCost = useMemo(
+        () => isTrading && type === 'income' && selectedCategoryId && validTradeQuantity > 0
+            ? getTradingAllocationCost(state.transactions, state.currentLedgerId, selectedCategoryId, selectedSellAllocations, initialTransaction?.id)
+            : null,
+        [isTrading, type, selectedCategoryId, validTradeQuantity, selectedSellAllocations, state.transactions, state.currentLedgerId, initialTransaction?.id]
+    );
+    const tradeEstimatedProfit = tradeFinalAmount !== null && tradeSellCost && tradeSellCost.matchedQuantity >= validTradeQuantity
+        ? roundMoney(tradeFinalAmount - tradeSellCost.cost)
+        : null;
+    const currentInventory = isTrading && type === 'income'
+        ? availableSellLots.reduce((sum, lot) => roundMoney(sum + lot.remainingQuantity), 0)
+        : 0;
     const inputDateValue = useMemo(() => format(date, 'yyyy-MM-dd'), [date]);
 
     return (
@@ -472,56 +732,143 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                 <button onClick={onClose} className="p-2 -ml-2 text-ios-subtext">取消</button>
                 <div className="flex bg-gray-200 dark:bg-zinc-800 rounded-lg p-0.5">
                     <button
-                        onClick={() => setType('expense')}
+                        onClick={() => handleTypeSelect('expense')}
                         className={`px-6 py-1.5 rounded-md text-sm font-medium transition-all ${type === 'expense' ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext'}`}
                     >
-                        支出
+                        {isTrading ? '买入' : '支出'}
                     </button>
                     <button
-                        onClick={() => setType('income')}
+                        onClick={() => handleTypeSelect('income')}
                         className={`px-6 py-1.5 rounded-md text-sm font-medium transition-all ${type === 'income' ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext'}`}
                     >
-                        收入
+                        {isTrading ? '卖出' : '收入'}
                     </button>
                 </div>
                 <div className="w-10" />
             </div>
 
             <div className="flex-1 overflow-y-auto no-scrollbar relative min-h-0" onClick={() => { if (isNoteFocused) setIsNoteFocused(false); }}>
-                <div className="grid gap-y-6 p-4" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
-                    {categories.map(cat => (
-                        <button
-                            key={cat.id}
-                            onClick={() => {
-                                setSelectedCategoryId(cat.id);
-                                feedback.play('click');
-                                feedback.vibrate('light');
-                            }}
-                            className="flex flex-col items-center gap-2 group"
-                        >
-                            <div className={clsx(
-                                'w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200',
-                                selectedCategoryId === cat.id
-                                    ? 'bg-ios-primary text-white shadow-lg shadow-blue-500/30 scale-110'
-                                    : state.settings.fontContrast === 'high'
-                                        ? 'bg-gray-200 dark:bg-zinc-700 text-gray-900 dark:text-gray-100 group-active:scale-95'
-                                        : 'bg-gray-100 dark:bg-zinc-800 text-ios-subtext group-active:scale-95'
-                            )}>
-                                <Icon name={cat.icon} className="w-5 h-5" />
+                {isTrading && type === 'income' ? (
+                    <div className="p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                                <div className="text-sm font-semibold text-ios-text truncate">
+                                    {selectedCategory ? `${selectedCategory.name} 可卖批次` : '选择要卖出的类目'}
+                                </div>
+                                <div className="text-xs text-ios-subtext tabular-nums">
+                                    已选 {formatResultNumber(sellAllocatedQuantity)} / 可卖 {formatResultNumber(currentInventory)}
+                                </div>
                             </div>
-                            <span className={clsx(
-                                'text-[10px] transition-colors truncate w-full text-center',
-                                selectedCategoryId === cat.id
-                                    ? 'text-ios-primary font-medium'
-                                    : state.settings.fontContrast === 'high'
-                                        ? 'text-gray-900 dark:text-gray-100 font-medium'
-                                        : 'text-ios-subtext'
-                            )}>
-                                {cat.name}
-                            </span>
-                        </button>
-                    ))}
-                </div>
+                            <button
+                                onClick={() => setShowSellCategoryPicker(true)}
+                                className="shrink-0 px-3 py-1.5 rounded-full bg-gray-200 dark:bg-zinc-800 text-xs font-medium text-ios-text active:scale-95"
+                            >
+                                更换类目
+                            </button>
+                        </div>
+
+                        {!selectedCategoryId ? (
+                            <button
+                                onClick={() => setShowSellCategoryPicker(true)}
+                                className="w-full h-20 rounded-xl border border-dashed border-ios-border text-sm text-ios-subtext flex items-center justify-center active:bg-gray-100 dark:active:bg-zinc-800"
+                            >
+                                先选择卖出类目
+                            </button>
+                        ) : availableSellLots.length === 0 ? (
+                            <div className="h-24 rounded-xl bg-white/70 dark:bg-zinc-900/70 border border-ios-border flex flex-col items-center justify-center text-sm text-ios-subtext">
+                                <Icon name="PackageOpen" className="w-5 h-5 mb-2" />
+                                没有可卖的买入批次
+                            </div>
+                        ) : (
+                            availableSellLots.map(lot => {
+                                const value = sellAllocationInputs[lot.buyTransactionId] || '';
+                                const buyQuantity = Number(lot.transaction.tradeQuantity || lot.originalQuantity || 0);
+                                return (
+                                    <div
+                                        key={lot.buyTransactionId}
+                                        className={clsx(
+                                            'rounded-xl border p-3 transition-colors',
+                                            value
+                                                ? 'border-ios-primary/40 bg-ios-primary/5'
+                                                : 'border-ios-border bg-white/80 dark:bg-zinc-900/80'
+                                        )}
+                                    >
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div className="min-w-0">
+                                                <div className="text-sm font-medium text-ios-text truncate">
+                                                    {lot.transaction.note || '买入记录'}
+                                                </div>
+                                                <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-ios-subtext">
+                                                    <span>{format(lot.transaction.date, 'yyyy/MM/dd')}</span>
+                                                    <span>买入 {formatResultNumber(buyQuantity)}</span>
+                                                    <span>剩余 {formatResultNumber(lot.remainingQuantity)}</span>
+                                                    <span>成本 {formatResultNumber(lot.totalUnitCost)}</span>
+                                                    {lot.transaction.attachments?.length ? <span>有图片</span> : null}
+                                                </div>
+                                            </div>
+
+                                            <div className="flex items-center gap-1 shrink-0">
+                                                <button
+                                                    onClick={() => adjustSellAllocationInput(lot.buyTransactionId, -1, lot.remainingQuantity)}
+                                                    className="w-8 h-8 rounded-full bg-gray-100 dark:bg-zinc-800 flex items-center justify-center text-ios-text active:scale-95"
+                                                >
+                                                    <Icon name="Minus" className="w-4 h-4" />
+                                                </button>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    step="1"
+                                                    max={lot.remainingQuantity}
+                                                    value={value}
+                                                    placeholder="0"
+                                                    onChange={event => updateSellAllocationInput(lot.buyTransactionId, event.target.value, lot.remainingQuantity)}
+                                                    className="w-16 h-8 rounded-lg border border-ios-border bg-white dark:bg-zinc-800 text-center text-sm tabular-nums text-ios-text outline-none"
+                                                />
+                                                <button
+                                                    onClick={() => adjustSellAllocationInput(lot.buyTransactionId, 1, lot.remainingQuantity)}
+                                                    className="w-8 h-8 rounded-full bg-gray-100 dark:bg-zinc-800 flex items-center justify-center text-ios-text active:scale-95"
+                                                >
+                                                    <Icon name="Plus" className="w-4 h-4" />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })
+                        )}
+                    </div>
+                ) : (
+                    <div className="grid gap-y-6 p-4" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+                        {categories.map(cat => (
+                            <button
+                                key={cat.id}
+                                onClick={() => handleCategorySelect(cat.id)}
+                                className="flex flex-col items-center gap-2 group"
+                            >
+                                <div className={clsx(
+                                    'w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200',
+                                    selectedCategoryId === cat.id
+                                        ? 'bg-ios-primary text-white shadow-lg shadow-blue-500/30 scale-110'
+                                        : state.settings.fontContrast === 'high'
+                                            ? 'bg-gray-200 dark:bg-zinc-700 text-gray-900 dark:text-gray-100 group-active:scale-95'
+                                            : 'bg-gray-100 dark:bg-zinc-800 text-ios-subtext group-active:scale-95'
+                                )}>
+                                    <Icon name={cat.icon} className="w-5 h-5" />
+                                </div>
+                                <span className={clsx(
+                                    'text-[10px] transition-colors truncate w-full text-center',
+                                    selectedCategoryId === cat.id
+                                        ? 'text-ios-primary font-medium'
+                                        : state.settings.fontContrast === 'high'
+                                            ? 'text-gray-900 dark:text-gray-100 font-medium'
+                                            : 'text-ios-subtext'
+                                )}>
+                                    {cat.name}
+                                </span>
+                            </button>
+                        ))}
+                    </div>
+                )}
             </div>
 
             <div className="bg-white dark:bg-zinc-900 rounded-t-3xl shadow-[0_-5px_20px_rgba(0,0,0,0.1)] border-t border-white/10 shrink-0">
@@ -558,6 +905,9 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                     </div>
 
                     <div className="min-w-[35%] text-right">
+                        {isTrading && (
+                            <div className="text-xs text-ios-subtext">单价</div>
+                        )}
                         {hasFormula && calculatedAmount !== null && (
                             <div className="text-xs text-ios-subtext tabular-nums">= {formatResultNumber(calculatedAmount)}</div>
                         )}
@@ -584,6 +934,62 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                                 {quickNote}
                             </button>
                         ))}
+                    </div>
+                )}
+
+                {isTrading && (
+                    <div className="px-5 py-2 border-b border-ios-border bg-gray-50/60 dark:bg-zinc-900/60 space-y-2">
+                        {type === 'expense' && (
+                            <div className="flex items-center gap-3">
+                                <label className="text-xs text-ios-subtext shrink-0">数量</label>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    step="1"
+                                    value={quantityStr}
+                                    onChange={event => setQuantityStr(event.target.value)}
+                                    className="w-24 bg-white dark:bg-zinc-800 rounded-lg px-3 py-1.5 text-sm outline-none border border-ios-border text-ios-text"
+                                />
+                                <div className="text-xs text-ios-subtext flex-1 text-right">
+                                    买入后增加库存
+                                </div>
+                            </div>
+                        )}
+                        <div className="flex items-center justify-between text-xs text-ios-subtext">
+                            <span>小计 {tradeSubtotalAmount !== null ? `${formatResultNumber(calculatedAmount ?? 0)} × ${formatResultNumber(validTradeQuantity)} = ${formatResultNumber(tradeSubtotalAmount)}` : '-'}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3 text-xs text-ios-subtext">
+                            {type === 'income' ? (
+                                <div className="flex items-center gap-1 min-w-0">
+                                    <span className="shrink-0">手续费</span>
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        step="0.01"
+                                        value={feeRateStr}
+                                        onChange={event => setFeeRateStr(event.target.value)}
+                                        className="w-16 bg-white dark:bg-zinc-800 rounded-md px-2 py-1 text-xs outline-none border border-ios-border text-ios-text tabular-nums"
+                                    />
+                                    <span className="shrink-0">%：{formatResultNumber(tradeFeeAmount)}</span>
+                                </div>
+                            ) : (
+                                <span>手续费 {tradeFeeRate}%：{formatResultNumber(tradeFeeAmount)}</span>
+                            )}
+                            <span className="font-medium text-ios-text">最终金额 {tradeFinalAmount !== null ? formatResultNumber(tradeFinalAmount) : '-'}</span>
+                        </div>
+                        {type === 'income' && (
+                            <div className="flex items-center justify-between text-xs text-ios-subtext">
+                                <span>成本 {tradeSellCost && tradeSellCost.matchedQuantity >= validTradeQuantity ? formatResultNumber(tradeSellCost.cost) : '-'}</span>
+                                <span className={clsx(
+                                    'font-semibold',
+                                    tradeEstimatedProfit === null ? 'text-ios-subtext' :
+                                        tradeEstimatedProfit > 0 ? 'text-green-500' :
+                                            tradeEstimatedProfit < 0 ? 'text-red-500' : 'text-ios-text'
+                                )}>
+                                    预计利润 {tradeEstimatedProfit !== null ? formatResultNumber(tradeEstimatedProfit) : '-'}
+                                </span>
+                            </div>
+                        )}
                     </div>
                 )}
 
@@ -645,6 +1051,51 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                     </div>
                 </div>
             </div>
+
+            {isTrading && type === 'income' && showSellCategoryPicker && (
+                <div className="fixed inset-0 z-[85] bg-black/30 flex items-end" onClick={handleSellCategoryCancel}>
+                    <div
+                        className="w-full max-h-[70vh] overflow-y-auto no-scrollbar bg-white dark:bg-zinc-900 rounded-t-3xl shadow-2xl border-t border-white/10 p-5 pb-[calc(env(safe-area-inset-bottom)+1.25rem)]"
+                        onClick={event => event.stopPropagation()}
+                    >
+                        <div className="flex items-center justify-between mb-4">
+                            <div>
+                                <div className="text-base font-semibold text-ios-text">选择卖出类目</div>
+                                <div className="text-xs text-ios-subtext mt-0.5">选择后只显示该类目有剩余的买入批次</div>
+                            </div>
+                            <button
+                                onClick={handleSellCategoryCancel}
+                                className="px-3 py-1.5 rounded-full bg-gray-100 dark:bg-zinc-800 text-xs font-medium text-ios-subtext active:scale-95"
+                            >
+                                取消
+                            </button>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                            {categories.map(category => (
+                                <button
+                                    key={category.id}
+                                    onClick={() => handleSellCategorySelect(category.id)}
+                                    className={clsx(
+                                        'flex items-center gap-3 rounded-xl border px-3 py-3 text-left active:scale-[0.99]',
+                                        selectedCategoryId === category.id
+                                            ? 'border-ios-primary bg-ios-primary/5'
+                                            : 'border-ios-border bg-gray-50 dark:bg-zinc-800/70'
+                                    )}
+                                >
+                                    <div className="w-9 h-9 rounded-full bg-ios-primary/10 text-ios-primary flex items-center justify-center shrink-0">
+                                        <Icon name={category.icon} className="w-4 h-4" />
+                                    </div>
+                                    <div className="min-w-0">
+                                        <div className="text-sm font-medium text-ios-text truncate">{category.name}</div>
+                                        <div className="text-[11px] text-ios-subtext">卖出手续费 {category.sellFeeRate ?? 0}%</div>
+                                    </div>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {showPreview && (
                 <ImagePreview

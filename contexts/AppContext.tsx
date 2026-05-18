@@ -1,6 +1,6 @@
 ﻿import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef, useCallback } from 'react';
 import { AppState, AppAction, Transaction, Ledger, OperationLog, BackupLog, Category, CategoryGroup, AppSettings, SyncQueueItem, AuthSession } from '../types';
-import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, INITIAL_LEDGERS } from '../constants';
+import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, DEFAULT_TRADE_CATEGORIES, INITIAL_LEDGERS } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
 import { generateId, extractCategoriesFromCsv, formatCurrency, parseCsvToTransactions } from '../utils';
 import { db, initAndMigrateDB, dbAPI, ensureStoresReady, createSyncQueueItem, queueSyncItem, markAllLocalDataForSync, queueCachedImagesForUpload } from '../services/db';
@@ -11,6 +11,7 @@ import { feedback } from '../services/feedback';
 import { imageService } from '../services/imageService';
 import { normalizeAppSettings, normalizeBackupReminderDays } from '../services/settingsUtils';
 import { checkSystemTimeSkew } from '../services/timeSkew';
+import { getAvailableTradeBuyLots, getTradeInventory, getTransactionTypeLabel, isTradingLedger, normalizeCategory, normalizeLedger, normalizeLedgerType, normalizeTradeAllocations, normalizeTransaction } from '../services/ledgerUtils';
 
 const initialState: AppState = {
     ledgers: INITIAL_LEDGERS,
@@ -770,21 +771,90 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // ================= ACTIONS (DB + State) =================
 
+    const prepareTransactionForLedger = (input: Transaction, excludeTransactionId?: string): Transaction => {
+        const normalized = normalizeTransaction(input);
+        const ledger = stateRef.current.ledgers.find(item => item.id === normalized.ledgerId);
+        if (!isTradingLedger(ledger)) {
+            return {
+                ...normalized,
+                tradeAction: undefined,
+                tradeQuantity: undefined,
+                tradeGrossAmount: undefined,
+                tradeFeeRate: undefined,
+                tradeFeeAmount: undefined,
+                tradeAllocations: undefined,
+            };
+        }
+
+        const category = stateRef.current.categories.find(item => item.id === normalized.categoryId && item.ledgerId === normalized.ledgerId);
+        if (!category) throw new Error('请选择买卖类目');
+
+        const tradeAction = normalized.tradeAction || (normalized.type === 'income' ? 'sell' : 'buy');
+        const quantity = Number(normalized.tradeQuantity || 0);
+        const grossAmount = Number(normalized.tradeGrossAmount || normalized.amount || 0);
+        if (!Number.isFinite(quantity) || quantity <= 0) throw new Error('请输入有效数量');
+        if (!Number.isFinite(grossAmount) || grossAmount <= 0) throw new Error('请输入有效交易金额');
+
+        const inputFeeRate = Number(normalized.tradeFeeRate);
+        const feeRate = Number.isFinite(inputFeeRate)
+            ? inputFeeRate
+            : Number(tradeAction === 'sell' ? category.sellFeeRate ?? 0 : category.buyFeeRate ?? 0) || 0;
+        const feeAmount = Math.round((grossAmount * feeRate / 100 + Number.EPSILON) * 100) / 100;
+        const amount = Math.max(0, Math.round(((tradeAction === 'sell' ? grossAmount - feeAmount : grossAmount + feeAmount) + Number.EPSILON) * 100) / 100);
+
+        const allocations = tradeAction === 'sell'
+            ? normalizeTradeAllocations(normalized.tradeAllocations)
+            : undefined;
+
+        if (tradeAction === 'sell') {
+            const inventory = getTradeInventory(stateRef.current.transactions, normalized.ledgerId, normalized.categoryId, excludeTransactionId);
+            if (quantity > inventory) throw new Error(`库存不足，当前可卖数量为 ${inventory}`);
+
+            if (allocations && allocations.length > 0) {
+                const allocatedQuantity = Math.round((allocations.reduce((sum, item) => sum + item.quantity, 0) + Number.EPSILON) * 100) / 100;
+                if (Math.abs(allocatedQuantity - quantity) > 0.0001) throw new Error('卖出批次数量与总数量不一致');
+
+                const lots = getAvailableTradeBuyLots(stateRef.current.transactions, normalized.ledgerId, normalized.categoryId, excludeTransactionId);
+                const lotMap = new Map(lots.map(lot => [lot.buyTransactionId, lot]));
+                for (const allocation of allocations) {
+                    const lot = lotMap.get(allocation.buyTransactionId);
+                    if (!lot) throw new Error('卖出批次已不存在或已卖光');
+                    if (allocation.quantity > lot.remainingQuantity) {
+                        throw new Error(`批次剩余不足，当前批次可卖数量为 ${lot.remainingQuantity}`);
+                    }
+                }
+            }
+        }
+
+        return {
+            ...normalized,
+            type: tradeAction === 'sell' ? 'income' : 'expense',
+            amount,
+            tradeAction,
+            tradeQuantity: quantity,
+            tradeGrossAmount: grossAmount,
+            tradeFeeRate: feeRate,
+            tradeFeeAmount: feeAmount,
+            tradeAllocations: tradeAction === 'sell' ? allocations : undefined,
+        };
+    };
+
     const addTransaction = async (t: Transaction) => {
         const now = nextMutationTime();
-        const saved: Transaction = { ...t, updatedAt: now, isDeleted: false };
+        const saved: Transaction = { ...prepareTransactionForLedger(t), updatedAt: now, isDeleted: false };
         await persistTransactionWithQueue(saved, 'upsert');
         dispatch({ type: 'ADD_TRANSACTION', payload: saved });
 
         if (saved.note) dispatch({ type: 'SAVE_NOTE_HISTORY', payload: { categoryId: saved.categoryId, note: saved.note } });
-        logOperation('add', saved.id, 'Add ' + (saved.type === 'expense' ? 'expense ' : 'income ') + saved.amount);
+        const ledger = stateRef.current.ledgers.find(item => item.id === saved.ledgerId);
+        logOperation('add', saved.id, `Add ${getTransactionTypeLabel(ledger, saved.type)} ${saved.amount}`);
         dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: undefined });
         setSyncDirty(true);
     };
 
     const updateTransaction = async (t: Transaction) => {
         const now = nextMutationTime();
-        const saved: Transaction = { ...t, updatedAt: now, isDeleted: false };
+        const saved: Transaction = { ...prepareTransactionForLedger(t, t.id), updatedAt: now, isDeleted: false };
         await persistTransactionWithQueue(saved, 'upsert');
         dispatch({ type: 'UPDATE_TRANSACTION', payload: saved });
 
@@ -850,7 +920,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         // Handle DB writes for non-transaction entities
         switch (action.type) {
             case 'ADD_LEDGER': {
-                const saved: Ledger = { ...action.payload, updatedAt: now, isDeleted: false };
+                const saved: Ledger = { ...normalizeLedger(action.payload), updatedAt: now, isDeleted: false };
                 persistQueued('ledger', async () => {
                     await (db as any).transaction('rw', db.ledgers, db.syncQueue, async () => {
                         await db.ledgers.put(saved);
@@ -862,7 +932,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
             case 'UPDATE_LEDGER': {
                 const previousLedger = state.ledgers.find(ledger => ledger.id === action.payload.id);
-                const saved: Ledger = { ...action.payload, updatedAt: now, isDeleted: !!action.payload.isDeleted };
+                const saved: Ledger = { ...normalizeLedger(action.payload), updatedAt: now, isDeleted: !!action.payload.isDeleted };
                 persistQueued('ledger', async () => {
                     await (db as any).transaction('rw', db.ledgers, db.syncQueue, async () => {
                         await db.ledgers.put(saved);
@@ -893,19 +963,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 break;
             }
             case 'ADD_CATEGORY': {
-                const saved: Category = { ...action.payload, ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: now, isDeleted: false };
+                const saved: Category = { ...normalizeCategory(action.payload), ledgerId: action.payload.ledgerId || state.currentLedgerId, updatedAt: now, isDeleted: false };
                 persistQueued('category', async () => {
                     await (db as any).transaction('rw', db.categories, db.syncQueue, async () => {
                         await db.categories.put(saved);
                         await db.syncQueue.put(createSyncQueueItem('category', saved.id, 'upsert', now));
                     });
                 });
-                logOperation('add', action.payload.id, `新增${action.payload.type === 'income' ? '收入' : '支出'}分类：${action.payload.name}`);
+                logOperation('add', action.payload.id, `新增${action.payload.type === 'trade' ? '类目' : action.payload.type === 'income' ? '收入' : '支出'}分类：${action.payload.name}`);
                 break;
             }
             case 'UPDATE_CATEGORY': {
                 const previousCategory = state.categories.find(category => category.id === action.payload.id);
-                const saved: Category = { ...action.payload, updatedAt: now, isDeleted: !!action.payload.isDeleted };
+                const saved: Category = { ...normalizeCategory(action.payload), updatedAt: now, isDeleted: !!action.payload.isDeleted };
                 persistQueued('category', async () => {
                     await (db as any).transaction('rw', db.categories, db.syncQueue, async () => {
                         await db.categories.put(saved);
@@ -929,7 +999,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 break;
             }
             case 'REORDER_CATEGORIES': {
-                const typeLabel = action.payload[0]?.type === 'income' ? '收入' : '支出';
+                const typeLabel = action.payload[0]?.type === 'trade' ? '类目' : action.payload[0]?.type === 'income' ? '收入' : '支出';
                 const saved = action.payload.map(c => ({ ...c, updatedAt: now }));
                 persistQueued('category reorder', async () => {
                     await (db as any).transaction('rw', db.categories, db.syncQueue, async () => {
@@ -1117,14 +1187,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
         await (db as any).transaction('rw', db.ledgers, db.categories, db.transactions, db.settings, hasGroupStore ? db.categoryGroups : undefined, async () => {
             for (const l of ledgers) {
-                const normalized: Ledger = { id: l.id, name: l.name, themeColor: l.theme_color || l.themeColor || '#007AFF', createdAt: l.created_at || Date.now(), updatedAt: l.updated_at || Date.now(), isDeleted: !!l.is_deleted };
+                const normalized: Ledger = normalizeLedger(l);
                 const local = await db.ledgers.get(normalized.id);
                 if (shouldApplyRemoteEntity(local, normalized)) {
                     await db.ledgers.put(normalized);
                 }
             }
             for (const c of categories) {
-                const normalized: Category = { id: c.id, ledgerId: c.ledger_id || c.ledgerId, name: c.name, icon: c.icon, type: c.type, order: c.order ?? 0, isCustom: c.isCustom, updatedAt: c.updated_at || Date.now(), isDeleted: !!c.is_deleted };
+                const normalized: Category = normalizeCategory(c);
                 const local = await db.categories.get(normalized.id);
                 if (shouldApplyRemoteEntity(local, normalized)) {
                     await db.categories.put(normalized);
@@ -1140,12 +1210,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 }
             }
             for (const t of transactions) {
-                const normalized: Transaction = {
-                    id: t.id, ledgerId: t.ledger_id, amount: t.amount, type: t.type, categoryId: t.category_id,
-                    date: t.date, note: t.note || '', createdAt: t.created_at || t.date || Date.now(),
-                    updatedAt: t.updated_at || t.date || Date.now(), isDeleted: !!t.is_deleted,
-                    attachments: t.attachments ? (Array.isArray(t.attachments) ? t.attachments : JSON.parse(t.attachments)) : []
-                };
+                const normalized: Transaction = normalizeTransaction(t);
                 const local = await db.transactions.get(normalized.id);
                 if (shouldApplyRemoteEntity(local, normalized)) {
                     await db.transactions.put(normalized);
@@ -1351,6 +1416,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                         id: item.entityId,
                         name: '',
                         themeColor: '#007AFF',
+                        ledgerType: 'accounting',
                         createdAt: item.updatedAt,
                         updatedAt: item.updatedAt,
                         isDeleted: true,
@@ -1361,6 +1427,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                         name: '',
                         icon: 'Circle',
                         type: 'expense',
+                        buyFeeRate: 0,
+                        sellFeeRate: 0,
                         order: 0,
                         isCustom: true,
                         updatedAt: item.updatedAt,
@@ -1398,6 +1466,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 id: l.id,
                 name: l.name,
                 theme_color: l.themeColor || l.theme_color,
+                ledger_type: normalizeLedgerType(l.ledgerType || l.ledger_type),
                 created_at: l.createdAt || l.created_at || Date.now(),
                 updated_at: l.updatedAt || l.updated_at || Date.now(),
                 is_deleted: !!l.isDeleted
@@ -1408,6 +1477,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 name: c.name,
                 icon: c.icon,
                 type: c.type,
+                buy_fee_rate: Number(c.buyFeeRate ?? c.buy_fee_rate ?? 0) || 0,
+                sell_fee_rate: Number(c.sellFeeRate ?? c.sell_fee_rate ?? 0) || 0,
                 order: c.order ?? 0,
                 is_custom: !!(c.isCustom ?? c.is_custom),
                 updated_at: c.updatedAt || c.updated_at || Date.now(),
@@ -1429,6 +1500,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 amount: t.amount,
                 type: t.type,
                 category_id: t.categoryId || t.category_id,
+                trade_action: t.tradeAction || t.trade_action || null,
+                trade_quantity: Number(t.tradeQuantity ?? t.trade_quantity ?? 0) || null,
+                trade_gross_amount: Number(t.tradeGrossAmount ?? t.trade_gross_amount ?? 0) || null,
+                trade_fee_rate: Number(t.tradeFeeRate ?? t.trade_fee_rate ?? 0) || null,
+                trade_fee_amount: Number(t.tradeFeeAmount ?? t.trade_fee_amount ?? 0) || null,
+                trade_allocations: t.tradeAllocations || t.trade_allocations || null,
                 date: t.date,
                 note: t.note || '',
                 attachments: t.attachments || [],
@@ -1795,13 +1872,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const importData = (data: Partial<AppState>) => {
         // Legacy import support
-        dispatch({ type: 'RESTORE_DATA', payload: data });
+        const normalizedPayload: Partial<AppState> = {
+            ...data,
+            ledgers: data.ledgers?.map(normalizeLedger),
+            categories: data.categories?.map(normalizeCategory),
+            transactions: data.transactions?.map(normalizeTransaction),
+        };
+        dispatch({ type: 'RESTORE_DATA', payload: normalizedPayload });
         // Also write to DB
         void (async () => {
             const now = Date.now();
-            if (data.transactions) await db.transactions.bulkPut(data.transactions.map(t => ({ ...t, isDeleted: false, updatedAt: now })));
-            if (data.ledgers) await db.ledgers.bulkPut(data.ledgers.map(l => ({ ...l, isDeleted: false, updatedAt: now })));
-            if (data.categories) await db.categories.bulkPut(data.categories.map(c => ({ ...c, isDeleted: false, updatedAt: now })));
+            if (data.transactions) await db.transactions.bulkPut(data.transactions.map(t => ({ ...normalizeTransaction(t), isDeleted: false, updatedAt: now })));
+            if (data.ledgers) await db.ledgers.bulkPut(data.ledgers.map(l => ({ ...normalizeLedger(l), isDeleted: false, updatedAt: now })));
+            if (data.categories) await db.categories.bulkPut(data.categories.map(c => ({ ...normalizeCategory(c), isDeleted: false, updatedAt: now })));
             if (data.categoryGroups) await db.categoryGroups.bulkPut(data.categoryGroups.map(g => ({ ...g, isDeleted: false, updatedAt: now })));
             if (data.settings) await db.settings.put({ key: 'main', value: { ...DEFAULT_SETTINGS, ...data.settings } });
             await markAllLocalDataForSync();
@@ -1819,31 +1902,34 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
 
             const csvCats = extractCategoriesFromCsv(csvContent);
+            const targetLedger = state.ledgers.find(ledger => ledger.id === targetLedgerId);
+            const isTradingImport = normalizeLedgerType(targetLedger?.ledgerType) === 'trading';
             const catMap = new Map<string, string>(); // key = type:name -> categoryId
             const newCats: Category[] = [];
-            const nextOrder: Record<'expense' | 'income', number> = {
+            const nextOrder: Record<'expense' | 'income' | 'trade', number> = {
                 expense: Math.max(-1, ...state.categories.filter(c => c.type === 'expense').map(c => c.order ?? 0)) + 1,
                 income: Math.max(-1, ...state.categories.filter(c => c.type === 'income').map(c => c.order ?? 0)) + 1,
+                trade: Math.max(-1, ...state.categories.filter(c => c.type === 'trade').map(c => c.order ?? 0)) + 1,
             };
 
             const registerCat = (nameRaw: string, typeRaw: 'expense' | 'income'): string => {
-                const type = typeRaw === 'income' ? 'income' : 'expense';
+                const type = isTradingImport ? 'trade' : (typeRaw === 'income' ? 'income' : 'expense');
                 const name = (nameRaw || 'Other').trim();
                 const key = type + ':' + name;
                 if (catMap.has(key)) return catMap.get(key)!;
-                const existing = state.categories.find(c => c.type === type && (c.name === name || c.id === name));
+                const existing = state.categories.find(c => c.ledgerId === targetLedgerId && c.type === type && (c.name === name || c.id === name));
                 if (existing) {
                     catMap.set(key, existing.id);
                     return existing.id;
                 }
-                const newCat: Category = { id: generateId(), name, icon: 'Circle', type, order: nextOrder[type]++, isCustom: true, updatedAt: Date.now(), isDeleted: false };
+                const newCat: Category = { id: generateId(), ledgerId: targetLedgerId, name, icon: 'Circle', type, order: nextOrder[type]++, isCustom: true, buyFeeRate: 0, sellFeeRate: 0, updatedAt: Date.now(), isDeleted: false };
                 newCats.push(newCat);
                 catMap.set(key, newCat.id);
                 return newCat.id;
             };
 
             // Register categories first
-            csvCats.forEach(c => registerCat(c.name, c.type));
+            csvCats.forEach(c => registerCat(c.name, c.type === 'income' ? 'income' : 'expense'));
 
             // Persist new categories
             newCats.forEach(c => enhancedDispatch({ type: 'ADD_CATEGORY', payload: c }));
@@ -1852,11 +1938,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             for (const tx of parsedTxs) {
                 const mappedCatId = registerCat(tx.categoryId || 'Other', tx.type === 'income' ? 'income' : 'expense');
                 const normalized: Transaction = {
-                    ...tx,
+                    ...normalizeTransaction(tx),
                     id: tx.id || generateId(),
                     ledgerId: targetLedgerId,
                     categoryId: mappedCatId,
                     type: tx.type === 'income' ? 'income' : 'expense',
+                    tradeAction: isTradingImport ? (tx.type === 'income' ? 'sell' : 'buy') : tx.tradeAction,
+                    tradeQuantity: isTradingImport ? (tx.tradeQuantity || 1) : tx.tradeQuantity,
+                    tradeGrossAmount: isTradingImport ? (tx.tradeGrossAmount || tx.amount) : tx.tradeGrossAmount,
+                    tradeFeeRate: isTradingImport ? (tx.tradeFeeRate || 0) : tx.tradeFeeRate,
+                    tradeFeeAmount: isTradingImport ? (tx.tradeFeeAmount || 0) : tx.tradeFeeAmount,
                     note: tx.note || '',
                     createdAt: tx.createdAt || tx.date || Date.now(),
                     updatedAt: tx.updatedAt || tx.date || Date.now(),
@@ -1922,13 +2013,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const addLedger = async (ledger: Ledger) => {
         const timestamp = nextMutationTime();
-        const savedLedger: Ledger = { ...ledger, updatedAt: ledger.updatedAt || timestamp, isDeleted: false };
+        const savedLedger: Ledger = { ...normalizeLedger(ledger), updatedAt: ledger.updatedAt || timestamp, isDeleted: false };
 
-        // Auto-seed default categories for the new ledger
-        const newCategories = DEFAULT_CATEGORIES.map((c, idx) => ({
+        // Auto-seed categories for the new ledger. Trading ledgers use one category set.
+        const categoryTemplate = savedLedger.ledgerType === 'trading' ? DEFAULT_TRADE_CATEGORIES : DEFAULT_CATEGORIES;
+        const newCategories = categoryTemplate.map((c, idx) => ({
             ...c,
             id: `${generateId()}_${timestamp}_${idx}`, // Ensure unique ID
             ledgerId: savedLedger.id,
+            type: savedLedger.ledgerType === 'trading' ? 'trade' as const : c.type,
+            buyFeeRate: c.buyFeeRate ?? 0,
+            sellFeeRate: c.sellFeeRate ?? 0,
             order: idx,
             updatedAt: timestamp,
             isDeleted: false

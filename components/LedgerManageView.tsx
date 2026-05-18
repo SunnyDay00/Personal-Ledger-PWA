@@ -4,12 +4,14 @@ import { Icon } from './ui/Icon';
 import { feedback } from '../services/feedback';
 import { format } from 'date-fns';
 import { clsx } from 'clsx';
-import { Ledger } from '../types';
+import { Ledger, LedgerType } from '../types';
+import { getLedgerTypeLabel, getTransactionTypeLabel } from '../services/ledgerUtils';
 
 export const LedgerManageView: React.FC = () => {
     const { state, dispatch, addLedger } = useApp();
     const [isEditing, setIsEditing] = useState(false);
     const [newLedgerName, setNewLedgerName] = useState('');
+    const [newLedgerType, setNewLedgerType] = useState<LedgerType>('accounting');
 
     // Compute stats for each ledger
     const ledgerStats = useMemo(() => {
@@ -41,6 +43,7 @@ export const LedgerManageView: React.FC = () => {
             id: crypto.randomUUID(),
             name: newLedgerName.trim(),
             themeColor: '#007AFF', // Default Blue
+            ledgerType: newLedgerType,
             createdAt: Date.now(),
             updatedAt: Date.now(),
             isDeleted: false
@@ -49,6 +52,7 @@ export const LedgerManageView: React.FC = () => {
         await addLedger(newLedger);
         feedback.play('success');
         setNewLedgerName('');
+        setNewLedgerType('accounting');
         setIsEditing(false);
     };
 
@@ -108,6 +112,23 @@ export const LedgerManageView: React.FC = () => {
                                 添加
                             </button>
                         </div>
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                            {(['accounting', 'trading'] as LedgerType[]).map(type => (
+                                <button
+                                    key={type}
+                                    type="button"
+                                    onClick={() => setNewLedgerType(type)}
+                                    className={clsx(
+                                        'py-2 rounded-xl text-xs font-medium border transition-colors',
+                                        newLedgerType === type
+                                            ? 'bg-ios-primary text-white border-ios-primary'
+                                            : 'bg-gray-50 dark:bg-zinc-800 text-ios-text border-ios-border'
+                                    )}
+                                >
+                                    {type === 'accounting' ? '记账本' : '买卖本'}
+                                </button>
+                            ))}
+                        </div>
                     </div>
                 )}
 
@@ -116,6 +137,8 @@ export const LedgerManageView: React.FC = () => {
                     {state.ledgers.map(ledger => {
                         const stats = ledgerStats[ledger.id] || { incomeCount: 0, expenseCount: 0, incomeTotal: 0, expenseTotal: 0 };
                         const isActive = state.currentLedgerId === ledger.id;
+                        const incomeLabel = getTransactionTypeLabel(ledger, 'income');
+                        const expenseLabel = getTransactionTypeLabel(ledger, 'expense');
 
                         return (
                             <div
@@ -159,6 +182,9 @@ export const LedgerManageView: React.FC = () => {
                                                     {(stats.incomeTotal - stats.expenseTotal) >= 0 ? '' : '-'}
                                                     ¥{Math.abs(stats.incomeTotal - stats.expenseTotal).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                                 </span>
+                                                <span className="text-[10px] px-2 py-0.5 rounded-full bg-gray-100 dark:bg-zinc-700 text-ios-subtext">
+                                                    {getLedgerTypeLabel(ledger)}
+                                                </span>
                                             </div>
                                             <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
                                                 创建于 {format(ledger.createdAt || 0, 'yyyy年MM月dd日')}
@@ -171,14 +197,14 @@ export const LedgerManageView: React.FC = () => {
                                 <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs border-t border-dashed border-gray-200 dark:border-zinc-700 pt-3">
                                     <div className="flex justify-between items-center text-gray-500">
                                         <div className="flex flex-col">
-                                            <span>总支出</span>
+                                            <span>总{expenseLabel}</span>
                                             <span className="text-[11px] text-gray-600 dark:text-gray-400 font-medium mt-0.5">共 {stats.expenseCount} 笔</span>
                                         </div>
                                         <span className="font-medium text-ios-text text-base">¥{stats.expenseTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 元</span>
                                     </div>
                                     <div className="flex justify-between items-center text-gray-500">
                                         <div className="flex flex-col">
-                                            <span>总收入</span>
+                                            <span>总{incomeLabel}</span>
                                             <span className="text-[11px] text-gray-600 dark:text-gray-400 font-medium mt-0.5">共 {stats.incomeCount} 笔</span>
                                         </div>
                                         <span className="font-medium text-green-600 dark:text-green-400 text-base">¥{stats.incomeTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 元</span>

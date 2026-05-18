@@ -14,8 +14,15 @@ import { clsx } from 'clsx';
 import { Transaction } from '../types';
 import { CloudSyncButton } from './CloudSyncButton';
 import { StatsBreakdownDetailView } from './StatsBreakdownDetailView';
+import { getTradingRealizedResult, getTradingSellResult, getTransactionTypeLabel, isTradingLedger } from '../services/ledgerUtils';
 
 const UNGROUPED_GROUP_ID = '__ungrouped__';
+
+const formatPercent = (value: number) =>
+    `${value.toLocaleString('zh-CN', {
+        minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
+        maximumFractionDigits: 2,
+    })}%`;
 
 interface PieBreakdownItem {
     id: string;
@@ -51,6 +58,10 @@ interface StatsViewProps {
 export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) => {
     const { state, dispatch } = useApp();
     const { transactions, ledgers, categories, settings, currentLedgerId, timeRange, currentDate: currentDateTs } = state;
+    const currentLedger = ledgers.find(l => l.id === currentLedgerId);
+    const isTrading = isTradingLedger(currentLedger);
+    const expenseLabel = getTransactionTypeLabel(currentLedger, 'expense');
+    const incomeLabel = getTransactionTypeLabel(currentLedger, 'income');
     const currentDate = new Date(currentDateTs);
 
     // Local state for stats view only
@@ -245,11 +256,14 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
         maxIncTx: Transaction | null;
         maxExpPeriod: { date: string; amount: number } | null;
         maxIncPeriod: { date: string; amount: number } | null;
+        maxProfitTx: { transaction: Transaction; profit: number } | null;
+        maxProfitPeriod: { date: string; amount: number } | null;
     } | null => {
         if (filteredData.length === 0) return null;
         let maxExpTx: Transaction | null = null;
         let maxIncTx: Transaction | null = null;
-        const dayMap: Record<string, { inc: number, exp: number }> = {};
+        let maxProfitTx: { transaction: Transaction; profit: number } | null = null;
+        const dayMap: Record<string, { inc: number, exp: number, profit: number, profitCount: number }> = {};
 
         filteredData.forEach(t => {
             if (t.type === 'expense') {
@@ -258,25 +272,40 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                 if (!maxIncTx || t.amount > (maxIncTx as Transaction).amount) maxIncTx = t;
             }
             const key = timeRange === 'year' ? format(t.date, 'yyyy-MM') : format(t.date, 'yyyy-MM-dd');
-            if (!dayMap[key]) dayMap[key] = { inc: 0, exp: 0 };
+            if (!dayMap[key]) dayMap[key] = { inc: 0, exp: 0, profit: 0, profitCount: 0 };
             if (t.type === 'income') dayMap[key].inc += t.amount;
             else dayMap[key].exp += t.amount;
+
+            if (isTrading && t.type === 'income') {
+                const sellResult = getTradingSellResult(transactions, t);
+                if (!sellResult) return;
+                dayMap[key].profit += sellResult.profit;
+                dayMap[key].profitCount += 1;
+                if (!maxProfitTx || sellResult.profit > maxProfitTx.profit) {
+                    maxProfitTx = { transaction: t, profit: sellResult.profit };
+                }
+            }
         });
 
         const sortedByExp = Object.entries(dayMap).sort((a, b) => b[1].exp - a[1].exp);
         const sortedByInc = Object.entries(dayMap).sort((a, b) => b[1].inc - a[1].inc);
+        const sortedByProfit = Object.entries(dayMap)
+            .filter(([, value]) => value.profitCount > 0)
+            .sort((a, b) => b[1].profit - a[1].profit);
 
         return {
             maxExpTx,
             maxIncTx,
             maxExpPeriod: sortedByExp[0] ? { date: sortedByExp[0][0], amount: sortedByExp[0][1].exp } : null,
             maxIncPeriod: sortedByInc[0] ? { date: sortedByInc[0][0], amount: sortedByInc[0][1].inc } : null,
+            maxProfitTx,
+            maxProfitPeriod: sortedByProfit[0] ? { date: sortedByProfit[0][0], amount: sortedByProfit[0][1].profit } : null,
         };
-    }, [filteredData, timeRange]);
+    }, [filteredData, timeRange, isTrading, transactions]);
 
     // Advanced Stats
     const advancedStats = useMemo(() => {
-        if (filteredData.length === 0) return { topCat: null, avgDaily: 0, avgIncomeDaily: 0, avgTx: 0 };
+        if (filteredData.length === 0) return { topCat: null, avgDaily: 0, avgIncomeDaily: 0, avgProfitDaily: 0, avgYieldRate: 0, avgTx: 0 };
 
         // Most Frequent Category
         const catCounts: Record<string, number> = {};
@@ -292,14 +321,19 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
         const totalInc = filteredData.reduce((acc, t) => t.type === 'income' ? acc + t.amount : acc, 0);
         const msPerDay = 1000 * 60 * 60 * 24;
         const daysDiff = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / msPerDay));
+        const tradingRealized = isTrading
+            ? getTradingRealizedResult(transactions, currentLedgerId, start.getTime(), end.getTime())
+            : { profit: 0, cost: 0 };
 
         return {
             topCat,
             avgDaily: totalExp / daysDiff,
             avgIncomeDaily: totalInc / daysDiff,
+            avgProfitDaily: tradingRealized.profit / daysDiff,
+            avgYieldRate: tradingRealized.cost > 0 ? (tradingRealized.profit / tradingRealized.cost) * 100 : 0,
             avgTx: (totalExp + totalInc) / filteredData.length
         };
-    }, [filteredData, start, end, categories]);
+    }, [filteredData, start, end, categories, isTrading, transactions, currentLedgerId]);
 
     const COLORS = ['#007AFF', '#FF9500', '#34C759', '#AF52DE', '#FF2D55', '#5856D6', '#5AC8FA', '#FFCC00', '#FF3B30', '#4CD964'];
 
@@ -416,11 +450,11 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                     {/* Summary Cards */}
                     <div className="grid grid-cols-3 gap-3 mb-6">
                         <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
-                            <span className="text-xs text-ios-subtext mb-1">收入</span>
+                            <span className="text-xs text-ios-subtext mb-1">{incomeLabel}</span>
                             <span className="text-sm font-bold text-green-500 tabular-nums">{formatCurrency(income)}</span>
                         </div>
                         <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
-                            <span className="text-xs text-ios-subtext mb-1">支出</span>
+                            <span className="text-xs text-ios-subtext mb-1">{expenseLabel}</span>
                             <span className="text-sm font-bold text-red-500 tabular-nums">{formatCurrency(expense)}</span>
                         </div>
                         <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
@@ -433,7 +467,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                     <div className="bg-white dark:bg-zinc-900 rounded-3xl p-5 shadow-sm border border-ios-border mb-6">
                         <div className="flex justify-between items-center mb-4">
                             <h3 className="text-xs font-semibold text-ios-subtext uppercase">
-                                {chartType === 'pie' ? (dataType === 'expense' ? '支出占比' : '收入占比') : chartType === 'bar' ? '收支对比' : '收支走势'}
+                                {chartType === 'pie' ? `${dataType === 'expense' ? expenseLabel : incomeLabel}占比` : chartType === 'bar' ? `${incomeLabel}${expenseLabel}对比` : `${incomeLabel}${expenseLabel}走势`}
                             </h3>
                             <div className="flex bg-gray-100 dark:bg-zinc-800 rounded-lg p-0.5">
                                 <button onClick={() => setChartType('pie')} className={clsx("p-1.5 rounded-md", chartType === 'pie' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-primary" : "text-ios-subtext")}>
@@ -450,8 +484,8 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
 
                         <div className="flex justify-between items-center mb-4 gap-3">
                             <div className="flex bg-gray-100 dark:bg-zinc-800 p-0.5 rounded-lg">
-                                <button onClick={() => setDataType('expense')} className={clsx("px-4 py-1 text-xs font-medium rounded-md transition-all", dataType === 'expense' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-text" : "text-ios-subtext")}>支出</button>
-                                <button onClick={() => setDataType('income')} className={clsx("px-4 py-1 text-xs font-medium rounded-md transition-all", dataType === 'income' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-text" : "text-ios-subtext")}>收入</button>
+                                <button onClick={() => setDataType('expense')} className={clsx("px-4 py-1 text-xs font-medium rounded-md transition-all", dataType === 'expense' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-text" : "text-ios-subtext")}>{expenseLabel}</button>
+                                <button onClick={() => setDataType('income')} className={clsx("px-4 py-1 text-xs font-medium rounded-md transition-all", dataType === 'income' ? "bg-white dark:bg-zinc-700 shadow-sm text-ios-text" : "text-ios-subtext")}>{incomeLabel}</button>
                             </div>
 
                             {/* Category/Group Toggle - Only for Pie Chart as breakdown is complex/not requested for others now */}
@@ -502,7 +536,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                             <Tooltip cursor={{ fill: 'rgba(0,0,0,0.05)' }} content={<CustomTooltip />} />
                                             <Bar
                                                 dataKey="value"
-                                                name={dataType === 'income' ? "收入" : "支出"}
+                                                name={dataType === 'income' ? incomeLabel : expenseLabel}
                                                 fill={dataType === 'income' ? "#34C759" : "#FF3B30"}
                                                 radius={[4, 4, 0, 0]}
                                                 maxBarSize={40}
@@ -518,7 +552,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                             <Line
                                                 type="monotone"
                                                 dataKey="value"
-                                                name={dataType === 'income' ? "收入" : "支出"}
+                                                name={dataType === 'income' ? incomeLabel : expenseLabel}
                                                 stroke={dataType === 'income' ? "#34C759" : "#FF3B30"}
                                                 strokeWidth={2}
                                                 dot={false}
@@ -563,7 +597,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                     {filteredData.length > 0 && (
                         <div className="grid grid-cols-2 gap-3 mb-6">
                             <ExtremeCard
-                                title="日均支出"
+                                title={`日均${expenseLabel}`}
                                 amount={advancedStats.avgDaily}
                                 desc="本周期内平均"
                                 icon="TrendingDown"
@@ -571,13 +605,33 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                 bg="bg-orange-50 dark:bg-orange-900/10"
                             />
                             <ExtremeCard
-                                title="日均收入"
+                                title={`日均${incomeLabel}`}
                                 amount={advancedStats.avgIncomeDaily}
                                 desc="本周期内平均"
                                 icon="TrendingUp"
                                 color="text-green-500"
                                 bg="bg-green-50 dark:bg-green-900/10"
                             />
+                            {isTrading && (
+                                <>
+                                    <ExtremeCard
+                                        title="日均利润"
+                                        amount={advancedStats.avgProfitDaily}
+                                        desc="已实现利润平均"
+                                        icon="LineChart"
+                                        color={advancedStats.avgProfitDaily >= 0 ? 'text-green-500' : 'text-red-500'}
+                                        bg={advancedStats.avgProfitDaily >= 0 ? 'bg-green-50 dark:bg-green-900/10' : 'bg-red-50 dark:bg-red-900/10'}
+                                    />
+                                    <ExtremeCard
+                                        title="日均收益率"
+                                        value={formatPercent(advancedStats.avgYieldRate)}
+                                        desc="已实现利润 / 成本"
+                                        icon="PieChart"
+                                        color={advancedStats.avgYieldRate >= 0 ? 'text-green-500' : 'text-red-500'}
+                                        bg={advancedStats.avgYieldRate >= 0 ? 'bg-green-50 dark:bg-green-900/10' : 'bg-red-50 dark:bg-red-900/10'}
+                                    />
+                                </>
+                            )}
                             <ExtremeCard
                                 title="最频分类"
                                 desc={advancedStats.topCat ? `${advancedStats.topCat.name} (${advancedStats.topCat.count}次)` : '-'}
@@ -601,7 +655,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                             <h3 className="text-xs font-semibold text-ios-subtext uppercase px-2">极值统计</h3>
                             <div className="grid grid-cols-2 gap-3">
                                 <ExtremeCard
-                                    title="单笔最高支出"
+                                    title={`单笔最高${expenseLabel}`}
                                     amount={extremes.maxExpTx?.amount}
                                     desc={extremes.maxExpTx ? `${categories.find(c => c.id === extremes.maxExpTx!.categoryId)?.name} · ${format(extremes.maxExpTx.date, 'MM-dd')}` : '-'}
                                     icon="ArrowDownCircle"
@@ -609,15 +663,35 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                     bg="bg-red-50 dark:bg-red-900/10"
                                 />
                                 <ExtremeCard
-                                    title="单笔最高收入"
+                                    title={`单笔最高${incomeLabel}`}
                                     amount={extremes.maxIncTx?.amount}
                                     desc={extremes.maxIncTx ? `${categories.find(c => c.id === extremes.maxIncTx!.categoryId)?.name} · ${format(extremes.maxIncTx.date, 'MM-dd')}` : '-'}
                                     icon="ArrowUpCircle"
                                     color="text-green-500"
                                     bg="bg-green-50 dark:bg-green-900/10"
                                 />
+                                {isTrading && (
+                                    <>
+                                        <ExtremeCard
+                                            title="单笔最高利润"
+                                            amount={extremes.maxProfitTx?.profit}
+                                            desc={extremes.maxProfitTx ? `${categories.find(c => c.id === extremes.maxProfitTx!.transaction.categoryId)?.name} · ${format(extremes.maxProfitTx.transaction.date, 'MM-dd')}` : '-'}
+                                            icon="LineChart"
+                                            color={extremes.maxProfitTx && extremes.maxProfitTx.profit < 0 ? 'text-red-500' : 'text-green-500'}
+                                            bg={extremes.maxProfitTx && extremes.maxProfitTx.profit < 0 ? 'bg-red-50 dark:bg-red-900/10' : 'bg-green-50 dark:bg-green-900/10'}
+                                        />
+                                        <ExtremeCard
+                                            title={`利润最高${timeRange === 'year' ? '月' : '天'}`}
+                                            amount={extremes.maxProfitPeriod?.amount}
+                                            desc={extremes.maxProfitPeriod ? extremes.maxProfitPeriod.date : '-'}
+                                            icon="Calendar"
+                                            color={extremes.maxProfitPeriod && extremes.maxProfitPeriod.amount < 0 ? 'text-red-500' : 'text-green-500'}
+                                            bg={extremes.maxProfitPeriod && extremes.maxProfitPeriod.amount < 0 ? 'bg-red-50 dark:bg-red-900/10' : 'bg-green-50 dark:bg-green-900/10'}
+                                        />
+                                    </>
+                                )}
                                 <ExtremeCard
-                                    title={`支出最高${timeRange === 'year' ? '月' : '天'}`}
+                                    title={`${expenseLabel}最高${timeRange === 'year' ? '月' : '天'}`}
                                     amount={extremes.maxExpPeriod?.amount}
                                     desc={extremes.maxExpPeriod ? extremes.maxExpPeriod.date : '-'}
                                     icon="Calendar"
@@ -625,7 +699,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                     bg="bg-orange-50 dark:bg-orange-900/10"
                                 />
                                 <ExtremeCard
-                                    title={`收入最高${timeRange === 'year' ? '月' : '天'}`}
+                                    title={`${incomeLabel}最高${timeRange === 'year' ? '月' : '天'}`}
                                     amount={extremes.maxIncPeriod?.amount}
                                     desc={extremes.maxIncPeriod ? extremes.maxIncPeriod.date : '-'}
                                     icon="Wallet"
@@ -642,7 +716,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                 <StatsBreakdownDetailView
                     breakdownLabel={selectedBreakdown.mode === 'group' ? '分组' : '分类'}
                     name={selectedBreakdown.name}
-                    subtitle={`${selectedLedgerName} · ${displayDate} · ${selectedBreakdown.dataType === 'expense' ? '支出' : '收入'}`}
+                    subtitle={`${selectedLedgerName} · ${displayDate} · ${selectedBreakdown.dataType === 'expense' ? expenseLabel : incomeLabel}`}
                     dataType={selectedBreakdown.dataType}
                     accentColor={selectedBreakdown.color}
                     transactions={selectedBreakdownTransactions}
@@ -654,7 +728,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
     );
 };
 
-const ExtremeCard: React.FC<{ title: string; amount?: number; desc: string; icon: string; color: string; bg: string }> = ({ title, amount, desc, icon, color, bg }) => (
+const ExtremeCard: React.FC<{ title: string; amount?: number; value?: string; desc: string; icon: string; color: string; bg: string }> = ({ title, amount, value, desc, icon, color, bg }) => (
     <div className="bg-white dark:bg-zinc-900 p-3 rounded-2xl shadow-sm border border-ios-border">
         <div className="flex items-center gap-2 mb-2">
             <div className={`w-6 h-6 rounded-full ${bg} flex items-center justify-center`}>
@@ -662,7 +736,7 @@ const ExtremeCard: React.FC<{ title: string; amount?: number; desc: string; icon
             </div>
             <span className="text-[10px] text-ios-subtext">{title}</span>
         </div>
-        <div className="font-bold text-sm tabular-nums mb-0.5">{amount !== undefined ? formatCurrency(amount) : desc}</div>
-        {amount !== undefined && <div className="text-[10px] text-ios-subtext truncate">{desc}</div>}
+        <div className="font-bold text-sm tabular-nums mb-0.5">{value ?? (amount !== undefined ? formatCurrency(amount) : desc)}</div>
+        {(value !== undefined || amount !== undefined) && <div className="text-[10px] text-ios-subtext truncate">{desc}</div>}
     </div>
 );

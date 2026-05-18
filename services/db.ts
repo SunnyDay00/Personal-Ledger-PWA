@@ -1,6 +1,7 @@
 import Dexie, { Table } from 'dexie';
 import { Transaction, Ledger, Category, CategoryGroup, AppSettings, OperationLog, BackupLog, SyncEntityType, SyncOperation, SyncQueueItem } from '../types';
 import { loadState } from './storage';
+import { normalizeCategory, normalizeLedger, normalizeTransaction } from './ledgerUtils';
 
 // 再次 bump DB 名称，彻底规避旧 schema 残留导致 objectStore not found。
 export const DB_NAME = 'FinanceDB_v9';
@@ -111,17 +112,17 @@ export async function markAllLocalDataForSync(): Promise<number> {
   ]);
 
   const normalizedTransactions = transactions.map(t => ({
-    ...t,
+    ...normalizeTransaction(t),
     updatedAt: t.updatedAt || t.createdAt || t.date || now,
     isDeleted: !!t.isDeleted,
   }));
   const normalizedLedgers = ledgers.map(l => ({
-    ...l,
+    ...normalizeLedger(l),
     updatedAt: l.updatedAt || l.createdAt || now,
     isDeleted: !!l.isDeleted,
   }));
   const normalizedCategories = categories.map(c => ({
-    ...c,
+    ...normalizeCategory(c),
     updatedAt: c.updatedAt || now,
     isDeleted: !!c.isDeleted,
   }));
@@ -253,13 +254,13 @@ async function migrateFromLegacyIndexedDB(): Promise<boolean> {
 
       const now = Date.now();
       const ledgersWithTime = ledgers.map(l => ({
-        ...l,
+        ...normalizeLedger(l),
         updatedAt: l.updatedAt || now,
         isDeleted: !!l.isDeleted,
       }));
       const defaultLedgerId = ledgersWithTime[0]?.id || 'default';
       const catsWithTime = categories.map(c => ({
-        ...c,
+        ...normalizeCategory(c),
         ledgerId: c.ledgerId || defaultLedgerId,
         updatedAt: c.updatedAt || now,
         isDeleted: !!c.isDeleted,
@@ -271,7 +272,7 @@ async function migrateFromLegacyIndexedDB(): Promise<boolean> {
         isDeleted: !!g.isDeleted,
       }));
       const txsWithTime = transactions.map(t => ({
-        ...t,
+        ...normalizeTransaction(t),
         updatedAt: t.updatedAt || t.createdAt || t.date || now,
         isDeleted: !!t.isDeleted,
       }));
@@ -336,7 +337,7 @@ export async function initAndMigrateDB() {
           let ledgersWithTime: Ledger[] = [];
           if (legacyState.ledgers && legacyState.ledgers.length > 0) {
             ledgersWithTime = legacyState.ledgers.map(l => ({
-              ...l,
+              ...normalizeLedger(l),
               updatedAt: l.updatedAt || Date.now(),
               isDeleted: false,
             }));
@@ -348,7 +349,7 @@ export async function initAndMigrateDB() {
             // Migrate Categories
             if (legacyState.categories && legacyState.categories.length > 0) {
               const catsWithTime = legacyState.categories.map(c => ({
-                ...c,
+                ...normalizeCategory(c),
                 ledgerId: c.ledgerId || defaultLedgerId,
                 updatedAt: c.updatedAt || Date.now(),
                 isDeleted: false,
@@ -370,7 +371,7 @@ export async function initAndMigrateDB() {
           // Migrate Transactions
           if (legacyState.transactions && legacyState.transactions.length > 0) {
             const txsWithTime = legacyState.transactions.map(t => ({
-              ...t,
+              ...normalizeTransaction(t),
               updatedAt: t.updatedAt || Date.now(),
               isDeleted: false,
             }));
@@ -403,25 +404,25 @@ export const dbAPI = {
     await db.settings.put({ key: 'main', value: settings });
   },
   async getLedgers() {
-    return (await db.ledgers.toArray()).filter(l => !l.isDeleted);
+    return (await db.ledgers.toArray()).map(normalizeLedger).filter(l => !l.isDeleted);
   },
   async getCategories() {
-    return (await db.categories.orderBy('order').toArray()).filter(c => !c.isDeleted);
+    return (await db.categories.orderBy('order').toArray()).map(normalizeCategory).filter(c => !c.isDeleted);
   },
   async getCategoryGroups() {
     return (await db.categoryGroups.orderBy('order').toArray()).filter(g => !g.isDeleted);
   },
   async getTransactions() {
-    return (await db.transactions.orderBy('date').reverse().toArray()).filter(t => !t.isDeleted);
+    return (await db.transactions.orderBy('date').reverse().toArray()).map(normalizeTransaction).filter(t => !t.isDeleted);
   },
   async getAllTransactionsIncludingDeleted() {
-    return await db.transactions.toArray();
+    return (await db.transactions.toArray()).map(normalizeTransaction);
   },
   async getAllLedgersIncludingDeleted() {
-    return await db.ledgers.toArray();
+    return (await db.ledgers.toArray()).map(normalizeLedger);
   },
   async getAllCategoriesIncludingDeleted() {
-    return await db.categories.toArray();
+    return (await db.categories.toArray()).map(normalizeCategory);
   },
   async getAllCategoryGroupsIncludingDeleted() {
     try {

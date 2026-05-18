@@ -3,6 +3,7 @@ import { db, ensureStoresReady } from './db';
 import { WebDAVService } from './webdav';
 import { AppSettings, Ledger, Transaction, Category, CategoryGroup } from '../types';
 import { transactionsToCsv, parseCsvToTransactions } from '../utils';
+import { normalizeCategory, normalizeLedger, normalizeTransaction } from './ledgerUtils';
 
 // Helper: Get Year from Timestamp
 const getYear = (ts: number) => new Date(ts).getFullYear();
@@ -267,14 +268,15 @@ export class SyncService {
     private async mergeLedgers(cloudLedgers: Ledger[]) {
         await (db as any).transaction('rw', db.ledgers, async () => {
             for (const cloudL of cloudLedgers) {
-                const localL = await db.ledgers.get(cloudL.id);
+                const normalized = normalizeLedger(cloudL);
+                const localL = await db.ledgers.get(normalized.id);
                 if (!localL) {
-                    await db.ledgers.put({ ...cloudL, updatedAt: cloudL.updatedAt || Date.now(), isDeleted: false });
+                    await db.ledgers.put({ ...normalized, updatedAt: normalized.updatedAt || Date.now(), isDeleted: false });
                 } else {
-                    const cloudTime = cloudL.updatedAt || 0;
+                    const cloudTime = normalized.updatedAt || 0;
                     const localTime = localL.updatedAt || 0;
                     if (cloudTime > localTime) {
-                        await db.ledgers.put({ ...cloudL, updatedAt: cloudTime });
+                        await db.ledgers.put({ ...normalized, updatedAt: cloudTime });
                     }
                 }
             }
@@ -287,14 +289,15 @@ export class SyncService {
 
          await (db as any).transaction('rw', db.categories, async () => {
             for (const cloudC of cloudCats) {
-                const localC = await db.categories.get(cloudC.id);
+                const normalized = normalizeCategory(cloudC);
+                const localC = await db.categories.get(normalized.id);
                 // Assign default ledgerId ONLY if missing (legacy data)
-                const categoryToSave = { ...cloudC, ledgerId: cloudC.ledgerId ?? defaultLedgerId };
+                const categoryToSave = { ...normalized, ledgerId: normalized.ledgerId ?? defaultLedgerId };
                 
                 if (!localC) {
-                    await db.categories.put({ ...categoryToSave, updatedAt: cloudC.updatedAt || Date.now(), isDeleted: false });
+                    await db.categories.put({ ...categoryToSave, updatedAt: normalized.updatedAt || Date.now(), isDeleted: false });
                 } else {
-                     const cloudTime = cloudC.updatedAt || 0;
+                     const cloudTime = normalized.updatedAt || 0;
                      const localTime = localC.updatedAt || 0;
                      if (cloudTime > localTime) {
                          await db.categories.put({ ...categoryToSave, updatedAt: cloudTime });
@@ -335,15 +338,16 @@ export class SyncService {
         
         await (db as any).transaction('rw', db.transactions, async () => {
             for (const cloudT of cloudTxs) {
-                const localT = await db.transactions.get(cloudT.id);
+                const normalized = normalizeTransaction(cloudT);
+                const localT = await db.transactions.get(normalized.id);
                 if (!localT) {
-                    await db.transactions.put({ ...cloudT, updatedAt: cloudT.updatedAt || cloudT.createdAt || Date.now() });
+                    await db.transactions.put({ ...normalized, updatedAt: normalized.updatedAt || normalized.createdAt || Date.now() });
                     continue;
                 }
-                const cloudTime = cloudT.updatedAt || cloudT.createdAt || 0;
+                const cloudTime = normalized.updatedAt || normalized.createdAt || 0;
                 const localTime = localT.updatedAt || localT.createdAt || 0;
                 if (cloudTime > localTime) {
-                    await db.transactions.put(cloudT);
+                    await db.transactions.put(normalized);
                 }
             }
         });

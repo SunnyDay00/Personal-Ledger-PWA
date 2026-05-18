@@ -1,7 +1,7 @@
 
 import { ClassValue, clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { AppState, Transaction, Category, Ledger } from './types';
+import { AppState, Transaction, Category, Ledger, CategoryType } from './types';
 import { format } from 'date-fns';
 
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
@@ -70,7 +70,10 @@ export async function exportToJson(data: object, filename: string) {
 export function transactionsToCsv(transactions: Transaction[], categories: Category[] = [], ledgers: Ledger[] = []): string {
     const headers = [
         'Time', 'Category', 'Amount', 'Type', 'Note', 'Ledger',
-        'id', 'ledgerId', 'categoryId', 'rawType', 'dateTs', 'createdAtTs', 'updatedAtTs', 'isDeleted', 'attachments'
+        'id', 'ledgerId', 'categoryId', 'rawType', 'ledgerType',
+        'tradeAction', 'tradeQuantity', 'tradeGrossAmount', 'tradeFeeRate', 'tradeFeeAmount', 'tradeAllocations',
+        'categoryBuyFeeRate', 'categorySellFeeRate',
+        'dateTs', 'createdAtTs', 'updatedAtTs', 'isDeleted', 'attachments'
     ];
     
     const rows = transactions.map(t => {
@@ -79,7 +82,10 @@ export function transactionsToCsv(transactions: Transaction[], categories: Categ
         
         const timeStr = format(t.date, 'yyyy-MM-dd HH:mm:ss');
         const catName = cat ? cat.name : 'Unknown';
-        const typeName = t.type === 'expense' ? '支出' : '收入';
+        const ledgerType = ledger?.ledgerType || 'accounting';
+        const typeName = ledgerType === 'trading'
+            ? (t.tradeAction === 'sell' || t.type === 'income' ? '卖出' : '买入')
+            : (t.type === 'expense' ? '支出' : '收入');
         const noteEscaped = t.note ? `"${t.note.replace(/"/g, '""')}"` : '';
         const ledgerName = ledger ? ledger.name : 'Unknown';
 
@@ -94,6 +100,15 @@ export function transactionsToCsv(transactions: Transaction[], categories: Categ
             t.ledgerId,
             t.categoryId,
             t.type,
+            ledgerType,
+            t.tradeAction || '',
+            t.tradeQuantity || '',
+            t.tradeGrossAmount || '',
+            t.tradeFeeRate || '',
+            t.tradeFeeAmount || '',
+            t.tradeAllocations && t.tradeAllocations.length > 0 ? `"${JSON.stringify(t.tradeAllocations).replace(/"/g, '""')}"` : '',
+            cat?.buyFeeRate ?? '',
+            cat?.sellFeeRate ?? '',
             t.date,
             t.createdAt,
             t.updatedAt || '',
@@ -135,7 +150,7 @@ const detectDelimiter = (headerLine: string): ',' | '\t' => {
     return headerLine.includes('\t') ? '\t' : ',';
 };
 
-export function extractCategoriesFromCsv(csvContent: string): { id: string, name: string, type: 'expense'|'income' }[] {
+export function extractCategoriesFromCsv(csvContent: string): { id: string, name: string, type: CategoryType, buyFeeRate?: number, sellFeeRate?: number }[] {
     let content = csvContent;
     if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
     
@@ -148,29 +163,35 @@ export function extractCategoriesFromCsv(csvContent: string): { id: string, name
         name: headers.indexOf('Category'),
         id: headers.indexOf('categoryId'),
         rawType: headers.indexOf('rawType'),
-        cnType: headers.indexOf('Type')
+        cnType: headers.indexOf('Type'),
+        ledgerType: headers.indexOf('ledgerType'),
+        buyFeeRate: headers.indexOf('categoryBuyFeeRate'),
+        sellFeeRate: headers.indexOf('categorySellFeeRate')
     };
 
     if (idx.name === -1) return [];
 
-    const uniqueMap = new Map<string, { id: string, name: string, type: 'expense'|'income' }>();
+    const uniqueMap = new Map<string, { id: string, name: string, type: CategoryType, buyFeeRate?: number, sellFeeRate?: number }>();
 
     for (let i = 1; i < lines.length; i++) {
         try {
             const cols = parseCsvLine(lines[i], delimiter);
             const name = cols[idx.name]?.trim();
             const id = cols[idx.id]?.trim();
-            let type: 'expense'|'income' = 'expense';
+            let type: CategoryType = 'expense';
             if (idx.rawType !== -1 && cols[idx.rawType]) {
-                type = cols[idx.rawType] as any;
+                type = cols[idx.rawType] === 'income' ? 'income' : 'expense';
             } else if (idx.cnType !== -1 && cols[idx.cnType]) {
-                type = cols[idx.cnType].includes('收入') ? 'income' : 'expense';
+                type = cols[idx.cnType].includes('收入') || cols[idx.cnType].includes('卖出') ? 'income' : 'expense';
             }
+            if (idx.ledgerType !== -1 && cols[idx.ledgerType] === 'trading') type = 'trade';
+            const buyFeeRate = idx.buyFeeRate !== -1 ? Number(cols[idx.buyFeeRate] || 0) : 0;
+            const sellFeeRate = idx.sellFeeRate !== -1 ? Number(cols[idx.sellFeeRate] || 0) : 0;
 
             if (name) {
                 const key = id || name; 
                 if (!uniqueMap.has(key)) {
-                    uniqueMap.set(key, { id: id || `auto_${Date.now()}_${Math.floor(Math.random()*1000)}`, name, type });
+                    uniqueMap.set(key, { id: id || `auto_${Date.now()}_${Math.floor(Math.random()*1000)}`, name, type, buyFeeRate, sellFeeRate });
                 }
             }
         } catch (e) { continue; }
@@ -193,7 +214,8 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
 
     let idx = {
         id: 0, ledgerId: 1, amount: 2, type: 3, categoryId: 4, date: 5, note: 6, createdAt: 7, updatedAt: 8,
-        timeStr: -1, isDeleted: -1, catName: -1, ledgerName: -1, attachments: -1
+        timeStr: -1, isDeleted: -1, catName: -1, ledgerName: -1, attachments: -1,
+        tradeAction: -1, tradeQuantity: -1, tradeGrossAmount: -1, tradeFeeRate: -1, tradeFeeAmount: -1, tradeAllocations: -1
     };
 
     if (headers.includes('id') && (headers.includes('dateTs') || headers.includes('Time'))) {
@@ -211,7 +233,13 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
             isDeleted: headers.indexOf('isDeleted'),
             catName: headers.indexOf('Category'),
             ledgerName: headers.indexOf('Ledger'),
-            attachments: headers.indexOf('attachments')
+            attachments: headers.indexOf('attachments'),
+            tradeAction: headers.indexOf('tradeAction'),
+            tradeQuantity: headers.indexOf('tradeQuantity'),
+            tradeGrossAmount: headers.indexOf('tradeGrossAmount'),
+            tradeFeeRate: headers.indexOf('tradeFeeRate'),
+            tradeFeeAmount: headers.indexOf('tradeFeeAmount'),
+            tradeAllocations: headers.indexOf('tradeAllocations')
         };
     }
 
@@ -223,11 +251,13 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
             let typeVal: any = cols[idx.type];
             if (!typeVal && idx.timeStr !== -1) {
                const cnTypeIdx = headers.indexOf('Type');
-               if (cnTypeIdx !== -1) typeVal = cols[cnTypeIdx].includes('收入') ? 'income' : 'expense';
+               if (cnTypeIdx !== -1) typeVal = cols[cnTypeIdx].includes('收入') || cols[cnTypeIdx].includes('卖出') ? 'income' : 'expense';
                else typeVal = 'expense';
             }
             if (typeVal === '支出') typeVal = 'expense';
             if (typeVal === '收入') typeVal = 'income';
+            if (typeVal === '买入') typeVal = 'expense';
+            if (typeVal === '卖出') typeVal = 'income';
             
             let amountVal = parseFloat(cols[idx.amount]);
             if (isNaN(amountVal)) {
@@ -258,12 +288,26 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
             let ledgerId = (idx.ledgerId !== -1 && cols[idx.ledgerId]) ? cols[idx.ledgerId] : '';
             if (!ledgerId && ledgerName) ledgerId = ledgerName; // fallback to name
 
+            let tradeAllocations;
+            if (idx.tradeAllocations !== -1 && cols[idx.tradeAllocations]) {
+                try {
+                    const parsedAllocations = JSON.parse(cols[idx.tradeAllocations]);
+                    if (Array.isArray(parsedAllocations)) tradeAllocations = parsedAllocations;
+                } catch {}
+            }
+
             transactions.push({
                 id: txId,
                 ledgerId: ledgerId || '',
                 amount: amountVal,
                 type: typeVal || 'expense',
                 categoryId: categoryId || 'unknown',
+                tradeAction: idx.tradeAction !== -1 && cols[idx.tradeAction] ? (cols[idx.tradeAction] === 'sell' ? 'sell' : 'buy') : undefined,
+                tradeQuantity: idx.tradeQuantity !== -1 && cols[idx.tradeQuantity] ? Number(cols[idx.tradeQuantity]) : undefined,
+                tradeGrossAmount: idx.tradeGrossAmount !== -1 && cols[idx.tradeGrossAmount] ? Number(cols[idx.tradeGrossAmount]) : undefined,
+                tradeFeeRate: idx.tradeFeeRate !== -1 && cols[idx.tradeFeeRate] ? Number(cols[idx.tradeFeeRate]) : undefined,
+                tradeFeeAmount: idx.tradeFeeAmount !== -1 && cols[idx.tradeFeeAmount] ? Number(cols[idx.tradeFeeAmount]) : undefined,
+                tradeAllocations,
                 date: dateTs,
                 note: note || '',
                 createdAt: (idx.createdAt !== -1 && parseInt(cols[idx.createdAt])) || Date.now(),

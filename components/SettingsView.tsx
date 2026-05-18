@@ -3,19 +3,20 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { CloudSyncButton } from './CloudSyncButton';
-import { THEME_PRESETS, AVAILABLE_ICONS, DEFAULT_CATEGORIES } from '../constants';
+import { THEME_PRESETS, AVAILABLE_ICONS, DEFAULT_CATEGORIES, DEFAULT_TRADE_CATEGORIES } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
 import { generateId, exportToJson, exportToCsv, cn, readCsvFileWithEncoding } from '../utils';
 import { WebDAVService } from '../services/webdav';
 import { db } from '../services/db';
 import { format } from 'date-fns';
 import { SyncLogModal } from './SyncLogModal';
-import { Ledger, Category } from '../types';
+import { Ledger, Category, CategoryType, LedgerType } from '../types';
 import { feedback } from '../services/feedback';
 import { imageService } from '../services/imageService';
 import { normalizeAppSettings, normalizeBackupAutoEnabled, normalizeBackupIntervalDays, normalizeBackupReminderDays } from '../services/settingsUtils';
 import { AuthPanel } from './AuthPanel';
 import { getCloudVersion } from '../services/d1Sync';
+import { getLedgerTypeLabel, isTradingLedger, normalizeLedgerType } from '../services/ledgerUtils';
 
 type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'history' | 'layout' | 'theme' | 'about' | 'storage';
 
@@ -51,6 +52,46 @@ const SettingsItem: React.FC<{ icon: string; label: string; value?: string; onCl
   </button>
 );
 
+const LEDGER_TYPE_INTRO: Array<{
+  type: LedgerType;
+  title: string;
+  images: {
+    light: string;
+    dark: string;
+  };
+  description: string;
+  scenario: string;
+  detail: string;
+}> = [
+  {
+    type: 'accounting',
+    title: '记账本',
+    images: {
+      light: '/ledger-type-accounting-light.webp',
+      dark: '/ledger-type-accounting-dark.webp',
+    },
+    description: '按收入 / 支出管理日常流水、预算和分类统计。',
+    scenario: '适合家庭开销、工资收入、旅行账单和长期预算管理。',
+    detail: '创建后自动生成收入、支出分类，录入方式保持传统记账流程。',
+  },
+  {
+    type: 'trading',
+    title: '买卖本',
+    images: {
+      light: '/ledger-type-trading-light.webp',
+      dark: '/ledger-type-trading-dark.webp',
+    },
+    description: '按类目记录买入、卖出、库存数量和手续费。',
+    scenario: '适合库存商品、收藏品、二手交易和需要限制可卖数量的场景。',
+    detail: '创建后自动生成买卖类目，买入增加库存，卖出按现有数量校验。',
+  },
+];
+
+const getSystemPrefersDark = () =>
+  typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(prefers-color-scheme: dark)').matches;
+
 export const SettingsView: React.FC = () => {
   const { state, dispatch, manualBackup, restoreFromCloud, smartImportCsv, manualCloudSync, resetApp, addLedger, logoutAccount } = useApp();
   const [page, setPage] = useState<SettingsPage>('main');
@@ -83,15 +124,17 @@ export const SettingsView: React.FC = () => {
 
   const [showSyncLog, setShowSyncLog] = useState(false);
   const [showLedgerSelect, setShowLedgerSelect] = useState(false);
-  const [ledgerModal, setLedgerModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; color: string }>(
-    { isOpen: false, mode: 'create', name: '', color: '#007AFF' }
+  const [ledgerModal, setLedgerModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; color: string; ledgerType: LedgerType }>(
+    { isOpen: false, mode: 'create', name: '', color: '#007AFF', ledgerType: 'accounting' }
   );
   const [selectedLedgerId, setSelectedLedgerId] = useState(state.currentLedgerId || state.ledgers[0]?.id || '');
-  const [catType, setCatType] = useState<'expense' | 'income'>('expense');
+  const [catType, setCatType] = useState<CategoryType>('expense');
   const [isAddingCat, setIsAddingCat] = useState(false);
   const [editingCat, setEditingCat] = useState<Category | null>(null);
   const [newCatName, setNewCatName] = useState('');
   const [newCatIcon, setNewCatIcon] = useState('Circle');
+  const [newCatBuyFeeRate, setNewCatBuyFeeRate] = useState('0');
+  const [newCatSellFeeRate, setNewCatSellFeeRate] = useState('0');
   const [isReordering, setIsReordering] = useState(false);
   const [dragCategoryId, setDragCategoryId] = useState<string | null>(null);
   const [dragOverCategoryId, setDragOverCategoryId] = useState<string | null>(null);
@@ -105,14 +148,37 @@ export const SettingsView: React.FC = () => {
   });
 
   const [cacheStats, setCacheStats] = useState({ count: 0, size: 0 });
+  const [systemPrefersDark, setSystemPrefersDark] = useState(getSystemPrefersDark);
   const authSession = state.settings.authMode === 'authenticated' ? state.settings.authSession : undefined;
   const isAuthenticated = !!authSession?.token;
+  const selectedLedger = state.ledgers.find(ledger => ledger.id === selectedLedgerId);
+  const isSelectedTradingLedger = isTradingLedger(selectedLedger);
+  const selectedLedgerTypeIntro = LEDGER_TYPE_INTRO.find(option => option.type === ledgerModal.ledgerType) || LEDGER_TYPE_INTRO[0];
+  const effectiveImageTheme: 'light' | 'dark' = state.settings.themeMode === 'auto'
+    ? systemPrefersDark ? 'dark' : 'light'
+    : state.settings.themeMode;
+  const selectedLedgerTypeImage = selectedLedgerTypeIntro.images[effectiveImageTheme];
 
   useEffect(() => {
     if (page === 'storage') {
       imageService.getCacheStats().then(setCacheStats);
     }
   }, [page]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const syncSystemTheme = () => setSystemPrefersDark(media.matches);
+    syncSystemTheme();
+
+    if (typeof media.addEventListener === 'function') {
+      media.addEventListener('change', syncSystemTheme);
+      return () => media.removeEventListener('change', syncSystemTheme);
+    }
+
+    media.addListener(syncSystemTheme);
+    return () => media.removeListener(syncSystemTheme);
+  }, []);
 
   // Viewport management for iOS keyboard
   const [visualViewport, setVisualViewport] = useState({
@@ -193,6 +259,20 @@ export const SettingsView: React.FC = () => {
       .filter(c => !c.isDeleted && c.ledgerId === selectedLedgerId && c.type === catType)
       .sort((a, b) => a.order - b.order);
   }, [state.categories, selectedLedgerId, catType]);
+
+  useEffect(() => {
+    if (page !== 'categories') return;
+    const currentLedgerId = state.currentLedgerId || state.ledgers[0]?.id || '';
+    if (currentLedgerId && selectedLedgerId !== currentLedgerId) {
+      setSelectedLedgerId(currentLedgerId);
+    }
+  }, [page, selectedLedgerId, state.currentLedgerId, state.ledgers]);
+
+  useEffect(() => {
+    setCatType(isSelectedTradingLedger ? 'trade' : 'expense');
+    setIsAddingCat(false);
+    setEditingCat(null);
+  }, [selectedLedgerId, isSelectedTradingLedger]);
 
   const sortedGroups = useMemo(() => {
     return (state.categoryGroups || [])
@@ -287,8 +367,8 @@ export const SettingsView: React.FC = () => {
     }
   };
 
-  const openCreateLedger = () => setLedgerModal({ isOpen: true, mode: 'create', name: '', color: '#007AFF' });
-  const openEditLedger = (l: Ledger) => setLedgerModal({ isOpen: true, mode: 'edit', id: l.id, name: l.name, color: l.themeColor });
+  const openCreateLedger = () => setLedgerModal({ isOpen: true, mode: 'create', name: '', color: '#007AFF', ledgerType: 'accounting' });
+  const openEditLedger = (l: Ledger) => setLedgerModal({ isOpen: true, mode: 'edit', id: l.id, name: l.name, color: l.themeColor, ledgerType: normalizeLedgerType(l.ledgerType) });
 
   const saveLedger = async () => {
     if (!ledgerModal.name.trim()) {
@@ -300,10 +380,12 @@ export const SettingsView: React.FC = () => {
       // Edit
       const original = state.ledgers.find(l => l.id === ledgerModal.id);
       if (original) {
+        const hasTransactions = state.transactions.some(transaction => transaction.ledgerId === original.id && !transaction.isDeleted);
         const updated: Ledger = {
           ...original,
           name: ledgerModal.name,
           themeColor: ledgerModal.color,
+          ledgerType: hasTransactions ? normalizeLedgerType(original.ledgerType) : ledgerModal.ledgerType,
           updatedAt: Date.now()
         };
         dispatch({ type: 'UPDATE_LEDGER', payload: updated });
@@ -316,6 +398,7 @@ export const SettingsView: React.FC = () => {
         id: generateId(),
         name: ledgerModal.name,
         themeColor: ledgerModal.color,
+        ledgerType: ledgerModal.ledgerType,
         createdAt: Date.now(),
         updatedAt: Date.now(),
         isDeleted: false
@@ -323,7 +406,7 @@ export const SettingsView: React.FC = () => {
       // Use context method to ensure default categories are seeded
       await addLedger(newLedger);
     }
-    setLedgerModal({ isOpen: false, mode: 'create', id: undefined, name: '', color: '#007AFF' });
+    setLedgerModal({ isOpen: false, mode: 'create', id: undefined, name: '', color: '#007AFF', ledgerType: 'accounting' });
   };
 
   const handleDeleteLedger = (l: Ledger) => {
@@ -356,7 +439,7 @@ export const SettingsView: React.FC = () => {
       window.alert('请输入分类名称');
       return;
     }
-    const order = Math.max(-1, ...state.categories.filter((c) => c.type === catType).map((c) => c.order ?? 0)) + 1;
+    const order = Math.max(-1, ...state.categories.filter((c) => c.ledgerId === selectedLedgerId && c.type === catType).map((c) => c.order ?? 0)) + 1;
     dispatch({
       type: 'ADD_CATEGORY',
       payload: {
@@ -365,6 +448,8 @@ export const SettingsView: React.FC = () => {
         name: newCatName,
         icon: newCatIcon,
         type: catType,
+        buyFeeRate: isSelectedTradingLedger ? Number(newCatBuyFeeRate || 0) : 0,
+        sellFeeRate: isSelectedTradingLedger ? Number(newCatSellFeeRate || 0) : 0,
         order,
         isCustom: true,
         updatedAt: Date.now(),
@@ -373,6 +458,8 @@ export const SettingsView: React.FC = () => {
     setIsAddingCat(false);
     setNewCatName('');
     setNewCatIcon('Circle');
+    setNewCatBuyFeeRate('0');
+    setNewCatSellFeeRate('0');
     feedback.play('success');
     feedback.vibrate('success');
   };
@@ -381,14 +468,18 @@ export const SettingsView: React.FC = () => {
     setEditingCat(c);
     setNewCatName(c.name);
     setNewCatIcon(c.icon);
+    setNewCatBuyFeeRate(String(c.buyFeeRate ?? 0));
+    setNewCatSellFeeRate(String(c.sellFeeRate ?? 0));
   };
 
   const saveEditCategory = () => {
     if (!editingCat) return;
-    dispatch({ type: 'UPDATE_CATEGORY', payload: { ...editingCat, name: newCatName, icon: newCatIcon, updatedAt: Date.now() } });
+    dispatch({ type: 'UPDATE_CATEGORY', payload: { ...editingCat, name: newCatName, icon: newCatIcon, buyFeeRate: Number(newCatBuyFeeRate || 0), sellFeeRate: Number(newCatSellFeeRate || 0), updatedAt: Date.now() } });
     setEditingCat(null);
     setNewCatName('');
     setNewCatIcon('Circle');
+    setNewCatBuyFeeRate('0');
+    setNewCatSellFeeRate('0');
   };
 
   const handleDeleteCategory = (id: string) => {
@@ -1134,7 +1225,7 @@ export const SettingsView: React.FC = () => {
               <div className="w-4 h-4 rounded-full" style={{ backgroundColor: l.themeColor }}></div>
               <div className="flex flex-col">
                 <span className="font-medium text-sm">{l.name}</span>
-                <span className="text-[10px] text-ios-subtext">创建于 {format(l.createdAt, 'yyyy/MM/dd')}</span>
+                <span className="text-[10px] text-ios-subtext">创建于 {format(l.createdAt, 'yyyy/MM/dd')} · {getLedgerTypeLabel(l)}</span>
               </div>
               {state.currentLedgerId === l.id && <span className="text-[10px] bg-gray-100 dark:bg-zinc-800 px-2 py-0.5 rounded text-ios-subtext">当前</span>}
             </div>
@@ -1182,7 +1273,140 @@ export const SettingsView: React.FC = () => {
         </div>
       </div>
 
-      {ledgerModal.isOpen && (
+      {ledgerModal.isOpen && ledgerModal.mode === 'create' && (
+        <div
+          className="fixed left-0 z-50 flex w-full flex-col bg-ios-bg animate-slide-up"
+          style={{
+            height: visualViewport.height,
+            top: visualViewport.offsetTop
+          }}
+        >
+          <div className="shrink-0 pt-[env(safe-area-inset-top)] bg-ios-bg/90 backdrop-blur-xl border-b border-black/5 dark:border-white/5">
+            <div className="relative flex h-14 items-center justify-center px-4">
+              <button
+                type="button"
+                onClick={() => setLedgerModal({ ...ledgerModal, isOpen: false })}
+                className="absolute left-4 text-sm font-medium text-ios-primary active:opacity-60"
+              >
+                取消
+              </button>
+              <h3 className="text-base font-semibold text-ios-text">新建账本</h3>
+              <button
+                type="button"
+                onClick={saveLedger}
+                className="absolute right-4 text-sm font-semibold text-ios-primary active:opacity-60"
+              >
+                保存
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto no-scrollbar pb-[calc(env(safe-area-inset-bottom)+2rem)]" style={{ WebkitOverflowScrolling: 'touch' }}>
+            <div className="mx-auto w-full max-w-xl px-4 py-5 space-y-6">
+              <section>
+                <label className="text-xs font-medium text-ios-subtext ml-1 mb-2 block">账本名称</label>
+                <input
+                  type="text"
+                  value={ledgerModal.name}
+                  onChange={(e) => setLedgerModal({ ...ledgerModal, name: e.target.value })}
+                  placeholder="账本名称"
+                  className="w-full bg-white dark:bg-zinc-900 border border-ios-border p-4 rounded-2xl text-base outline-none focus:ring-2 focus:ring-ios-primary/20 min-h-[52px]"
+                />
+              </section>
+
+              <section>
+                <h4 className="text-xs font-semibold text-ios-subtext uppercase tracking-wider ml-1 mb-3">主题颜色</h4>
+                <div className="flex flex-wrap gap-3">
+                  {THEME_PRESETS.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setLedgerModal((prev) => ({ ...prev, color: c }));
+                      }}
+                      className={cn(
+                        'w-8 h-8 rounded-full transition-transform border-2 shadow-sm',
+                        ledgerModal.color === c ? 'scale-110 border-gray-500 dark:border-zinc-300' : 'border-white/80 dark:border-zinc-700'
+                      )}
+                      style={{ backgroundColor: c }}
+                      aria-label={`选择颜色 ${c}`}
+                    />
+                  ))}
+                </div>
+              </section>
+
+              <section>
+                <div className="ml-1 mb-3">
+                  <h4 className="text-xs font-semibold text-ios-subtext uppercase tracking-wider">账本类型</h4>
+                  <p className="mt-1 text-xs leading-5 text-ios-subtext">选择后会生成对应的分类和录入方式。</p>
+                </div>
+                <div className="space-y-4">
+                  <div
+                    className="relative grid grid-cols-2 rounded-2xl bg-gray-100 p-1 shadow-inner dark:bg-zinc-800"
+                    role="tablist"
+                    aria-label="选择账本类型"
+                  >
+                    <span
+                      className="absolute bottom-1 left-1 top-1 w-[calc(50%-0.25rem)] rounded-[0.85rem] bg-white shadow-sm transition-transform duration-200 dark:bg-zinc-900"
+                      style={{ transform: ledgerModal.ledgerType === 'trading' ? 'translateX(100%)' : 'translateX(0)' }}
+                    />
+                    {LEDGER_TYPE_INTRO.map(option => {
+                      const selected = ledgerModal.ledgerType === option.type;
+                      return (
+                        <button
+                          key={option.type}
+                          type="button"
+                          role="tab"
+                          aria-selected={selected}
+                          onClick={() => setLedgerModal(prev => ({ ...prev, ledgerType: option.type }))}
+                          className={cn(
+                            'relative z-10 flex min-h-[44px] items-center justify-center gap-2 rounded-xl px-3 text-sm font-semibold transition-colors',
+                            selected ? 'text-ios-primary' : 'text-ios-subtext'
+                          )}
+                        >
+                          {option.title}
+                          {selected && <Icon name="CheckCircle2" className="h-4 w-4" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="overflow-hidden rounded-2xl border border-ios-border bg-white shadow-sm dark:border-slate-700 dark:bg-[#050b12]">
+                    <div className="aspect-[3/2] w-full bg-white dark:bg-[#050b12]">
+                      <img
+                        key={`${selectedLedgerTypeIntro.type}-${effectiveImageTheme}`}
+                        src={selectedLedgerTypeImage}
+                        alt={`${selectedLedgerTypeIntro.title}示意图`}
+                        className="h-full w-full object-cover"
+                        loading="eager"
+                      />
+                    </div>
+                    <div className="p-4 dark:bg-[#050b12]">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <h5 className="text-base font-semibold text-ios-text">{selectedLedgerTypeIntro.title}</h5>
+                          <p className="mt-1 text-sm leading-5 text-ios-subtext">{selectedLedgerTypeIntro.description}</p>
+                        </div>
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-ios-primary text-white">
+                          <Icon name="Check" className="h-4 w-4" />
+                        </span>
+                      </div>
+                      <div className="mt-3 space-y-1.5">
+                        <p className="text-xs leading-5 text-ios-text">{selectedLedgerTypeIntro.scenario}</p>
+                        <p className="text-xs leading-5 text-ios-subtext">{selectedLedgerTypeIntro.detail}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {ledgerModal.isOpen && ledgerModal.mode === 'edit' && (
         <div
           className="fixed left-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm p-4 w-full"
           style={{
@@ -1191,7 +1415,7 @@ export const SettingsView: React.FC = () => {
           }}
         >
           <div className="bg-white dark:bg-zinc-900 w-full max-w-xs rounded-2xl p-5 shadow-2xl animate-fade-in">
-            <h3 className="font-bold text-lg mb-4 text-center">{ledgerModal.mode === 'create' ? '新建账本' : '编辑账本'}</h3>
+            <h3 className="font-bold text-lg mb-4 text-center">编辑账本</h3>
             <input
               type="text"
               value={ledgerModal.name}
@@ -1217,6 +1441,32 @@ export const SettingsView: React.FC = () => {
                 />
               ))}
             </div>
+            {(() => {
+              const locked = ledgerModal.mode === 'edit' && !!ledgerModal.id && state.transactions.some(transaction => transaction.ledgerId === ledgerModal.id && !transaction.isDeleted);
+              return (
+                <div className="mb-5">
+                  <div className="grid grid-cols-2 gap-2">
+                    {(['accounting', 'trading'] as LedgerType[]).map(type => (
+                      <button
+                        key={type}
+                        type="button"
+                        disabled={locked}
+                        onClick={() => setLedgerModal(prev => ({ ...prev, ledgerType: type }))}
+                        className={cn(
+                          'py-2 rounded-xl text-xs font-medium border transition-colors disabled:opacity-50',
+                          ledgerModal.ledgerType === type
+                            ? 'bg-ios-primary text-white border-ios-primary'
+                            : 'bg-gray-50 dark:bg-zinc-800 text-ios-text border-ios-border'
+                        )}
+                      >
+                        {type === 'accounting' ? '记账本' : '买卖本'}
+                      </button>
+                    ))}
+                  </div>
+                  {locked && <p className="mt-2 text-[10px] text-ios-subtext text-center">已有记录后不能修改账本类型</p>}
+                </div>
+              );
+            })()}
             <div className="flex gap-3">
               <button onClick={() => setLedgerModal({ ...ledgerModal, isOpen: false })} className="flex-1 py-2.5 bg-gray-100 dark:bg-zinc-800 rounded-xl text-sm font-medium">
                 取消
@@ -1238,8 +1488,8 @@ export const SettingsView: React.FC = () => {
     let order = 0;
     const timestamp = Date.now();
 
-    // Use the unified rich list from constants
-    DEFAULT_CATEGORIES.forEach((cat, idx) => {
+    const template = isSelectedTradingLedger ? DEFAULT_TRADE_CATEGORIES : DEFAULT_CATEGORIES;
+    template.forEach((cat, idx) => {
       // Ensure ID is unique by appending index and timestamp
       const catId = `${generateId()}_${timestamp}_${idx}`;
       dispatch({
@@ -1249,7 +1499,9 @@ export const SettingsView: React.FC = () => {
           ledgerId: selectedLedgerId,
           name: cat.name,
           icon: cat.icon,
-          type: cat.type,
+          type: isSelectedTradingLedger ? 'trade' : cat.type,
+          buyFeeRate: cat.buyFeeRate ?? 0,
+          sellFeeRate: cat.sellFeeRate ?? 0,
           order: order++,
           isCustom: false,
           updatedAt: Date.now()
@@ -1333,28 +1585,30 @@ export const SettingsView: React.FC = () => {
     <>
       <div className="h-4"></div>
 
-      {/* Ledger Switcher for Categories */}
+      {/* Category management is scoped to the current ledger only. */}
       <div className="mx-4 mb-4">
-        <div className="flex items-center gap-2 overflow-x-auto pb-2 no-scrollbar">
-          {state.ledgers.map(l => (
-            <button
-              key={l.id}
-              onClick={() => setSelectedLedgerId(l.id)}
-              className={cn(
-                "flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap border",
-                selectedLedgerId === l.id
-                  ? "bg-ios-primary text-white border-ios-primary"
-                  : "bg-white dark:bg-zinc-900 text-ios-text border-gray-200 dark:border-zinc-700"
-              )}
-            >
-              <div className="w-2 h-2 rounded-full bg-white" style={{ backgroundColor: selectedLedgerId === l.id ? 'white' : l.themeColor }}></div>
-              {l.name}
-            </button>
-          ))}
+        <div className="rounded-2xl border border-ios-border bg-white p-4 shadow-sm dark:bg-zinc-900">
+          <div className="flex items-center gap-2">
+            <div
+              className="h-2.5 w-2.5 rounded-full"
+              style={{ backgroundColor: selectedLedger?.themeColor || '#007AFF' }}
+            />
+            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-ios-text">
+              {selectedLedger?.name || '当前账本'}
+            </span>
+            {selectedLedger && (
+              <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-[10px] text-ios-subtext dark:bg-zinc-800">
+                {getLedgerTypeLabel(selectedLedger)}
+              </span>
+            )}
+          </div>
+          <p className="mt-2 text-xs leading-5 text-ios-subtext">
+            分类管理仅作用于当前账本。如需管理其他账本，请先切换到对应账本。
+          </p>
         </div>
       </div>
 
-      {state.categories.filter(c => c.ledgerId === selectedLedgerId).length === 0 && (
+      {state.categories.filter(c => c.ledgerId === selectedLedgerId && !c.isDeleted).length === 0 && (
         <div className="mx-4 mb-4">
           <button onClick={handleInitDefaults} className="w-full py-3 bg-ios-primary/10 text-ios-primary rounded-xl text-sm font-medium border border-ios-primary/20 active:bg-ios-primary/20 transition-colors">
             初始化默认分类
@@ -1363,7 +1617,7 @@ export const SettingsView: React.FC = () => {
       )}
 
       {/* Delete All Groups Button - Only show if groups exist */}
-      {sortedGroups.length > 0 && (
+      {!isSelectedTradingLedger && sortedGroups.length > 0 && (
         <div className="mx-4 mb-4">
           <button onClick={handleDeleteAllGroups} className="w-full py-3 bg-red-500/10 text-red-600 rounded-xl text-sm font-medium border border-red-500/20 active:bg-red-500/20 transition-colors">
             删除所有分类组
@@ -1390,7 +1644,7 @@ export const SettingsView: React.FC = () => {
           </div>
         )}
 
-      <div className="mx-4 mb-4 bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-ios-border p-4">
+      {!isSelectedTradingLedger && <div className="mx-4 mb-4 bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-ios-border p-4">
         <div className="flex items-center justify-between mb-3">
           <div>
             <h3 className="text-sm font-semibold">分类组</h3>
@@ -1418,17 +1672,21 @@ export const SettingsView: React.FC = () => {
             );
           })}
         </div>
-      </div>
+      </div>}
 
       <div className="flex items-center justify-between mx-4 mb-4">
-        <div className="flex p-1 bg-gray-200 dark:bg-zinc-800 rounded-xl flex-1 mr-4">
-          <button onClick={() => setCatType('expense')} className={cn('flex-1 py-1.5 rounded-lg text-sm font-medium transition-all', catType === 'expense' ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext')}>
-            支出
-          </button>
-          <button onClick={() => setCatType('income')} className={cn('flex-1 py-1.5 rounded-lg text-sm font-medium transition-all', catType === 'income' ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext')}>
-            收入
-          </button>
-        </div>
+        {isSelectedTradingLedger ? (
+          <div className="flex-1 mr-4 py-2 px-3 rounded-xl bg-gray-100 dark:bg-zinc-800 text-sm font-medium text-ios-text text-center">类目</div>
+        ) : (
+          <div className="flex p-1 bg-gray-200 dark:bg-zinc-800 rounded-xl flex-1 mr-4">
+            <button onClick={() => setCatType('expense')} className={cn('flex-1 py-1.5 rounded-lg text-sm font-medium transition-all', catType === 'expense' ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext')}>
+              支出
+            </button>
+            <button onClick={() => setCatType('income')} className={cn('flex-1 py-1.5 rounded-lg text-sm font-medium transition-all', catType === 'income' ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext')}>
+              收入
+            </button>
+          </div>
+        )}
         <button
           onClick={() => setIsReordering(!isReordering)}
           className={cn(
@@ -1473,6 +1731,11 @@ export const SettingsView: React.FC = () => {
                   <Icon name={c.icon} className="w-4 h-4" />
                 </div>
                 <span className="text-xs text-center truncate w-full">{c.name}</span>
+                {isSelectedTradingLedger && (
+                  <span className="text-[10px] text-ios-subtext text-center leading-tight">
+                    买 {c.buyFeeRate ?? 0}% / 卖 {c.sellFeeRate ?? 0}%
+                  </span>
+                )}
                 {isReordering && (
                   <div className="inline-flex items-center gap-1 rounded-full bg-ios-primary/10 px-2 py-1 text-[10px] text-ios-primary">
                     <Icon name="GripVertical" className="w-3 h-3" />
@@ -1534,8 +1797,14 @@ export const SettingsView: React.FC = () => {
         >
           <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-5 animate-slide-up h-[78%] max-h-[680px] flex flex-col overflow-hidden">
             <div className="flex justify-between items-center mb-6">
-              <button onClick={() => setIsAddingCat(false)} className="text-ios-subtext">取消</button>
-              <h3 className="font-bold text-lg">添加{catType === 'expense' ? '支出' : '收入'}分类</h3>
+              <button onClick={() => {
+                setIsAddingCat(false);
+                setNewCatName('');
+                setNewCatIcon('Circle');
+                setNewCatBuyFeeRate('0');
+                setNewCatSellFeeRate('0');
+              }} className="text-ios-subtext">取消</button>
+              <h3 className="font-bold text-lg">添加{isSelectedTradingLedger ? '类目' : catType === 'expense' ? '支出' : '收入'}分类</h3>
               <button onClick={handleAddCategory} className="text-ios-primary font-bold">完成</button>
             </div>
 
@@ -1554,6 +1823,33 @@ export const SettingsView: React.FC = () => {
                 name="categoryName"
               />
             </div>
+
+            {isSelectedTradingLedger && (
+              <div className="grid grid-cols-2 gap-3 mb-4">
+                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                  买入手续费 %
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={newCatBuyFeeRate}
+                    onChange={(e) => setNewCatBuyFeeRate(e.target.value)}
+                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                  卖出手续费 %
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={newCatSellFeeRate}
+                    onChange={(e) => setNewCatSellFeeRate(e.target.value)}
+                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                  />
+                </label>
+              </div>
+            )}
 
             <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
               <div className="grid grid-cols-6 gap-3 pb-[calc(env(safe-area-inset-bottom)+1rem)]">
@@ -1590,6 +1886,8 @@ export const SettingsView: React.FC = () => {
                   setEditingCat(null);
                   setNewCatName('');
                   setNewCatIcon('Circle');
+                  setNewCatBuyFeeRate('0');
+                  setNewCatSellFeeRate('0');
                 }}
                 className="text-ios-subtext"
               >
@@ -1614,6 +1912,33 @@ export const SettingsView: React.FC = () => {
                 name="editCategoryName"
               />
             </div>
+
+            {isSelectedTradingLedger && (
+              <div className="grid grid-cols-2 gap-3 mb-4">
+                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                  买入手续费 %
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={newCatBuyFeeRate}
+                    onChange={(e) => setNewCatBuyFeeRate(e.target.value)}
+                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                  卖出手续费 %
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={newCatSellFeeRate}
+                    onChange={(e) => setNewCatSellFeeRate(e.target.value)}
+                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                  />
+                </label>
+              </div>
+            )}
 
             <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
               <div className="grid grid-cols-6 gap-3 pb-[calc(env(safe-area-inset-bottom)+1rem)]">
@@ -1666,7 +1991,7 @@ export const SettingsView: React.FC = () => {
               <div>
                 <div className="text-xs text-ios-subtext mb-2">选择包含的分类</div>
                 <div className="grid grid-cols-2 gap-2 max-h-80 overflow-y-auto no-scrollbar">
-                  {state.categories.filter(c => !c.isDeleted).sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map(cat => {
+                  {state.categories.filter(c => !c.isDeleted && c.ledgerId === selectedLedgerId).sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map(cat => {
                     const checked = groupModal.categoryIds.includes(cat.id);
                     return (
                       <label key={cat.id} className={cn("flex items-center gap-2 p-2 rounded-xl border", checked ? "border-ios-primary bg-ios-primary/5" : "border-gray-200 dark:border-zinc-800")}>
@@ -1676,7 +2001,7 @@ export const SettingsView: React.FC = () => {
                           onChange={() => toggleCategoryInGroup(cat.id)}
                         />
                         <span className="text-sm">{cat.name}</span>
-                        <span className="text-[10px] text-ios-subtext">{cat.type === 'expense' ? '支出' : '收入'}</span>
+                        <span className="text-[10px] text-ios-subtext">{cat.type === 'trade' ? '类目' : cat.type === 'expense' ? '支出' : '收入'}</span>
                       </label>
                     );
                   })}

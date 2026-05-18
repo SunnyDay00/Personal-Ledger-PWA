@@ -5,6 +5,7 @@ import { formatCurrency } from '../utils';
 import { format } from 'date-fns';
 import { Transaction } from '../types';
 import { ImagePreview } from './ImagePreview';
+import { getTransactionTypeLabel } from '../services/ledgerUtils';
 
 export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transaction) => void }> = ({ onClose, onEdit }) => {
     const { state, dispatch } = useApp();
@@ -23,6 +24,9 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
     const [previewKeys, setPreviewKeys] = useState<string[]>([]);
 
     const history = state.settings.searchHistory;
+    const currentLedger = state.ledgers.find(ledger => ledger.id === state.currentLedgerId);
+    const expenseLabel = getTransactionTypeLabel(currentLedger, 'expense');
+    const incomeLabel = getTransactionTypeLabel(currentLedger, 'income');
 
     // Categories and groups for current ledger only
     const ledgerCategories = useMemo(() =>
@@ -224,7 +228,7 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
                             )}
                             {selectedType !== 'all' && (
                                 <span className="shrink-0 px-2.5 py-1 rounded-full text-xs bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400">
-                                    {selectedType === 'expense' ? '支出' : '收入'}
+                                    {selectedType === 'expense' ? expenseLabel : incomeLabel}
                                 </span>
                             )}
                             {selectedCategoryId && (
@@ -355,7 +359,7 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
                                             : 'bg-gray-100 dark:bg-zinc-800 text-ios-text'
                                             }`}
                                     >
-                                        {type === 'all' ? '全部' : type === 'expense' ? '支出' : '收入'}
+                                        {type === 'all' ? '全部' : type === 'expense' ? expenseLabel : incomeLabel}
                                     </button>
                                 ))}
                             </div>
@@ -475,6 +479,7 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
                         {results.map(t => {
                             const cat = state.categories.find(c => c.id === t.categoryId);
                             const ledger = state.ledgers.find(l => l.id === t.ledgerId);
+                            const rowTypeLabel = getTransactionTypeLabel(ledger, t.type);
                             return (
                                 <div
                                     key={t.id}
@@ -494,7 +499,9 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
                                                     </button>
                                                 )}
                                             </div>
-                                            <div className="text-xs text-ios-subtext">{format(t.date, 'yyyy-MM-dd')} · {t.note || '无备注'} · {ledger?.name}</div>
+                                            <div className="text-xs text-ios-subtext">
+                                                {format(t.date, 'yyyy-MM-dd')} · {rowTypeLabel}{t.tradeQuantity ? ` ${t.tradeQuantity} 个` : ''} · {t.note || '无备注'} · {ledger?.name}
+                                            </div>
                                         </div>
                                     </div>
                                     <span className={`tabular-nums font-medium ${t.type === 'expense' ? 'text-ios-text' : 'text-green-500'}`}>

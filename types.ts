@@ -1,6 +1,13 @@
 
 export type ThemeMode = 'light' | 'dark' | 'auto';
 export type TransactionType = 'expense' | 'income';
+export type CategoryType = TransactionType | 'trade';
+export type LedgerType = 'accounting' | 'trading';
+export type TradeAction = 'buy' | 'sell';
+export interface TradeAllocation {
+  buyTransactionId: string;
+  quantity: number;
+}
 export type BudgetType = 'week' | 'month' | 'year';
 
 export interface AuthUser {
@@ -20,6 +27,7 @@ export interface Ledger {
   id: string;
   name: string;
   themeColor: string; // Hex code
+  ledgerType?: LedgerType;
   createdAt: number;
   updatedAt?: number;
   isDeleted?: boolean; // Soft delete
@@ -30,7 +38,9 @@ export interface Category {
   ledgerId?: string; // Optional for migration compatibility, but should be set
   name: string;
   icon: string; // Lucide icon name
-  type: TransactionType;
+  type: CategoryType;
+  buyFeeRate?: number;
+  sellFeeRate?: number;
   isCustom?: boolean;
   order: number;
   updatedAt?: number;
@@ -53,6 +63,12 @@ export interface Transaction {
   amount: number;
   type: TransactionType;
   categoryId: string;
+  tradeAction?: TradeAction;
+  tradeQuantity?: number;
+  tradeGrossAmount?: number;
+  tradeFeeRate?: number;
+  tradeFeeAmount?: number;
+  tradeAllocations?: TradeAllocation[];
   date: number; // Timestamp
   note: string;
   attachments: string[]; // R2 keys

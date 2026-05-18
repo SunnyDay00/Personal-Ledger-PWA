@@ -9,6 +9,7 @@ import { Transaction, Category } from '../types';
 import { AddView } from './AddView';
 import { ImagePreview } from './ImagePreview';
 import { clsx } from 'clsx';
+import { getTradingBuyLotSellResult, getTradingBuyUnitCost, getTradingRealizedProfit, getTradingSellResult, getTransactionTypeLabel, isTradingLedger } from '../services/ledgerUtils';
 
 interface HomeViewProps {
     onOpenSearch: () => void;
@@ -19,10 +20,14 @@ interface HomeViewProps {
 
 type TransactionTypeFilter = 'all' | 'income' | 'expense';
 
+const formatQuantity = (value: number) =>
+    Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, '');
+
 export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, jumpTarget, onJumpTargetHandled }) => {
     const { state, deleteTransaction, dispatch, batchDeleteTransactions, batchUpdateTransactions } = useApp();
     const { currentLedgerId, transactions, categories, ledgers, settings, timeRange, currentDate: currentDateTs } = state;
     const currentLedger = ledgers.find(l => l.id === currentLedgerId) || ledgers[0];
+    const isTrading = isTradingLedger(currentLedger);
     const currentDate = new Date(currentDateTs);
 
     const [showLedgerMenu, setShowLedgerMenu] = useState(false);
@@ -37,10 +42,10 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
     const transactionRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
     useEffect(() => {
-        if (settings.budget.enabled) {
+        if (settings.budget.enabled && !isTrading) {
             dispatch({ type: 'SET_TIME_RANGE', payload: settings.budget.displayType });
         }
-    }, [settings.budget.enabled, settings.budget.displayType]);
+    }, [settings.budget.enabled, settings.budget.displayType, isTrading]);
 
     // Removed old Sync Status Icon Logic
 
@@ -131,22 +136,27 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
         return groups;
     }, [filteredTransactions]);
 
-    const { income, expense, balance } = useMemo(() => {
+    const { income, expense } = useMemo(() => {
         return periodTransactions.reduce(
             (acc, t) => {
                 if (t.type === 'income') acc.income += t.amount;
                 else acc.expense += t.amount;
                 return acc;
             },
-            { income: 0, expense: 0, balance: 0 }
+            { income: 0, expense: 0 }
         );
     }, [periodTransactions]);
 
     const currentBalance = income - expense;
-    const budgetTarget = settings.budget.enabled ? settings.budget.targets[timeRange].expense : 0;
+    const tradingProfit = useMemo(
+        () => isTrading ? getTradingRealizedProfit(transactions, currentLedgerId, startTime, endTime) : 0,
+        [isTrading, transactions, currentLedgerId, startTime, endTime]
+    );
+    const thirdSummaryValue = isTrading ? tradingProfit : currentBalance;
+    const budgetTarget = settings.budget.enabled && !isTrading ? settings.budget.targets[timeRange].expense : 0;
     const remainingBudget = budgetTarget - expense;
     const isOverBudget = remainingBudget < 0;
-    const budgetProgress = settings.budget.enabled && budgetTarget > 0 ? (expense / budgetTarget) * 100 : 0;
+    const budgetProgress = settings.budget.enabled && !isTrading && budgetTarget > 0 ? (expense / budgetTarget) * 100 : 0;
     const displayProgress = Math.min(budgetProgress, 100);
 
     const handleTypeFilterChange = (filter: TransactionTypeFilter) => {
@@ -191,6 +201,11 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
             }
         }
     };
+
+    const batchEditCategories = useMemo(
+        () => categories.filter(category => category.ledgerId === currentLedgerId && (isTrading ? category.type === 'trade' : category.type !== 'trade')),
+        [categories, currentLedgerId, isTrading]
+    );
 
     return (
         <div className={clsx("h-full w-full bg-ios-bg", settings.enableAnimations && "animate-slide-up")}>
@@ -257,22 +272,27 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                     </div>
                 </div>
 
-                <div className={clsx("grid grid-cols-3 gap-3", settings.budget.enabled ? "mb-3" : "mb-6")}>
+                <div className={clsx("grid grid-cols-3 gap-3", settings.budget.enabled && !isTrading ? "mb-3" : "mb-2")}>
                     <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
-                        <span className="text-xs text-ios-subtext mb-1">收入</span>
+                        <span className="text-xs text-ios-subtext mb-1">{isTrading ? '卖出' : '收入'}</span>
                         <span className="text-sm font-bold text-green-500 tabular-nums">{formatCurrency(income)}</span>
                     </div>
                     <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
-                        <span className="text-xs text-ios-subtext mb-1">支出</span>
+                        <span className="text-xs text-ios-subtext mb-1">{isTrading ? '买入' : '支出'}</span>
                         <span className="text-sm font-bold text-red-500 tabular-nums">{formatCurrency(expense)}</span>
                     </div>
                     <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
-                        <span className="text-xs text-ios-subtext mb-1">结余</span>
-                        <span className="text-sm font-bold text-ios-primary tabular-nums">{formatCurrency(currentBalance)}</span>
+                        <span className="text-xs text-ios-subtext mb-1">{isTrading ? '利润' : '结余'}</span>
+                        <span className={clsx(
+                            'text-sm font-bold tabular-nums',
+                            isTrading
+                                ? thirdSummaryValue > 0 ? 'text-green-500' : thirdSummaryValue < 0 ? 'text-red-500' : 'text-ios-primary'
+                                : 'text-ios-primary'
+                        )}>{formatCurrency(thirdSummaryValue)}</span>
                     </div>
                 </div>
 
-                {settings.budget.enabled && (
+                {settings.budget.enabled && !isTrading && (
                     <div className={clsx("bg-white dark:bg-zinc-900 rounded-2xl p-4 shadow-sm border mb-3 animate-fade-in cursor-pointer relative overflow-hidden", isOverBudget ? "border-red-200 dark:border-red-900/30 ring-1 ring-red-100 dark:ring-red-900/20" : "border-ios-border")} onClick={onOpenBudget}>
                         {isOverBudget && <div className="absolute inset-0 bg-red-50/50 dark:bg-red-900/10 pointer-events-none"></div>}
                         <div className="relative z-10">
@@ -299,8 +319,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                     <div className="inline-flex bg-gray-200/50 dark:bg-zinc-800/50 p-0.5 rounded-lg">
                         {([
                             { key: 'all', label: '全部' },
-                            { key: 'income', label: '收入' },
-                            { key: 'expense', label: '支出' },
+                            { key: 'income', label: isTrading ? '卖出' : '收入' },
+                            { key: 'expense', label: isTrading ? '买入' : '支出' },
                         ] as { key: TransactionTypeFilter; label: string }[]).map(item => (
                             <button
                                 key={item.key}
@@ -348,6 +368,16 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                                         const category = categories.find(c => c.id === t.categoryId);
                                         const isSelected = selectedIds.has(t.id);
                                         const isHighlighted = highlightedTransactionId === t.id;
+                                        const tradingBuyUnitCost = isTrading && t.type === 'expense' ? getTradingBuyUnitCost(t) : null;
+                                        const tradingBuySellResult = isTrading && t.type === 'expense' ? getTradingBuyLotSellResult(transactions, t) : null;
+                                        const tradingSellResult = isTrading && t.type === 'income' ? getTradingSellResult(transactions, t) : null;
+                                        const tradingBuyQuantity = Number(t.tradeQuantity || 0);
+                                        const isSoldOutTradingBuy = isTrading &&
+                                            t.type === 'expense' &&
+                                            tradingBuySellResult &&
+                                            Number.isFinite(tradingBuyQuantity) &&
+                                            tradingBuyQuantity > 0 &&
+                                            tradingBuySellResult.soldQuantity >= tradingBuyQuantity;
                                         return (
                                             <div
                                                 key={t.id}
@@ -357,12 +387,13 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                                                 }}
                                                 onClick={() => { if (isSelectionMode) toggleSelection(t.id); else setEditingTransaction(t); }}
                                                 className={clsx(
-                                                    'group relative flex items-center justify-between p-3.5 transition-[background-color,box-shadow] duration-300 scroll-mt-28 active:bg-gray-50 dark:active:bg-zinc-800',
+                                                    'group relative flex items-center justify-between p-3.5 transition-[background-color,box-shadow,opacity] duration-300 scroll-mt-28 active:bg-gray-50 dark:active:bg-zinc-800',
+                                                    isSoldOutTradingBuy && 'opacity-50',
                                                     isHighlighted && 'bg-ios-primary/10 ring-2 ring-ios-primary/20 ring-inset shadow-[0_0_0_1px_rgba(0,122,255,0.08)]',
                                                     index !== groupedTransactions[dateKey].length - 1 && 'border-b border-gray-100 dark:border-zinc-800/50'
                                                 )}
                                             >
-                                                <div className="flex items-center gap-3">
+                                                <div className="flex items-center gap-3 min-w-0">
                                                     {isSelectionMode && (
                                                         <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-colors ${isSelected ? 'bg-ios-primary border-ios-primary' : 'border-gray-300 dark:border-zinc-600'}`}>
                                                             {isSelected && <Icon name="Check" className="w-3 h-3 text-white" />}
@@ -371,7 +402,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                                                     <div className={`w-9 h-9 rounded-full flex items-center justify-center bg-gray-100 dark:bg-zinc-800 text-ios-primary`}>
                                                         <Icon name={category?.icon || 'Circle'} className="w-4 h-4" />
                                                     </div>
-                                                    <div className="flex flex-col">
+                                                    <div className="flex flex-col min-w-0">
                                                         <div className="text-sm font-medium text-ios-text flex items-center gap-1.5 align-middle">
                                                             <span>{category?.name}</span>
                                                             {t.attachments && t.attachments.length > 0 && (
@@ -394,18 +425,73 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                                                             )}
 
                                                         </div>
-                                                        <div className="text-[10px] text-ios-subtext flex gap-1">
-                                                            <span>{format(t.createdAt, 'HH:mm')}</span>
-                                                            {t.note && <span>· {t.note}</span>}
-                                                        </div>
+                                                        {isTrading ? (
+                                                            <div className="text-[10px] text-ios-subtext flex flex-wrap gap-x-1 gap-y-0.5">
+                                                                <span>{format(t.createdAt, 'HH:mm')}</span>
+                                                                <span>· {getTransactionTypeLabel(currentLedger, t.type)}</span>
+                                                                {t.type === 'expense' && tradingBuyUnitCost !== null && (
+                                                                    <span>· 单个成本 {formatCurrency(tradingBuyUnitCost).replace('¥', '')}</span>
+                                                                )}
+                                                                {t.type === 'expense' && tradingBuySellResult && tradingBuySellResult.soldQuantity > 0 && (
+                                                                    <span>· 已卖 {formatQuantity(tradingBuySellResult.soldQuantity)} 个</span>
+                                                                )}
+                                                                {t.type === 'income' && !!t.tradeFeeAmount && (
+                                                                    <span>· 手续费 {formatCurrency(t.tradeFeeAmount).replace('¥', '')}</span>
+                                                                )}
+                                                                {t.note && <span>· {t.note}</span>}
+                                                            </div>
+                                                        ) : (
+                                                            <div className="text-[10px] text-ios-subtext flex gap-1">
+                                                                <span>{format(t.createdAt, 'HH:mm')}</span>
+                                                                {t.note && <span>· {t.note}</span>}
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 </div>
 
 
-                                                <div className="flex items-center gap-3">
-                                                    <div className={`font-semibold text-sm tabular-nums ${t.type === 'expense' ? 'text-ios-text' : 'text-green-500'}`}>
-                                                        {t.type === 'expense' ? '-' : '+'}{formatCurrency(t.amount).replace('¥', '')}
-                                                    </div>
+                                                <div className="flex items-center gap-3 shrink-0">
+                                                    {isTrading ? (
+                                                        t.type === 'income' ? (
+                                                            <div className="min-w-[4.75rem] text-right">
+                                                                <div className="font-bold text-base text-green-500 tabular-nums">
+                                                                    {formatQuantity(Number(t.tradeQuantity || 0))} 个
+                                                                </div>
+                                                                <div className="text-[10px] text-ios-subtext tabular-nums">
+                                                                    卖出 {formatCurrency(t.amount).replace('¥', '')}
+                                                                </div>
+                                                                <div className={clsx(
+                                                                    'text-[10px] font-semibold tabular-nums',
+                                                                    tradingSellResult && tradingSellResult.profit > 0 ? 'text-green-500' :
+                                                                        tradingSellResult && tradingSellResult.profit < 0 ? 'text-red-500' : 'text-ios-subtext'
+                                                                )}>
+                                                                    利润 {tradingSellResult ? `${tradingSellResult.profit > 0 ? '+' : tradingSellResult.profit < 0 ? '-' : ''}${formatCurrency(Math.abs(tradingSellResult.profit)).replace('¥', '')}` : '-'}
+                                                                </div>
+                                                            </div>
+                                                        ) : (
+                                                            <div className="min-w-[4.75rem] text-right">
+                                                                <div className="font-bold text-base text-red-500 tabular-nums">
+                                                                    {formatQuantity(Number(t.tradeQuantity || 0))} 个
+                                                                </div>
+                                                                <div className="text-[10px] text-ios-subtext tabular-nums">
+                                                                    买入 {formatCurrency(t.amount).replace('¥', '')}
+                                                                </div>
+                                                                {tradingBuySellResult && (
+                                                                    <div className={clsx(
+                                                                        'text-[10px] font-semibold tabular-nums',
+                                                                        tradingBuySellResult.profit > 0 ? 'text-green-500' :
+                                                                            tradingBuySellResult.profit < 0 ? 'text-red-500' : 'text-ios-subtext'
+                                                                    )}>
+                                                                        利润 {tradingBuySellResult.profit > 0 ? '+' : tradingBuySellResult.profit < 0 ? '-' : ''}{formatCurrency(Math.abs(tradingBuySellResult.profit)).replace('¥', '')}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        )
+                                                    ) : (
+                                                        <div className={`font-semibold text-sm tabular-nums ${t.type === 'expense' ? 'text-ios-text' : 'text-green-500'}`}>
+                                                            {t.type === 'expense' ? '-' : '+'}{formatCurrency(t.amount).replace('¥', '')}
+                                                        </div>
+                                                    )}
                                                     {!isSelectionMode && (
                                                         <button onClick={async (e) => {
                                                             e.stopPropagation();
@@ -444,7 +530,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                 )
             }
 
-            {showBatchEdit && <BatchEditModal categories={categories} onClose={() => setShowBatchEdit(false)} onSave={handleBatchUpdate} />}
+            {showBatchEdit && <BatchEditModal categories={batchEditCategories} onClose={() => setShowBatchEdit(false)} onSave={handleBatchUpdate} />}
             {editingTransaction && <AddView onClose={() => setEditingTransaction(null)} initialTransaction={editingTransaction || undefined} />}
             {previewKeys && <ImagePreview keys={previewKeys} onClose={() => setPreviewKeys(null)} />}
         </div >
