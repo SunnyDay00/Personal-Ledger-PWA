@@ -110,8 +110,14 @@ export const Layout: React.FC = () => {
             return;
         }
 
-        openAdd();
-    }, [openAdd]);
+        clearAddLongPressTimer();
+        const next = !showAddQuickMenu;
+        setShowAddQuickMenu(next);
+        if (next) {
+            feedback.play('switch');
+            feedback.vibrate('medium');
+        }
+    }, [clearAddLongPressTimer, showAddQuickMenu]);
 
     const handleAddContextMenu = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
         event.preventDefault();

@@ -235,13 +235,14 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     const [cardKeyBatchInputs, setCardKeyBatchInputs] = useState<Record<string, string>>(() =>
         keyAllocationsToInputMap(normalizeTradeKeyAllocations(initialTransaction?.tradeKeyAllocations))
     );
-    const [showSellCategoryPicker, setShowSellCategoryPicker] = useState(() =>
-        isTrading && initialTransaction?.type === 'income' && !initialTransaction?.categoryId
+    const [showTradeCategoryPicker, setShowTradeCategoryPicker] = useState(() =>
+        isTrading && !initialTransaction?.categoryId
     );
     const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(() => initialTransaction?.categoryId || null);
     const [note, setNote] = useState(() => initialTransaction?.note || '');
     const [date, setDate] = useState(() => initialTransaction?.date ? new Date(initialTransaction.date) : new Date());
     const [isNoteFocused, setIsNoteFocused] = useState(false);
+    const [isKeypadCollapsed, setIsKeypadCollapsed] = useState(false);
     const noteInputRef = useRef<HTMLInputElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -328,7 +329,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
             setTradeKeyInputs(normalizeTradeKeys(initialTransaction.tradeKeys) || []);
             setCardKeyBatchInputs(keyAllocationsToInputMap(normalizeTradeKeyAllocations(initialTransaction.tradeKeyAllocations)));
             setCardKeySellMode(normalizeTradeKeyAllocations(initialTransaction.tradeKeyAllocations)?.length ? 'batch' : 'auto');
-            setShowSellCategoryPicker(isTrading && initialTransaction.type === 'income' && !initialTransaction.categoryId);
+            setShowTradeCategoryPicker(isTrading && !initialTransaction.categoryId);
             setSelectedCategoryId(initialTransaction.categoryId || null);
             setNote(initialTransaction.note || '');
             setDate(initialTransaction.date ? new Date(initialTransaction.date) : new Date());
@@ -342,7 +343,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
             setTradeKeyInputs([]);
             setCardKeyBatchInputs({});
             setCardKeySellMode('auto');
-            setShowSellCategoryPicker(false);
+            setShowTradeCategoryPicker(isTrading);
             setSelectedCategoryId(null);
             setNote('');
             setDate(new Date());
@@ -361,7 +362,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         }
 
         const stillValid = selectedCategoryId && categories.some(c => c.id === selectedCategoryId);
-        if (isTrading && type === 'income') {
+        if (isTrading) {
             if (!stillValid && selectedCategoryId) setSelectedCategoryId(null);
             return;
         }
@@ -372,10 +373,10 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     }, [categories, selectedCategoryId, isTrading, type]);
 
     useEffect(() => {
-        if (isTrading && type === 'income' && !selectedCategoryId) {
-            setShowSellCategoryPicker(true);
+        if (isTrading && !selectedCategoryId) {
+            setShowTradeCategoryPicker(true);
         }
-    }, [isTrading, type, selectedCategoryId]);
+    }, [isTrading, selectedCategoryId]);
 
     useEffect(() => {
         if (!isTrading || !selectedCategory) return;
@@ -596,7 +597,16 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     const activateKeypadField = (field: KeypadField) => {
         noteInputRef.current?.blur();
         setIsNoteFocused(false);
+        setIsKeypadCollapsed(false);
         setActiveKeypadField(field);
+    };
+
+    const handleToggleKeypad = () => {
+        noteInputRef.current?.blur();
+        setIsNoteFocused(false);
+        setIsKeypadCollapsed(prev => isNoteFocused ? false : !prev);
+        feedback.play('switch');
+        feedback.vibrate('light');
     };
 
     const updateQuantityFromKeypad = (nextValue: string) => {
@@ -678,37 +688,50 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         feedback.play('switch');
         feedback.vibrate('light');
 
-        if (isTrading && nextType === 'income') {
+        if (isTrading) {
             if (!initialTransaction?.id) {
                 setSelectedCategoryId(null);
                 setSellAllocationInputs({});
+                setTradeKeyInputs([]);
+                setActiveTradeKeyPasteIndex(null);
+                setCardKeyBatchInputs({});
+                setCardKeySellMode('auto');
             }
-            setShowSellCategoryPicker(true);
+            setShowTradeCategoryPicker(true);
             return;
         }
 
-        setShowSellCategoryPicker(false);
+        setShowTradeCategoryPicker(false);
     };
 
-    const handleSellCategorySelect = (categoryId: string) => {
+    const handleTradeCategorySelect = (categoryId: string) => {
         const category = categories.find(item => item.id === categoryId);
+        const categoryChanged = categoryId !== selectedCategoryId;
         setSelectedCategoryId(categoryId);
-        setFeeRateStr(String(getCategoryFeeRate(category, 'income')));
-        setSellAllocationInputs({});
-        setCardKeyBatchInputs({});
-        setCardKeySellMode('auto');
-        setShowSellCategoryPicker(false);
+        setFeeRateStr(String(getCategoryFeeRate(category, type)));
+
+        if (type === 'income') {
+            setSellAllocationInputs({});
+            setCardKeyBatchInputs({});
+            setCardKeySellMode('auto');
+        } else if (categoryChanged) {
+            const keyCount = category?.tradeItemType === 'cardKey' ? normalizeCardKeyQuantity(quantityStr) : 0;
+            setTradeKeyInputs(Array.from({ length: keyCount }, () => ({ id: generateId(), value: '' })));
+            setActiveTradeKeyPasteIndex(null);
+        }
+
+        setShowTradeCategoryPicker(false);
         feedback.play('click');
         feedback.vibrate('light');
     };
 
-    const handleSellCategoryCancel = () => {
+    const handleTradeCategoryCancel = () => {
         if (!initialTransaction?.id && !selectedCategoryId) {
             onClose();
             return;
         }
 
-        setShowSellCategoryPicker(false);
+        setShowTradeCategoryPicker(false);
     };
 
     const updateSellAllocationInput = (buyTransactionId: string, value: string, maxQuantity: number) => {
@@ -1110,6 +1133,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         ? isCardKeyCategory ? availableSellCardKeys.length : availableSellLots.reduce((sum, lot) => roundMoney(sum + lot.remainingQuantity), 0)
         : 0;
     const inputDateValue = useMemo(() => format(date, 'yyyy-MM-dd'), [date]);
+    const isKeypadHidden = isNoteFocused || isKeypadCollapsed;
 
     return (
         <div
@@ -1152,7 +1176,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                                 </div>
                             </div>
                             <button
-                                onClick={() => setShowSellCategoryPicker(true)}
+                                onClick={() => setShowTradeCategoryPicker(true)}
                                 className="shrink-0 px-3 py-1.5 rounded-full bg-gray-200 dark:bg-zinc-800 text-xs font-medium text-ios-text active:scale-95"
                             >
                                 更换类目
@@ -1161,7 +1185,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
 
                         {!selectedCategoryId ? (
                             <button
-                                onClick={() => setShowSellCategoryPicker(true)}
+                                onClick={() => setShowTradeCategoryPicker(true)}
                                 className="w-full h-20 rounded-xl border border-dashed border-ios-border text-sm text-ios-subtext flex items-center justify-center active:bg-gray-100 dark:active:bg-zinc-800"
                             >
                                 先选择卖出类目
@@ -1377,38 +1401,34 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                             })
                         )}
                     </div>
-                ) : (
-                    <div className="grid gap-y-6 p-4" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
-                        {categories.map(cat => (
-                            <button
-                                key={cat.id}
-                                onClick={() => handleCategorySelect(cat.id)}
-                                className="flex flex-col items-center gap-2 group"
-                            >
-                                <div className={clsx(
-                                    'w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200',
-                                    selectedCategoryId === cat.id
-                                        ? 'bg-ios-primary text-white shadow-lg shadow-blue-500/30 scale-110'
-                                        : state.settings.fontContrast === 'high'
-                                            ? 'bg-gray-200 dark:bg-zinc-700 text-gray-900 dark:text-gray-100 group-active:scale-95'
-                                            : 'bg-gray-100 dark:bg-zinc-800 text-ios-subtext group-active:scale-95'
-                                )}>
-                                    <Icon name={cat.icon} className="w-5 h-5" />
+                ) : isTrading && type === 'expense' ? (
+                    <div className="p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                                <div className="text-sm font-semibold text-ios-text truncate">
+                                    {selectedCategory ? `${selectedCategory.name} ${isCardKeyCategory ? '卡密买入' : '普通买入'}` : '选择买入类目'}
                                 </div>
-                                <span className={clsx(
-                                    'text-[10px] transition-colors truncate w-full text-center',
-                                    selectedCategoryId === cat.id
-                                        ? 'text-ios-primary font-medium'
-                                        : state.settings.fontContrast === 'high'
-                                            ? 'text-gray-900 dark:text-gray-100 font-medium'
-                                            : 'text-ios-subtext'
-                                )}>
-                                    {cat.name}
-                                </span>
+                                <div className="text-xs text-ios-subtext tabular-nums">
+                                    {selectedCategory ? `买入手续费 ${selectedCategory.buyFeeRate ?? 0}%` : '选择后再录入单价和数量'}
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => setShowTradeCategoryPicker(true)}
+                                className="shrink-0 px-3 py-1.5 rounded-full bg-gray-200 dark:bg-zinc-800 text-xs font-medium text-ios-text active:scale-95"
+                            >
+                                {selectedCategoryId ? '更换类目' : '选择类目'}
                             </button>
-                        ))}
-                        {isCardKeyCategory && type === 'expense' && (
-                            <div className="col-span-full rounded-2xl border border-ios-border bg-white/80 dark:bg-zinc-900/80 p-4 space-y-3">
+                        </div>
+
+                        {!selectedCategoryId ? (
+                            <button
+                                onClick={() => setShowTradeCategoryPicker(true)}
+                                className="w-full h-20 rounded-xl border border-dashed border-ios-border text-sm text-ios-subtext flex items-center justify-center active:bg-gray-100 dark:active:bg-zinc-800"
+                            >
+                                先选择买入类目
+                            </button>
+                        ) : isCardKeyCategory ? (
+                            <div className="rounded-2xl border border-ios-border bg-white/80 dark:bg-zinc-900/80 p-4 space-y-3">
                                 <div className="flex items-center justify-between gap-3">
                                     <div>
                                         <div className="text-sm font-semibold text-ios-text">本次买入卡密</div>
@@ -1477,7 +1497,38 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                                     ))}
                                 </div>
                             </div>
-                        )}
+                        ) : null}
+                    </div>
+                ) : (
+                    <div className="grid gap-y-6 p-4" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+                        {categories.map(cat => (
+                            <button
+                                key={cat.id}
+                                onClick={() => handleCategorySelect(cat.id)}
+                                className="flex flex-col items-center gap-2 group"
+                            >
+                                <div className={clsx(
+                                    'w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200',
+                                    selectedCategoryId === cat.id
+                                        ? 'bg-ios-primary text-white shadow-lg shadow-blue-500/30 scale-110'
+                                        : state.settings.fontContrast === 'high'
+                                            ? 'bg-gray-200 dark:bg-zinc-700 text-gray-900 dark:text-gray-100 group-active:scale-95'
+                                            : 'bg-gray-100 dark:bg-zinc-800 text-ios-subtext group-active:scale-95'
+                                )}>
+                                    <Icon name={cat.icon} className="w-5 h-5" />
+                                </div>
+                                <span className={clsx(
+                                    'text-[10px] transition-colors truncate w-full text-center',
+                                    selectedCategoryId === cat.id
+                                        ? 'text-ios-primary font-medium'
+                                        : state.settings.fontContrast === 'high'
+                                            ? 'text-gray-900 dark:text-gray-100 font-medium'
+                                            : 'text-ios-subtext'
+                                )}>
+                                    {cat.name}
+                                </span>
+                            </button>
+                        ))}
                     </div>
                 )}
             </div>
@@ -1496,9 +1547,9 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                     </div>
                 )}
 
-                <div className="px-5 py-3 border-b border-ios-border flex items-center gap-4 relative z-20">
-                    <div className="flex items-center gap-2 bg-gray-100 dark:bg-zinc-800 px-3 py-1.5 rounded-xl flex-1 focus-within:ring-2 focus-within:ring-ios-primary/20 transition-all">
-                        <button onClick={() => fileInputRef.current?.click()} className="text-ios-subtext active:text-ios-primary active:scale-95 transition-all">
+                <div className="px-5 py-2 border-b border-ios-border flex items-center gap-3 relative z-20">
+                    <div className="flex items-center gap-2 bg-gray-100 dark:bg-zinc-800 px-3 py-1.5 rounded-xl flex-1 focus-within:ring-2 focus-within:ring-ios-primary/20 transition-all min-w-0">
+                        <button onClick={() => fileInputRef.current?.click()} className="text-ios-subtext active:text-ios-primary active:scale-95 transition-all shrink-0">
                             <Icon name="Image" className="w-5 h-5" />
                         </button>
                         <input type="file" hidden ref={fileInputRef} accept="image/*" multiple onChange={handleFileSelect} />
@@ -1523,26 +1574,38 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                             if (event.key === 'Enter' || event.key === ' ') activateKeypadField('amount');
                         }}
                         className={clsx(
-                            'min-w-[35%] text-right rounded-xl px-2 py-1 transition-all',
+                            'min-w-[34%] max-w-[45%] text-right rounded-xl px-2 py-1 transition-all',
                             activeKeypadField === 'amount' ? 'ring-2 ring-ios-primary/15' : ''
                         )}
                     >
-                        {isTrading && (
-                            <div className="text-xs text-ios-subtext">单价</div>
-                        )}
-                        {hasFormula && calculatedAmount !== null && (
-                            <div className="text-xs text-ios-subtext tabular-nums">= {formatResultNumber(calculatedAmount)}</div>
-                        )}
-                        <div className={clsx(
-                            'font-bold tracking-tight text-ios-text tabular-nums transition-all duration-200 break-all',
-                            displayAmount.length > 16 ? 'text-base' :
-                                displayAmount.length > 13 ? 'text-lg' :
-                                    displayAmount.length > 10 ? 'text-xl' :
-                                        displayAmount.length > 8 ? 'text-2xl' : 'text-3xl'
-                        )}>
-                            {displayAmount}
+                        <div className="flex items-baseline justify-end gap-1.5 min-w-0">
+                            {isTrading && (
+                                <span className="text-xs leading-4 text-ios-subtext shrink-0">单价</span>
+                            )}
+                            <span className={clsx(
+                                'font-bold tracking-tight text-ios-text tabular-nums leading-none transition-all duration-200 truncate',
+                                displayAmount.length > 16 ? 'text-base' :
+                                    displayAmount.length > 13 ? 'text-lg' :
+                                        displayAmount.length > 10 ? 'text-xl' :
+                                            displayAmount.length > 8 ? 'text-2xl' : 'text-[28px]'
+                            )}>
+                                {displayAmount}
+                            </span>
                         </div>
+                        {hasFormula && calculatedAmount !== null && (
+                            <div className="mt-0.5 text-[11px] leading-3 text-ios-subtext tabular-nums truncate">= {formatResultNumber(calculatedAmount)}</div>
+                        )}
                     </div>
+
+                    <button
+                        type="button"
+                        onClick={handleToggleKeypad}
+                        aria-label={isKeypadHidden ? '展开小键盘' : '收起小键盘'}
+                        title={isKeypadHidden ? '展开小键盘' : '收起小键盘'}
+                        className="shrink-0 w-9 h-9 rounded-full border border-ios-border bg-gray-100 dark:bg-zinc-800 text-ios-subtext active:text-ios-primary active:scale-95 transition-all flex items-center justify-center"
+                    >
+                        <Icon name={isKeypadHidden ? 'ChevronUp' : 'ChevronDown'} className="w-5 h-5" />
+                    </button>
                 </div>
 
                 {(isNoteFocused || quickNotes.length > 0) && (
@@ -1632,8 +1695,9 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                 )}
 
                 <div
-                    className={clsx('transition-all duration-300 overflow-hidden', isNoteFocused ? 'h-0 opacity-0' : 'opacity-100')}
-                    style={{ height: isNoteFocused ? 0 : `${keypadHeight}vh`, minHeight: isNoteFocused ? 0 : '250px' }}
+                    className={clsx('transition-all duration-300 overflow-hidden', isKeypadHidden ? 'h-0 opacity-0' : 'opacity-100')}
+                    style={{ height: isKeypadHidden ? 0 : `${keypadHeight}vh`, minHeight: isKeypadHidden ? 0 : '250px' }}
+                    aria-hidden={isKeypadHidden}
                 >
                     <div className="flex items-center justify-between px-4 py-2 bg-gray-50/50 dark:bg-zinc-900/50 text-xs text-ios-subtext border-b border-ios-border gap-3">
                         <div className="flex gap-2">
@@ -1690,35 +1754,35 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                 </div>
             </div>
 
-            {isTrading && type === 'income' && showSellCategoryPicker && (
-                <div className="fixed inset-0 z-[85] bg-black/30 flex items-end" onClick={handleSellCategoryCancel}>
-                    <div
-                        className="w-full max-h-[70vh] overflow-y-auto no-scrollbar bg-white dark:bg-zinc-900 rounded-t-3xl shadow-2xl border-t border-white/10 p-5 pb-[calc(env(safe-area-inset-bottom)+1.25rem)]"
-                        onClick={event => event.stopPropagation()}
-                    >
-                        <div className="flex items-center justify-between mb-4">
-                            <div>
-                                <div className="text-base font-semibold text-ios-text">选择卖出类目</div>
-                                <div className="text-xs text-ios-subtext mt-0.5">选择后只显示该类目有剩余的买入批次</div>
+            {isTrading && showTradeCategoryPicker && (
+                <div className="fixed inset-0 z-[85] bg-ios-bg dark:bg-zinc-950 flex flex-col">
+                    <div className="flex items-center justify-between px-4 pt-[calc(env(safe-area-inset-top)+0.75rem)] pb-3 bg-ios-bg dark:bg-zinc-950 border-b border-ios-border shrink-0">
+                        <button
+                            onClick={handleTradeCategoryCancel}
+                            className="p-2 -ml-2 text-ios-subtext active:text-ios-text"
+                        >
+                            取消
+                        </button>
+                        <div className="min-w-0 text-center">
+                            <div className="text-base font-semibold text-ios-text">{type === 'income' ? '选择卖出类目' : '选择买入类目'}</div>
+                            <div className="text-xs text-ios-subtext mt-0.5 truncate">
+                                {type === 'income' ? '选择后只显示该类目有剩余的买入批次' : '选择后再录入单价和数量'}
                             </div>
-                            <button
-                                onClick={handleSellCategoryCancel}
-                                className="px-3 py-1.5 rounded-full bg-gray-100 dark:bg-zinc-800 text-xs font-medium text-ios-subtext active:scale-95"
-                            >
-                                取消
-                            </button>
                         </div>
+                        <div className="w-10 shrink-0" />
+                    </div>
 
+                    <div className="flex-1 overflow-y-auto no-scrollbar p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)]">
                         <div className="grid grid-cols-2 gap-2">
                             {categories.map(category => (
                                 <button
                                     key={category.id}
-                                    onClick={() => handleSellCategorySelect(category.id)}
+                                    onClick={() => handleTradeCategorySelect(category.id)}
                                     className={clsx(
                                         'flex items-center gap-3 rounded-xl border px-3 py-3 text-left active:scale-[0.99]',
                                         selectedCategoryId === category.id
                                             ? 'border-ios-primary bg-ios-primary/5'
-                                            : 'border-ios-border bg-gray-50 dark:bg-zinc-800/70'
+                                            : 'border-ios-border bg-white dark:bg-zinc-900'
                                     )}
                                 >
                                     <div className="w-9 h-9 rounded-full bg-ios-primary/10 text-ios-primary flex items-center justify-center shrink-0">
@@ -1727,7 +1791,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                                     <div className="min-w-0">
                                         <div className="text-sm font-medium text-ios-text truncate">{category.name}</div>
                                         <div className="text-[11px] text-ios-subtext">
-                                            {(category.tradeItemType ?? 'normal') === 'cardKey' ? '卡密' : '普通'} · 卖出手续费 {category.sellFeeRate ?? 0}%
+                                            {(category.tradeItemType ?? 'normal') === 'cardKey' ? '卡密' : '普通'} · {type === 'income' ? '卖出' : '买入'}手续费 {type === 'income' ? category.sellFeeRate ?? 0 : category.buyFeeRate ?? 0}%
                                         </div>
                                     </div>
                                 </button>
