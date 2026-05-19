@@ -453,6 +453,21 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         return getAvailableTradeCardKeys(state.transactions, effectiveLedgerId, selectedCategoryId, initialTransaction?.id);
     }, [isCardKeyCategory, type, selectedCategoryId, state.transactions, effectiveLedgerId, initialTransaction?.id]);
 
+    const tradeCategorySellInventory = useMemo(() => {
+        const inventory = new Map<string, number>();
+        if (!isTrading || type !== 'income') return inventory;
+
+        categories.forEach(category => {
+            const remaining = (category.tradeItemType ?? 'normal') === 'cardKey'
+                ? getAvailableTradeCardKeys(state.transactions, effectiveLedgerId, category.id, initialTransaction?.id).length
+                : getAvailableTradeBuyLots(state.transactions, effectiveLedgerId, category.id, initialTransaction?.id)
+                    .reduce((sum, lot) => roundMoney(sum + lot.remainingQuantity), 0);
+            inventory.set(category.id, roundMoney(remaining));
+        });
+
+        return inventory;
+    }, [isTrading, type, categories, state.transactions, effectiveLedgerId, initialTransaction?.id]);
+
     const cardKeyBatchOptions = useMemo(() => {
         const grouped = new Map<string, {
             buyTransactionId: string;
@@ -1774,28 +1789,58 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
 
                     <div className="flex-1 overflow-y-auto no-scrollbar p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)]">
                         <div className="grid grid-cols-2 gap-2">
-                            {categories.map(category => (
-                                <button
-                                    key={category.id}
-                                    onClick={() => handleTradeCategorySelect(category.id)}
-                                    className={clsx(
-                                        'flex items-center gap-3 rounded-xl border px-3 py-3 text-left active:scale-[0.99]',
-                                        selectedCategoryId === category.id
-                                            ? 'border-ios-primary bg-ios-primary/5'
-                                            : 'border-ios-border bg-white dark:bg-zinc-900'
-                                    )}
-                                >
-                                    <div className="w-9 h-9 rounded-full bg-ios-primary/10 text-ios-primary flex items-center justify-center shrink-0">
-                                        <Icon name={category.icon} className="w-4 h-4" />
-                                    </div>
-                                    <div className="min-w-0">
-                                        <div className="text-sm font-medium text-ios-text truncate">{category.name}</div>
-                                        <div className="text-[11px] text-ios-subtext">
-                                            {(category.tradeItemType ?? 'normal') === 'cardKey' ? '卡密' : '普通'} · {type === 'income' ? '卖出' : '买入'}手续费 {type === 'income' ? category.sellFeeRate ?? 0 : category.buyFeeRate ?? 0}%
+                            {categories.map(category => {
+                                const isSellPicker = type === 'income';
+                                const sellInventory = tradeCategorySellInventory.get(category.id) ?? 0;
+                                const isOutOfStock = isSellPicker && sellInventory <= 0;
+                                const isSelected = selectedCategoryId === category.id;
+
+                                return (
+                                    <button
+                                        key={category.id}
+                                        onClick={() => handleTradeCategorySelect(category.id)}
+                                        disabled={isOutOfStock}
+                                        className={clsx(
+                                            'flex items-center gap-3 rounded-xl border px-3 py-3 text-left transition-colors',
+                                            isOutOfStock
+                                                ? 'border-ios-border bg-gray-100 text-ios-subtext opacity-60 dark:bg-zinc-900/60'
+                                                : isSelected
+                                                    ? 'border-ios-primary bg-ios-primary/5 active:scale-[0.99]'
+                                                    : 'border-ios-border bg-white active:scale-[0.99] dark:bg-zinc-900'
+                                        )}
+                                    >
+                                        <div className={clsx(
+                                            'w-9 h-9 rounded-full flex items-center justify-center shrink-0',
+                                            isOutOfStock
+                                                ? 'bg-gray-200 text-ios-subtext dark:bg-zinc-800'
+                                                : 'bg-ios-primary/10 text-ios-primary'
+                                        )}>
+                                            <Icon name={category.icon} className="w-4 h-4" />
                                         </div>
-                                    </div>
-                                </button>
-                            ))}
+                                        <div className="min-w-0">
+                                            <div className={clsx(
+                                                'text-sm font-medium truncate',
+                                                isOutOfStock ? 'text-ios-subtext' : 'text-ios-text'
+                                            )}>
+                                                {category.name}
+                                            </div>
+                                            <div className="text-[11px] text-ios-subtext">
+                                                {(category.tradeItemType ?? 'normal') === 'cardKey' ? '卡密' : '普通'} · {type === 'income' ? '卖出' : '买入'}手续费 {type === 'income' ? category.sellFeeRate ?? 0 : category.buyFeeRate ?? 0}%
+                                            </div>
+                                            {isSellPicker && (
+                                                <div className={clsx(
+                                                    'mt-1 inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-medium tabular-nums',
+                                                    isOutOfStock
+                                                        ? 'bg-gray-200 text-ios-subtext dark:bg-zinc-800'
+                                                        : 'bg-ios-primary/10 text-ios-primary'
+                                                )}>
+                                                    可卖 {formatResultNumber(sellInventory)}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </button>
+                                );
+                            })}
                         </div>
                     </div>
                 </div>

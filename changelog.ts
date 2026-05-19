@@ -2,6 +2,15 @@ import { UpdateLog } from './types';
 
 export const UPDATE_LOGS: UpdateLog[] = [
   {
+      version: '7.6.2',
+      date: '2026/05/19',
+      content: [
+          '买卖本卖出类目选择页新增可卖数量展示，每个类目会直接显示当前还能卖出的数量。',
+          '卡密类目按剩余未售密钥数量统计可卖库存，普通类目按剩余买入批次数量合计统计。',
+          '没有可卖库存的卖出类目会置灰并禁止选择，避免进入无库存的卖出录入页。'
+      ]
+  },
+  {
       version: '7.6.1',
       date: '2026/05/19',
       content: [
