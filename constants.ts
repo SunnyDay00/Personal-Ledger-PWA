@@ -43,10 +43,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   exportStartDate: '',
   exportEndDate: '',
   isFirstRun: true,
-  version: '7.6.2',
+  version: '7.6.3',
   debugMode: typeof localStorage !== 'undefined' ? localStorage.getItem('debugMode') === 'true' : false,
   defaultLedgerId: '',
   homeQuickActions: [],
+  autoRecords: [],
 };
 
 export const INITIAL_LEDGERS: Ledger[] = [

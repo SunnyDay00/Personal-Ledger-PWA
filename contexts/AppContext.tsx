@@ -11,6 +11,7 @@ import { feedback } from '../services/feedback';
 import { imageService } from '../services/imageService';
 import { normalizeAppSettings, normalizeBackupReminderDays } from '../services/settingsUtils';
 import { checkSystemTimeSkew } from '../services/timeSkew';
+import { createAutoRecordTransaction, createAutoRecordTransactionId, getDueAutoRecordOccurrences, isAutoRecordRunnable } from '../services/autoRecords';
 import { getAvailableTradeBuyLots, getAvailableTradeCardKeys, getTradeInventory, getTransactionTypeLabel, isTradingLedger, normalizeCategory, normalizeLedger, normalizeLedgerType, normalizeTradeAllocations, normalizeTradeKeyAllocations, normalizeTradeKeys, normalizeTransaction, tradeKeyAllocationsToTradeAllocations } from '../services/ledgerUtils';
 
 const initialState: AppState = {
@@ -239,6 +240,7 @@ const SYNCABLE_SETTINGS_KEYS: (keyof AppSettings)[] = [
     'exportEndDate',
     'defaultLedgerId',
     'homeQuickActions',
+    'autoRecords',
 ];
 
 const withoutLocalAuthSecrets = (settings: AppSettings): Partial<AppSettings> => {
@@ -372,6 +374,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const autoBackupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const autoBackupRunningRef = useRef(false);
     const autoBackupRef = useRef(false);
+    const autoRecordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const autoRecordRunningRef = useRef(false);
     const skipNextSettingsQueueRef = useRef(false);
     const lastLocalMutationRef = useRef(0);
     // 默认认为不存在，检测成功后再置为 true，避免首次恢复访问不存在的 store
@@ -1962,6 +1966,85 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         dispatch({ type: 'ADD_BACKUP_LOG', payload: log });
         db.backupLogs.put(log);
     };
+
+    const runAutoRecords = useCallback(async () => {
+        if (!isDBLoaded || autoRecordRunningRef.current) return;
+        autoRecordRunningRef.current = true;
+
+        try {
+            const snapshot = stateRef.current;
+            const rules = snapshot.settings.autoRecords || [];
+            if (rules.length === 0) return;
+
+            const now = Date.now();
+            let nextRules = rules;
+            let didUpdateRules = false;
+
+            for (const rule of rules) {
+                if (!rule.enabled || !isAutoRecordRunnable(rule, snapshot.ledgers, snapshot.categories)) continue;
+
+                const dueOccurrences = getDueAutoRecordOccurrences(rule, now);
+                if (dueOccurrences.length === 0) continue;
+
+                let latestRunAt = Number(rule.lastRunAt || 0);
+
+                for (const occurrenceAt of dueOccurrences) {
+                    latestRunAt = Math.max(latestRunAt, occurrenceAt);
+                    const transactionId = createAutoRecordTransactionId(rule.id, occurrenceAt);
+                    const existsInState = stateRef.current.transactions.some(transaction => transaction.id === transactionId);
+                    const existsInDb = existsInState ? undefined : await db.transactions.get(transactionId);
+                    if (existsInState || existsInDb) continue;
+
+                    await addTransaction(createAutoRecordTransaction(rule, occurrenceAt));
+                }
+
+                if (latestRunAt !== Number(rule.lastRunAt || 0)) {
+                    const updatedRule = { ...rule, lastRunAt: latestRunAt, updatedAt: now };
+                    nextRules = nextRules.map(item => item.id === rule.id ? updatedRule : item);
+                    didUpdateRules = true;
+                }
+            }
+
+            if (didUpdateRules) {
+                const nextSettings = normalizeAppSettings(
+                    { ...stateRef.current.settings, autoRecords: nextRules },
+                    DEFAULT_SETTINGS
+                );
+                stateRef.current = { ...stateRef.current, settings: nextSettings };
+                dispatch({ type: 'UPDATE_SETTINGS', payload: { autoRecords: nextSettings.autoRecords } });
+            }
+        } catch (error) {
+            console.warn('Failed to run automatic records', error);
+        } finally {
+            autoRecordRunningRef.current = false;
+        }
+    }, [isDBLoaded]);
+
+    useEffect(() => {
+        if (autoRecordTimerRef.current) clearInterval(autoRecordTimerRef.current);
+        if (!isDBLoaded) return;
+
+        void runAutoRecords();
+        autoRecordTimerRef.current = setInterval(() => {
+            void runAutoRecords();
+        }, 60 * 1000);
+
+        const handleVisible = () => {
+            if (document.visibilityState === 'visible') void runAutoRecords();
+        };
+        const handleFocus = () => {
+            void runAutoRecords();
+        };
+
+        document.addEventListener('visibilitychange', handleVisible);
+        window.addEventListener('focus', handleFocus);
+
+        return () => {
+            if (autoRecordTimerRef.current) clearInterval(autoRecordTimerRef.current);
+            document.removeEventListener('visibilitychange', handleVisible);
+            window.removeEventListener('focus', handleFocus);
+        };
+    }, [isDBLoaded, runAutoRecords, state.settings.autoRecords, state.ledgers, state.categories]);
 
     const importData = (data: Partial<AppState>) => {
         // Legacy import support

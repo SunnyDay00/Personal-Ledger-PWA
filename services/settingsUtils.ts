@@ -1,5 +1,5 @@
 import { DEFAULT_SETTINGS } from '../constants';
-import { AppSettings, HomeQuickAction, TransactionType } from '../types';
+import { AppSettings, AutoRecordRule, AutoRecordSchedule, HomeQuickAction, TransactionType } from '../types';
 
 const BACKUP_REMINDER_MIN_DAYS = 0;
 const BACKUP_REMINDER_MAX_DAYS = 60;
@@ -62,6 +62,68 @@ const normalizeHomeQuickActions = (value: unknown): HomeQuickAction[] => {
     .map((item, index) => ({ ...item, order: index }));
 };
 
+const normalizeClockTime = (value: unknown, fallback = '08:00'): string => {
+  const raw = String(value || '').trim();
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(raw) ? raw : fallback;
+};
+
+const normalizeAutoRecordSchedule = (value: unknown): AutoRecordSchedule => {
+  const raw = (value || {}) as Partial<AutoRecordSchedule> & Record<string, unknown>;
+  const kind = raw.kind === 'weekly' || raw.kind === 'monthly' ? raw.kind : 'daily';
+  const time = normalizeClockTime(raw.time);
+
+  if (kind === 'weekly') {
+    const weekdays = Array.isArray(raw.weekdays)
+      ? Array.from(new Set(raw.weekdays.map(day => Number(day)).filter(day => Number.isInteger(day) && day >= 0 && day <= 6))).sort((a, b) => a - b)
+      : [];
+    return { kind, time, weekdays: weekdays.length > 0 ? weekdays : [1] };
+  }
+
+  if (kind === 'monthly') {
+    const day = Number(raw.dayOfMonth);
+    const dayOfMonth = Number.isInteger(day) ? Math.min(31, Math.max(1, day)) : 1;
+    return { kind, time, dayOfMonth };
+  }
+
+  return { kind, time };
+};
+
+const normalizeAutoRecords = (value: unknown): AutoRecordRule[] => {
+  if (!Array.isArray(value)) return [];
+  const now = Date.now();
+  return value
+    .map((item, index) => {
+      const raw = item as Partial<AutoRecordRule> & Record<string, unknown>;
+      const id = String(raw.id || `auto_record_${now}_${index}`).trim();
+      const name = String(raw.name || '').trim();
+      const icon = String(raw.icon || 'Circle').trim() || 'Circle';
+      const ledgerId = String(raw.ledgerId || '').trim();
+      const categoryId = String(raw.categoryId || '').trim();
+      const type: TransactionType = raw.type === 'income' ? 'income' : 'expense';
+      const amount = Number(raw.amount);
+      const createdAt = Number(raw.createdAt);
+      const updatedAt = Number(raw.updatedAt);
+      const lastRunAt = Number(raw.lastRunAt);
+
+      return {
+        id,
+        name,
+        icon,
+        enabled: raw.enabled !== false,
+        ledgerId,
+        type,
+        categoryId,
+        amount,
+        schedule: normalizeAutoRecordSchedule(raw.schedule),
+        createdAt: Number.isFinite(createdAt) && createdAt > 0 ? createdAt : now,
+        updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : undefined,
+        lastRunAt: Number.isFinite(lastRunAt) && lastRunAt > 0 ? lastRunAt : undefined,
+      };
+    })
+    .filter(item => item.id && item.name && item.ledgerId && item.categoryId && Number.isFinite(item.amount) && item.amount > 0)
+    .sort((a, b) => a.createdAt - b.createdAt);
+};
+
 export const normalizeAppSettings = (
   settings?: Partial<AppSettings> | null,
   baseSettings: AppSettings = DEFAULT_SETTINGS
@@ -89,5 +151,6 @@ export const normalizeAppSettings = (
       baseSettings.backupIntervalDays ?? DEFAULT_SETTINGS.backupIntervalDays ?? 7
     ),
     homeQuickActions: normalizeHomeQuickActions(merged.homeQuickActions),
+    autoRecords: normalizeAutoRecords(merged.autoRecords),
   };
 };

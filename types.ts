@@ -13,6 +13,30 @@ export interface HomeQuickAction {
   order: number;
   updatedAt?: number;
 }
+
+export type AutoRecordScheduleKind = 'daily' | 'weekly' | 'monthly';
+
+export interface AutoRecordSchedule {
+  kind: AutoRecordScheduleKind;
+  time: string;
+  weekdays?: number[];
+  dayOfMonth?: number;
+}
+
+export interface AutoRecordRule {
+  id: string;
+  name: string;
+  icon: string;
+  enabled: boolean;
+  ledgerId: string;
+  type: TransactionType;
+  categoryId: string;
+  amount: number;
+  schedule: AutoRecordSchedule;
+  lastRunAt?: number;
+  createdAt: number;
+  updatedAt?: number;
+}
 export interface TradeAllocation {
   buyTransactionId: string;
   quantity: number;
@@ -197,6 +221,7 @@ export interface AppSettings {
   settingsUpdatedAt?: number;
   defaultLedgerId?: string;
   homeQuickActions: HomeQuickAction[];
+  autoRecords: AutoRecordRule[];
   isFirstRun: boolean;
   exportStartDate?: string;
   exportEndDate?: string;

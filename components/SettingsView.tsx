@@ -5,12 +5,12 @@ import { Icon } from './ui/Icon';
 import { CloudSyncButton } from './CloudSyncButton';
 import { THEME_PRESETS, AVAILABLE_ICONS, DEFAULT_CATEGORIES, DEFAULT_TRADE_CATEGORIES } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
-import { generateId, exportToJson, exportToCsv, cn, readCsvFileWithEncoding } from '../utils';
+import { generateId, exportToJson, exportToCsv, cn, readCsvFileWithEncoding, formatCurrency } from '../utils';
 import { WebDAVService } from '../services/webdav';
 import { db } from '../services/db';
 import { format } from 'date-fns';
 import { SyncLogModal } from './SyncLogModal';
-import { Ledger, Category, CategoryType, LedgerType, TradeItemType, HomeQuickAction, TransactionType } from '../types';
+import { Ledger, Category, CategoryType, LedgerType, TradeItemType, HomeQuickAction, TransactionType, AutoRecordRule, AutoRecordScheduleKind } from '../types';
 import { feedback } from '../services/feedback';
 import { imageService } from '../services/imageService';
 import { normalizeAppSettings, normalizeBackupAutoEnabled, normalizeBackupIntervalDays, normalizeBackupReminderDays } from '../services/settingsUtils';
@@ -18,10 +18,38 @@ import { AuthPanel } from './AuthPanel';
 import { getCloudVersion } from '../services/d1Sync';
 import { getLedgerTypeLabel, isTradingLedger, normalizeLedgerType } from '../services/ledgerUtils';
 import { getSortedHomeQuickActions } from '../services/homeQuickActions';
+import { getAutoRecordScheduleLabel } from '../services/autoRecords';
 import { Keyboard } from '@capacitor/keyboard';
 import { Capacitor } from '@capacitor/core';
 
-type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'history' | 'layout' | 'theme' | 'shortcuts' | 'about' | 'storage';
+type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'autoRecords' | 'history' | 'layout' | 'theme' | 'shortcuts' | 'about' | 'storage';
+
+type AutoRecordModalState = {
+  isOpen: boolean;
+  mode: 'create' | 'edit';
+  id?: string;
+  name: string;
+  icon: string;
+  enabled: boolean;
+  ledgerId: string;
+  type: TransactionType;
+  categoryId: string;
+  amount: string;
+  scheduleKind: AutoRecordScheduleKind;
+  time: string;
+  weekdays: number[];
+  dayOfMonth: number;
+};
+
+const WEEKDAY_OPTIONS = [
+  { value: 1, label: '一' },
+  { value: 2, label: '二' },
+  { value: 3, label: '三' },
+  { value: 4, label: '四' },
+  { value: 5, label: '五' },
+  { value: 6, label: '六' },
+  { value: 0, label: '日' },
+];
 
 
 const SettingsGroup: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
@@ -133,6 +161,21 @@ export const SettingsView: React.FC = () => {
   const [quickActionModal, setQuickActionModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; title: string; ledgerId: string; type: TransactionType }>(
     { isOpen: false, mode: 'create', title: '', ledgerId: '', type: 'expense' }
   );
+  const [autoRecordModal, setAutoRecordModal] = useState<AutoRecordModalState>({
+    isOpen: false,
+    mode: 'create',
+    name: '',
+    icon: 'Clock',
+    enabled: true,
+    ledgerId: '',
+    type: 'expense',
+    categoryId: '',
+    amount: '',
+    scheduleKind: 'daily',
+    time: '08:00',
+    weekdays: [1],
+    dayOfMonth: 1,
+  });
   const [selectedLedgerId, setSelectedLedgerId] = useState(state.currentLedgerId || state.ledgers[0]?.id || '');
   const [catType, setCatType] = useState<CategoryType>('expense');
   const [isAddingCat, setIsAddingCat] = useState(false);
@@ -162,9 +205,24 @@ export const SettingsView: React.FC = () => {
     () => getSortedHomeQuickActions(state.settings.homeQuickActions),
     [state.settings.homeQuickActions]
   );
+  const autoRecords = state.settings.autoRecords || [];
+  const enabledAutoRecordCount = autoRecords.filter(rule => rule.enabled).length;
+  const accountingLedgers = useMemo(
+    () => state.ledgers.filter(ledger => !ledger.isDeleted && !isTradingLedger(ledger)),
+    [state.ledgers]
+  );
   const selectedLedger = state.ledgers.find(ledger => ledger.id === selectedLedgerId);
   const isSelectedTradingLedger = isTradingLedger(selectedLedger);
   const quickActionModalLedger = state.ledgers.find(ledger => ledger.id === quickActionModal.ledgerId);
+  const autoRecordModalLedger = state.ledgers.find(ledger => ledger.id === autoRecordModal.ledgerId);
+  const autoRecordModalCategories = useMemo(
+    () => state.categories.filter(category =>
+      category.ledgerId === autoRecordModal.ledgerId &&
+      category.type === autoRecordModal.type &&
+      !category.isDeleted
+    ),
+    [state.categories, autoRecordModal.ledgerId, autoRecordModal.type]
+  );
   const editingCatHasTransactions = useMemo(
     () => !!editingCat && state.transactions.some(transaction => !transaction.isDeleted && transaction.categoryId === editingCat.id),
     [editingCat, state.transactions]
@@ -595,6 +653,196 @@ export const SettingsView: React.FC = () => {
     feedback.vibrate('light');
   };
 
+  const getAutoRecordCategories = (ledgerId: string, type: TransactionType) =>
+    state.categories.filter(category =>
+      category.ledgerId === ledgerId &&
+      category.type === type &&
+      !category.isDeleted
+    );
+
+  const getDefaultAutoRecordCategoryId = (ledgerId: string, type: TransactionType) =>
+    getAutoRecordCategories(ledgerId, type)[0]?.id || '';
+
+  const getAutoRecordTypeLabel = (type: TransactionType) => type === 'income' ? '收入' : '支出';
+
+  const resetAutoRecordModal = () => {
+    setAutoRecordModal({
+      isOpen: false,
+      mode: 'create',
+      name: '',
+      icon: 'Clock',
+      enabled: true,
+      ledgerId: '',
+      type: 'expense',
+      categoryId: '',
+      amount: '',
+      scheduleKind: 'daily',
+      time: '08:00',
+      weekdays: [1],
+      dayOfMonth: 1,
+    });
+  };
+
+  const openCreateAutoRecord = () => {
+    const ledger = accountingLedgers.find(item => item.id === state.currentLedgerId) || accountingLedgers[0];
+    if (!ledger) {
+      window.alert('请先创建普通记账本');
+      return;
+    }
+
+    const type: TransactionType = 'expense';
+    setAutoRecordModal({
+      isOpen: true,
+      mode: 'create',
+      name: '',
+      icon: 'Clock',
+      enabled: true,
+      ledgerId: ledger.id,
+      type,
+      categoryId: getDefaultAutoRecordCategoryId(ledger.id, type),
+      amount: '',
+      scheduleKind: 'daily',
+      time: '08:00',
+      weekdays: [new Date().getDay()],
+      dayOfMonth: new Date().getDate(),
+    });
+  };
+
+  const openEditAutoRecord = (rule: AutoRecordRule) => {
+    setAutoRecordModal({
+      isOpen: true,
+      mode: 'edit',
+      id: rule.id,
+      name: rule.name,
+      icon: rule.icon || 'Clock',
+      enabled: rule.enabled,
+      ledgerId: rule.ledgerId,
+      type: rule.type,
+      categoryId: rule.categoryId,
+      amount: String(rule.amount),
+      scheduleKind: rule.schedule.kind,
+      time: rule.schedule.time || '08:00',
+      weekdays: rule.schedule.weekdays?.length ? rule.schedule.weekdays : [1],
+      dayOfMonth: rule.schedule.dayOfMonth || 1,
+    });
+  };
+
+  const updateAutoRecordLedger = (ledgerId: string) => {
+    setAutoRecordModal(prev => ({
+      ...prev,
+      ledgerId,
+      categoryId: getDefaultAutoRecordCategoryId(ledgerId, prev.type),
+    }));
+  };
+
+  const updateAutoRecordType = (type: TransactionType) => {
+    setAutoRecordModal(prev => ({
+      ...prev,
+      type,
+      categoryId: getDefaultAutoRecordCategoryId(prev.ledgerId, type),
+    }));
+  };
+
+  const toggleAutoRecordWeekday = (day: number) => {
+    setAutoRecordModal(prev => {
+      const exists = prev.weekdays.includes(day);
+      const next = exists ? prev.weekdays.filter(item => item !== day) : [...prev.weekdays, day];
+      return { ...prev, weekdays: next.sort((a, b) => a - b) };
+    });
+  };
+
+  const saveAutoRecordModal = () => {
+    const name = autoRecordModal.name.trim();
+    if (!name) {
+      window.alert('请输入记录名称');
+      return;
+    }
+
+    const ledger = accountingLedgers.find(item => item.id === autoRecordModal.ledgerId);
+    if (!ledger) {
+      window.alert('请选择普通记账本');
+      return;
+    }
+
+    const category = state.categories.find(item =>
+      item.id === autoRecordModal.categoryId &&
+      item.ledgerId === ledger.id &&
+      item.type === autoRecordModal.type &&
+      !item.isDeleted
+    );
+    if (!category) {
+      window.alert('请选择分类');
+      return;
+    }
+
+    const amount = Math.round(Number(autoRecordModal.amount) * 100) / 100;
+    if (!Number.isFinite(amount) || amount <= 0) {
+      window.alert('请输入大于 0 的金额');
+      return;
+    }
+
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(autoRecordModal.time)) {
+      window.alert('请选择有效时间');
+      return;
+    }
+
+    if (autoRecordModal.scheduleKind === 'weekly' && autoRecordModal.weekdays.length === 0) {
+      window.alert('每周自动记录至少选择一天');
+      return;
+    }
+
+    const existing = autoRecords.find(item => item.id === autoRecordModal.id);
+    const now = Date.now();
+    const schedule = autoRecordModal.scheduleKind === 'weekly'
+      ? { kind: 'weekly' as const, time: autoRecordModal.time, weekdays: autoRecordModal.weekdays }
+      : autoRecordModal.scheduleKind === 'monthly'
+        ? { kind: 'monthly' as const, time: autoRecordModal.time, dayOfMonth: Math.min(31, Math.max(1, autoRecordModal.dayOfMonth)) }
+        : { kind: 'daily' as const, time: autoRecordModal.time };
+
+    const nextRule: AutoRecordRule = {
+      id: existing?.id || generateId(),
+      name,
+      icon: autoRecordModal.icon || 'Clock',
+      enabled: autoRecordModal.enabled,
+      ledgerId: ledger.id,
+      type: autoRecordModal.type,
+      categoryId: category.id,
+      amount,
+      schedule,
+      lastRunAt: existing?.lastRunAt,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+    };
+
+    const nextRules = existing
+      ? autoRecords.map(item => item.id === nextRule.id ? nextRule : item)
+      : [...autoRecords, nextRule];
+
+    dispatch({ type: 'UPDATE_SETTINGS', payload: { autoRecords: nextRules } });
+    resetAutoRecordModal();
+    feedback.play('success');
+    feedback.vibrate('light');
+  };
+
+  const toggleAutoRecordEnabled = (id: string) => {
+    const now = Date.now();
+    dispatch({
+      type: 'UPDATE_SETTINGS',
+      payload: {
+        autoRecords: autoRecords.map(rule => rule.id === id ? { ...rule, enabled: !rule.enabled, updatedAt: now } : rule),
+      },
+    });
+    feedback.play('switch');
+    feedback.vibrate('light');
+  };
+
+  const deleteAutoRecord = (id: string) => {
+    if (!window.confirm('删除这个自动记录？')) return;
+    dispatch({ type: 'UPDATE_SETTINGS', payload: { autoRecords: autoRecords.filter(rule => rule.id !== id) } });
+    feedback.play('delete');
+    feedback.vibrate('medium');
+  };
+
   const openExportDialog = (l?: Ledger) => {
     const targetIds = l ? [l.id] : state.ledgers.map((x) => x.id);
     const startMs = exportStart ? new Date(exportStart).setHours(0, 0, 0, 0) : Number.NEGATIVE_INFINITY;
@@ -892,6 +1140,7 @@ export const SettingsView: React.FC = () => {
           onClick={() => setShowLedgerSelect(true)}
         />
         <SettingsItem icon="Grid" label="分类管理" onClick={() => setPage('categories')} />
+        <SettingsItem icon="Clock" label="自动记录" value={`${enabledAutoRecordCount}/${autoRecords.length}`} onClick={() => setPage('autoRecords')} />
         <SettingsItem icon="Image" label="图片缓存" onClick={() => setPage('storage')} />
         <SettingsItem icon="ClipboardList" label="操作历史" onClick={() => setPage('history')} />
       </SettingsGroup>
@@ -2321,6 +2570,84 @@ export const SettingsView: React.FC = () => {
     </div>
   );
 
+  const renderAutoRecords = () => (
+    <div className="px-4 pb-10">
+      <div className="h-4"></div>
+      <SettingsGroup title="自动记录">
+        {autoRecords.length === 0 ? (
+          <div className="p-4 text-sm text-ios-subtext">暂无自动记录</div>
+        ) : (
+          autoRecords.map(rule => {
+            const ledger = state.ledgers.find(item => item.id === rule.ledgerId);
+            const category = state.categories.find(item => item.id === rule.categoryId);
+            const isInvalid = !ledger || !category || isTradingLedger(ledger);
+            return (
+              <div key={rule.id} className="p-4 border-b border-gray-100 dark:border-zinc-800/50 last:border-b-0">
+                <div className="flex items-start gap-3">
+                  <button
+                    type="button"
+                    onClick={() => openEditAutoRecord(rule)}
+                    className="mt-0.5 h-10 w-10 shrink-0 rounded-full bg-ios-primary/10 text-ios-primary flex items-center justify-center"
+                  >
+                    <Icon name={rule.icon || 'Clock'} className="h-5 w-5" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => openEditAutoRecord(rule)}
+                    className="min-w-0 flex-1 text-left"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-sm font-semibold text-ios-text">{rule.name}</span>
+                      {isInvalid && <span className="shrink-0 rounded-full bg-red-50 px-2 py-0.5 text-[10px] text-red-500 dark:bg-red-950/30">失效</span>}
+                    </div>
+                    <div className="mt-1 text-xs text-ios-subtext truncate">
+                      {ledger?.name || '账本已删除'} · {getAutoRecordTypeLabel(rule.type)} · {category?.name || '分类已删除'} · {formatCurrency(rule.amount)}
+                    </div>
+                    <div className="mt-1 text-xs text-ios-subtext truncate">
+                      {getAutoRecordScheduleLabel(rule.schedule)}
+                    </div>
+                  </button>
+
+                  <div className="flex shrink-0 items-center gap-1">
+                    <button
+                      type="button"
+                      aria-label={rule.enabled ? '停用自动记录' : '启用自动记录'}
+                      onClick={() => toggleAutoRecordEnabled(rule.id)}
+                      className={cn(
+                        'h-8 min-w-12 rounded-full px-2 text-xs font-medium transition-colors',
+                        rule.enabled ? 'bg-ios-primary text-white' : 'bg-gray-100 text-ios-subtext dark:bg-zinc-800'
+                      )}
+                    >
+                      {rule.enabled ? '开启' : '关闭'}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="删除自动记录"
+                      onClick={() => deleteAutoRecord(rule.id)}
+                      className="h-8 w-8 rounded-full bg-red-50 text-red-500 flex items-center justify-center active:scale-95 dark:bg-red-950/30"
+                    >
+                      <Icon name="Trash2" className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })
+        )}
+
+        <button
+          type="button"
+          onClick={openCreateAutoRecord}
+          className="w-full p-4 flex items-center justify-center gap-2 text-sm font-medium text-ios-primary active:bg-gray-50 dark:active:bg-zinc-800"
+        >
+          <Icon name="Plus" className="w-4 h-4" />
+          新建自动记录
+        </button>
+      </SettingsGroup>
+    </div>
+  );
+
   const renderShortcuts = () => (
     <div className="px-4 pb-10">
       <div className="h-4"></div>
@@ -2477,6 +2804,8 @@ export const SettingsView: React.FC = () => {
         return '账本管理';
       case 'categories':
         return '分类管理';
+      case 'autoRecords':
+        return '自动记录';
       case 'history':
         return '操作历史';
       case 'layout':
@@ -2518,6 +2847,12 @@ export const SettingsView: React.FC = () => {
           </button>
         )}
 
+        {page === 'autoRecords' && (
+          <button onClick={openCreateAutoRecord} className="absolute right-4 text-ios-primary text-sm font-medium active:opacity-60">
+            新建
+          </button>
+        )}
+
         {page === 'main' && (
           <div className="absolute right-4">
             <CloudSyncButton />
@@ -2534,6 +2869,7 @@ export const SettingsView: React.FC = () => {
         {page === 'security' && renderSecurity()}
         {page === 'ledgers' && renderLedgers()}
         {page === 'categories' && renderCategories()}
+        {page === 'autoRecords' && renderAutoRecords()}
         {page === 'history' && renderHistory()}
         {page === 'layout' && renderLayout()}
         {page === 'theme' && renderTheme()}
@@ -2543,6 +2879,217 @@ export const SettingsView: React.FC = () => {
       </div>
 
       {showSyncLog && <SyncLogModal onClose={() => setShowSyncLog(false)} />}
+      {autoRecordModal.isOpen && (
+        <div
+          className="fixed left-0 z-50 flex w-full items-end justify-center bg-black/40 backdrop-blur-sm p-4 animate-in fade-in duration-200 transition-[height,top,padding] ease-out"
+          style={{
+            height: visualViewport.height,
+            top: visualViewport.offsetTop,
+            paddingBottom: keyboardHeight > 0 ? `${keyboardHeight + 16}px` : '1rem'
+          }}
+          onClick={resetAutoRecordModal}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white dark:bg-zinc-900 p-4 shadow-xl max-h-full overflow-y-auto no-scrollbar"
+            style={{ WebkitOverflowScrolling: 'touch' }}
+            onClick={event => event.stopPropagation()}
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <button
+                type="button"
+                onClick={resetAutoRecordModal}
+                className="text-sm font-medium text-ios-subtext"
+              >
+                取消
+              </button>
+              <h3 className="text-base font-semibold text-ios-text">
+                {autoRecordModal.mode === 'edit' ? '编辑自动记录' : '新建自动记录'}
+              </h3>
+              <button
+                type="button"
+                onClick={saveAutoRecordModal}
+                className="text-sm font-semibold text-ios-primary"
+              >
+                保存
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="flex items-center gap-3 rounded-2xl bg-gray-50 p-3 dark:bg-zinc-800">
+                <div className="h-11 w-11 shrink-0 rounded-full bg-white text-ios-primary shadow-sm flex items-center justify-center dark:bg-zinc-700">
+                  <Icon name={autoRecordModal.icon || 'Clock'} className="h-6 w-6" />
+                </div>
+                <input
+                  type="text"
+                  value={autoRecordModal.name}
+                  onChange={event => setAutoRecordModal(prev => ({ ...prev, name: event.target.value }))}
+                  placeholder="记录名称"
+                  className="min-w-0 flex-1 bg-transparent text-base text-ios-text outline-none placeholder:text-ios-subtext"
+                  autoComplete="off"
+                />
+              </div>
+
+              <div>
+                <span className="mb-2 block text-xs text-ios-subtext">图标</span>
+                <div className="grid max-h-32 grid-cols-6 gap-2 overflow-y-auto rounded-2xl bg-gray-50 p-3 dark:bg-zinc-800">
+                  {AVAILABLE_ICONS.map(icon => (
+                    <button
+                      key={icon}
+                      type="button"
+                      onClick={() => setAutoRecordModal(prev => ({ ...prev, icon }))}
+                      className={cn(
+                        'aspect-square rounded-xl flex items-center justify-center transition-colors',
+                        autoRecordModal.icon === icon ? 'bg-ios-primary text-white' : 'bg-white text-ios-subtext dark:bg-zinc-700'
+                      )}
+                    >
+                      <Icon name={icon} className="h-5 w-5" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <label className="block">
+                <span className="mb-1 block text-xs text-ios-subtext">账本</span>
+                <select
+                  value={autoRecordModal.ledgerId}
+                  onChange={event => updateAutoRecordLedger(event.target.value)}
+                  className="w-full rounded-xl border border-ios-border bg-gray-50 dark:bg-zinc-800 px-3 py-2 text-sm text-ios-text outline-none focus:border-ios-primary"
+                >
+                  {accountingLedgers.length === 0 && <option value="">暂无普通记账本</option>}
+                  {accountingLedgers.map(ledger => (
+                    <option key={ledger.id} value={ledger.id}>{ledger.name}</option>
+                  ))}
+                </select>
+              </label>
+
+              <div>
+                <span className="mb-1 block text-xs text-ios-subtext">类型</span>
+                <div className="flex rounded-xl bg-gray-100 p-1 dark:bg-zinc-800">
+                  {(['expense', 'income'] as TransactionType[]).map(type => (
+                    <button
+                      key={type}
+                      type="button"
+                      onClick={() => updateAutoRecordType(type)}
+                      className={cn(
+                        'flex-1 rounded-lg py-2 text-sm font-medium transition-all',
+                        autoRecordModal.type === type ? 'bg-white text-ios-text shadow-sm dark:bg-zinc-700' : 'text-ios-subtext'
+                      )}
+                    >
+                      {getAutoRecordTypeLabel(type)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <label className="block">
+                <span className="mb-1 block text-xs text-ios-subtext">分类</span>
+                <select
+                  value={autoRecordModal.categoryId}
+                  onChange={event => setAutoRecordModal(prev => ({ ...prev, categoryId: event.target.value }))}
+                  className="w-full rounded-xl border border-ios-border bg-gray-50 dark:bg-zinc-800 px-3 py-2 text-sm text-ios-text outline-none focus:border-ios-primary"
+                >
+                  {autoRecordModalCategories.length === 0 && <option value="">暂无可用分类</option>}
+                  {autoRecordModalCategories.map(category => (
+                    <option key={category.id} value={category.id}>{category.name}</option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="block">
+                <span className="mb-1 block text-xs text-ios-subtext">金额</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  inputMode="decimal"
+                  value={autoRecordModal.amount}
+                  onChange={event => setAutoRecordModal(prev => ({ ...prev, amount: event.target.value }))}
+                  className="w-full rounded-xl border border-ios-border bg-gray-50 dark:bg-zinc-800 px-3 py-2 text-sm text-ios-text outline-none focus:border-ios-primary"
+                />
+              </label>
+
+              <div>
+                <span className="mb-1 block text-xs text-ios-subtext">重复</span>
+                <div className="flex rounded-xl bg-gray-100 p-1 dark:bg-zinc-800">
+                  {([
+                    ['daily', '每日'],
+                    ['weekly', '每周'],
+                    ['monthly', '每月'],
+                  ] as [AutoRecordScheduleKind, string][]).map(([kind, label]) => (
+                    <button
+                      key={kind}
+                      type="button"
+                      onClick={() => setAutoRecordModal(prev => ({ ...prev, scheduleKind: kind }))}
+                      className={cn(
+                        'flex-1 rounded-lg py-2 text-sm font-medium transition-all',
+                        autoRecordModal.scheduleKind === kind ? 'bg-white text-ios-text shadow-sm dark:bg-zinc-700' : 'text-ios-subtext'
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {autoRecordModal.scheduleKind === 'weekly' && (
+                <div>
+                  <span className="mb-2 block text-xs text-ios-subtext">星期</span>
+                  <div className="grid grid-cols-7 gap-2">
+                    {WEEKDAY_OPTIONS.map(option => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => toggleAutoRecordWeekday(option.value)}
+                        className={cn(
+                          'h-9 rounded-full text-xs font-medium transition-colors',
+                          autoRecordModal.weekdays.includes(option.value) ? 'bg-ios-primary text-white' : 'bg-gray-100 text-ios-subtext dark:bg-zinc-800'
+                        )}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {autoRecordModal.scheduleKind === 'monthly' && (
+                <label className="block">
+                  <span className="mb-1 block text-xs text-ios-subtext">日期</span>
+                  <select
+                    value={autoRecordModal.dayOfMonth}
+                    onChange={event => setAutoRecordModal(prev => ({ ...prev, dayOfMonth: Number(event.target.value) }))}
+                    className="w-full rounded-xl border border-ios-border bg-gray-50 dark:bg-zinc-800 px-3 py-2 text-sm text-ios-text outline-none focus:border-ios-primary"
+                  >
+                    {Array.from({ length: 31 }, (_, index) => index + 1).map(day => (
+                      <option key={day} value={day}>{day} 日</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+
+              <label className="block">
+                <span className="mb-1 block text-xs text-ios-subtext">时间</span>
+                <input
+                  type="time"
+                  value={autoRecordModal.time}
+                  onChange={event => setAutoRecordModal(prev => ({ ...prev, time: event.target.value }))}
+                  className="w-full rounded-xl border border-ios-border bg-gray-50 dark:bg-zinc-800 px-3 py-2 text-sm text-ios-text outline-none focus:border-ios-primary"
+                />
+              </label>
+
+              <label className="flex items-center justify-between rounded-xl bg-gray-50 px-3 py-2 dark:bg-zinc-800">
+                <span className="text-sm font-medium text-ios-text">启用</span>
+                <input
+                  type="checkbox"
+                  checked={autoRecordModal.enabled}
+                  onChange={event => setAutoRecordModal(prev => ({ ...prev, enabled: event.target.checked }))}
+                  className="toggle-checkbox"
+                />
+              </label>
+            </div>
+          </div>
+        </div>
+      )}
       {quickActionModal.isOpen && (
         <div
           className="fixed left-0 z-50 flex w-full items-end justify-center bg-black/40 backdrop-blur-sm p-4 animate-in fade-in duration-200 transition-[height,top,padding] ease-out"
