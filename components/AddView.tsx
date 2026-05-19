@@ -228,6 +228,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     const [tradeKeyInputs, setTradeKeyInputs] = useState<TradeKey[]>(() =>
         normalizeTradeKeys(initialTransaction?.tradeKeys) || []
     );
+    const [activeTradeKeyPasteIndex, setActiveTradeKeyPasteIndex] = useState<number | null>(null);
     const [cardKeySellMode, setCardKeySellMode] = useState<'auto' | 'batch'>(() =>
         normalizeTradeKeyAllocations(initialTransaction?.tradeKeyAllocations)?.length ? 'batch' : 'auto'
     );
@@ -389,6 +390,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     useEffect(() => {
         if (!isCardKeyCategory || type !== 'expense') {
             setTradeKeyInputs([]);
+            setActiveTradeKeyPasteIndex(null);
             return;
         }
 
@@ -401,6 +403,12 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
             return next;
         });
     }, [isCardKeyCategory, type, quantityStr]);
+
+    useEffect(() => {
+        if (activeTradeKeyPasteIndex !== null && activeTradeKeyPasteIndex >= tradeKeyInputs.length) {
+            setActiveTradeKeyPasteIndex(null);
+        }
+    }, [activeTradeKeyPasteIndex, tradeKeyInputs.length]);
 
     useEffect(() => {
         if (!initialClipboardImage) return;
@@ -767,6 +775,46 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         setTradeKeyInputs(prev => prev.map((item, itemIndex) => (
             itemIndex === index ? { ...item, value } : item
         )));
+    };
+
+    const readClipboardText = async () => {
+        if (Capacitor.isNativePlatform()) {
+            const result = await Clipboard.read();
+            return result.value || '';
+        }
+
+        if (navigator.clipboard?.readText) {
+            return navigator.clipboard.readText();
+        }
+
+        throw new Error('当前环境不支持读取剪贴板');
+    };
+
+    const pasteTradeKeysFromClipboard = async (startIndex = 0) => {
+        try {
+            const text = (await readClipboardText()).trim();
+            if (!text) {
+                alert('剪贴板中没有可粘贴的卡密');
+                return;
+            }
+
+            const keys = text
+                .split(/\r?\n/)
+                .map(item => item.trim())
+                .filter(Boolean);
+            const values = keys.length > 0 ? keys : [text];
+
+            setTradeKeyInputs(prev => prev.map((item, itemIndex) => {
+                const valueIndex = itemIndex - startIndex;
+                if (valueIndex < 0 || valueIndex >= values.length) return item;
+                return { ...item, value: values[valueIndex] };
+            }));
+            setActiveTradeKeyPasteIndex(Math.min(startIndex + values.length, tradeKeyInputs.length - 1));
+            feedback.play('success');
+            feedback.vibrate('light');
+        } catch (error: any) {
+            alert(`粘贴失败: ${error?.message || '无法读取剪贴板'}`);
+        }
     };
 
     const copyTextWithTextarea = (text: string) => {
@@ -1364,9 +1412,20 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                                 <div className="flex items-center justify-between gap-3">
                                     <div>
                                         <div className="text-sm font-semibold text-ios-text">本次买入卡密</div>
-                                        <div className="text-xs text-ios-subtext mt-0.5">数量变化会同步增减输入框</div>
+                                        <div className="text-xs text-ios-subtext mt-0.5">点击卡密槽显示粘贴操作</div>
                                     </div>
-                                    <span className="text-xs text-ios-subtext tabular-nums">{tradeKeyInputs.length} 个</span>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                        <span className="text-xs text-ios-subtext tabular-nums">{tradeKeyInputs.length} 个</span>
+                                        {tradeKeyInputs.length > 0 && (
+                                            <button
+                                                type="button"
+                                                onClick={() => pasteTradeKeysFromClipboard(0)}
+                                                className="px-2.5 py-1 rounded-full bg-ios-primary/10 text-ios-primary text-xs font-medium active:scale-95"
+                                            >
+                                                粘贴全部
+                                            </button>
+                                        )}
+                                    </div>
                                 </div>
                                 <div className="space-y-2">
                                     {tradeKeyInputs.length === 0 ? (
@@ -1374,17 +1433,46 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                                             先输入买入数量
                                         </div>
                                     ) : tradeKeyInputs.map((item, index) => (
-                                        <div key={item.id} className="flex items-center gap-2">
-                                            <span className="w-7 h-7 rounded-full bg-ios-primary/10 text-ios-primary text-xs font-semibold flex items-center justify-center shrink-0">
-                                                {index + 1}
-                                            </span>
-                                            <input
-                                                type="text"
-                                                value={item.value}
-                                                onChange={event => updateTradeKeyInput(index, event.target.value)}
-                                                placeholder={`卡密 ${index + 1}`}
-                                                className="min-w-0 flex-1 bg-gray-50 dark:bg-zinc-800 rounded-xl px-3 py-2 text-sm outline-none border border-ios-border text-ios-text"
-                                            />
+                                        <div key={item.id} className="space-y-1">
+                                            <div className="flex items-center gap-2">
+                                                <span className="w-7 h-7 rounded-full bg-ios-primary/10 text-ios-primary text-xs font-semibold flex items-center justify-center shrink-0">
+                                                    {index + 1}
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setActiveTradeKeyPasteIndex(index)}
+                                                    className={clsx(
+                                                        'min-w-0 flex-1 rounded-xl px-3 py-2 text-left text-sm outline-none border active:scale-[0.99]',
+                                                        activeTradeKeyPasteIndex === index
+                                                            ? 'border-ios-primary bg-ios-primary/5 text-ios-text'
+                                                            : 'border-ios-border bg-gray-50 dark:bg-zinc-800 text-ios-text'
+                                                    )}
+                                                >
+                                                    <span className={clsx('block truncate', !item.value && 'text-ios-subtext')}>
+                                                        {item.value || `点击粘贴卡密 ${index + 1}`}
+                                                    </span>
+                                                </button>
+                                            </div>
+                                            {activeTradeKeyPasteIndex === index && (
+                                                <div className="ml-9 flex items-center gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => pasteTradeKeysFromClipboard(index)}
+                                                        className="px-3 py-1.5 rounded-full bg-ios-primary text-white text-xs font-medium active:scale-95"
+                                                    >
+                                                        粘贴
+                                                    </button>
+                                                    {item.value && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => updateTradeKeyInput(index, '')}
+                                                            className="px-3 py-1.5 rounded-full bg-gray-100 dark:bg-zinc-800 text-ios-subtext text-xs font-medium active:scale-95"
+                                                        >
+                                                            清空
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            )}
                                         </div>
                                     ))}
                                 </div>
