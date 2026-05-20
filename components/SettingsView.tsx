@@ -27,6 +27,7 @@ type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'autoRecord
 type AutoRecordModalState = {
   isOpen: boolean;
   mode: 'create' | 'edit';
+  step: 1 | 2;
   id?: string;
   name: string;
   icon: string;
@@ -164,6 +165,7 @@ export const SettingsView: React.FC = () => {
   const [autoRecordModal, setAutoRecordModal] = useState<AutoRecordModalState>({
     isOpen: false,
     mode: 'create',
+    step: 1,
     name: '',
     icon: 'Clock',
     enabled: true,
@@ -669,6 +671,7 @@ export const SettingsView: React.FC = () => {
     setAutoRecordModal({
       isOpen: false,
       mode: 'create',
+      step: 1,
       name: '',
       icon: 'Clock',
       enabled: true,
@@ -694,6 +697,7 @@ export const SettingsView: React.FC = () => {
     setAutoRecordModal({
       isOpen: true,
       mode: 'create',
+      step: 1,
       name: '',
       icon: 'Clock',
       enabled: true,
@@ -712,6 +716,7 @@ export const SettingsView: React.FC = () => {
     setAutoRecordModal({
       isOpen: true,
       mode: 'edit',
+      step: 1,
       id: rule.id,
       name: rule.name,
       icon: rule.icon || 'Clock',
@@ -741,6 +746,41 @@ export const SettingsView: React.FC = () => {
       type,
       categoryId: getDefaultAutoRecordCategoryId(prev.ledgerId, type),
     }));
+  };
+
+  const goToAutoRecordRuleStep = () => {
+    const name = autoRecordModal.name.trim();
+    if (!name) {
+      window.alert('请输入记录名称');
+      return;
+    }
+
+    const ledger = accountingLedgers.find(item => item.id === autoRecordModal.ledgerId);
+    if (!ledger) {
+      window.alert('请选择普通记账本');
+      return;
+    }
+
+    const currentCategoryIsValid = state.categories.some(item =>
+      item.id === autoRecordModal.categoryId &&
+      item.ledgerId === ledger.id &&
+      item.type === autoRecordModal.type &&
+      !item.isDeleted
+    );
+
+    setAutoRecordModal(prev => ({
+      ...prev,
+      step: 2,
+      name,
+      ledgerId: ledger.id,
+      categoryId: currentCategoryIsValid
+        ? prev.categoryId
+        : getDefaultAutoRecordCategoryId(ledger.id, prev.type),
+    }));
+  };
+
+  const goToAutoRecordBasicStep = () => {
+    setAutoRecordModal(prev => ({ ...prev, step: 1 }));
   };
 
   const toggleAutoRecordWeekday = (day: number) => {
@@ -2891,30 +2931,56 @@ export const SettingsView: React.FC = () => {
         >
           <div
             className="w-full max-w-md rounded-2xl bg-white dark:bg-zinc-900 p-4 shadow-xl max-h-full overflow-y-auto no-scrollbar"
-            style={{ WebkitOverflowScrolling: 'touch' }}
+            style={{
+              WebkitOverflowScrolling: 'touch',
+              minHeight: keyboardHeight > 0
+                ? undefined
+                : Math.min(Math.max(visualViewport.height - 32, 0), autoRecordModal.step === 1 ? 620 : 540),
+            }}
             onClick={event => event.stopPropagation()}
           >
-            <div className="mb-4 flex items-center justify-between">
+            <div className="mb-3 flex items-center justify-between">
               <button
                 type="button"
-                onClick={resetAutoRecordModal}
-                className="text-sm font-medium text-ios-subtext"
+                onClick={autoRecordModal.step === 1 ? resetAutoRecordModal : goToAutoRecordBasicStep}
+                className="w-16 text-left text-sm font-medium text-ios-subtext"
               >
-                取消
+                {autoRecordModal.step === 1 ? '取消' : '上一步'}
               </button>
               <h3 className="text-base font-semibold text-ios-text">
                 {autoRecordModal.mode === 'edit' ? '编辑自动记录' : '新建自动记录'}
               </h3>
               <button
                 type="button"
-                onClick={saveAutoRecordModal}
-                className="text-sm font-semibold text-ios-primary"
+                onClick={autoRecordModal.step === 1 ? goToAutoRecordRuleStep : saveAutoRecordModal}
+                className="w-16 text-right text-sm font-semibold text-ios-primary"
               >
-                保存
+                {autoRecordModal.step === 1 ? '下一步' : '保存'}
               </button>
             </div>
 
+            <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-gray-100 p-1 text-xs font-medium dark:bg-zinc-800">
+              {([
+                [1, '基本信息'],
+                [2, '记录规则'],
+              ] as const).map(([step, label]) => (
+                <button
+                  key={step}
+                  type="button"
+                  onClick={() => step === 1 ? goToAutoRecordBasicStep() : goToAutoRecordRuleStep()}
+                  className={cn(
+                    'rounded-lg py-1.5 transition-all',
+                    autoRecordModal.step === step ? 'bg-white text-ios-text shadow-sm dark:bg-zinc-700' : 'text-ios-subtext'
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
             <div className="space-y-4">
+              {autoRecordModal.step === 1 ? (
+                <>
               <div className="flex items-center gap-3 rounded-2xl bg-gray-50 p-3 dark:bg-zinc-800">
                 <div className="h-11 w-11 shrink-0 rounded-full bg-white text-ios-primary shadow-sm flex items-center justify-center dark:bg-zinc-700">
                   <Icon name={autoRecordModal.icon || 'Clock'} className="h-6 w-6" />
@@ -2927,25 +2993,6 @@ export const SettingsView: React.FC = () => {
                   className="min-w-0 flex-1 bg-transparent text-base text-ios-text outline-none placeholder:text-ios-subtext"
                   autoComplete="off"
                 />
-              </div>
-
-              <div>
-                <span className="mb-2 block text-xs text-ios-subtext">图标</span>
-                <div className="grid max-h-32 grid-cols-6 gap-2 overflow-y-auto rounded-2xl bg-gray-50 p-3 dark:bg-zinc-800">
-                  {AVAILABLE_ICONS.map(icon => (
-                    <button
-                      key={icon}
-                      type="button"
-                      onClick={() => setAutoRecordModal(prev => ({ ...prev, icon }))}
-                      className={cn(
-                        'aspect-square rounded-xl flex items-center justify-center transition-colors',
-                        autoRecordModal.icon === icon ? 'bg-ios-primary text-white' : 'bg-white text-ios-subtext dark:bg-zinc-700'
-                      )}
-                    >
-                      <Icon name={icon} className="h-5 w-5" />
-                    </button>
-                  ))}
-                </div>
               </div>
 
               <label className="block">
@@ -2961,6 +3008,28 @@ export const SettingsView: React.FC = () => {
                   ))}
                 </select>
               </label>
+
+              <div>
+                <span className="mb-2 block text-xs text-ios-subtext">图标</span>
+                <div className="grid max-h-64 grid-cols-6 gap-2 overflow-y-auto rounded-2xl bg-gray-50 p-3 dark:bg-zinc-800">
+                  {AVAILABLE_ICONS.map(icon => (
+                    <button
+                      key={icon}
+                      type="button"
+                      onClick={() => setAutoRecordModal(prev => ({ ...prev, icon }))}
+                      className={cn(
+                        'aspect-square rounded-xl flex items-center justify-center transition-colors',
+                        autoRecordModal.icon === icon ? 'bg-ios-primary text-white' : 'bg-white text-ios-subtext dark:bg-zinc-700'
+                      )}
+                    >
+                      <Icon name={icon} className="h-5 w-5" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+                </>
+              ) : (
+                <>
 
               <div>
                 <span className="mb-1 block text-xs text-ios-subtext">类型</span>
@@ -3086,6 +3155,8 @@ export const SettingsView: React.FC = () => {
                   className="toggle-checkbox"
                 />
               </label>
+                </>
+              )}
             </div>
           </div>
         </div>
