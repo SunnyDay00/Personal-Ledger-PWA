@@ -262,6 +262,9 @@ export const SettingsView: React.FC = () => {
     offsetTop: 0
   });
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const isViewportKeyboardShrunk = typeof window !== 'undefined' && visualViewport.height < window.innerHeight - 120;
+  const effectiveKeyboardInset = isViewportKeyboardShrunk ? 0 : keyboardHeight;
+  const isKeyboardVisible = isViewportKeyboardShrunk || effectiveKeyboardInset > 0;
 
   useEffect(() => {
     const handleResize = () => {
@@ -2925,7 +2928,8 @@ export const SettingsView: React.FC = () => {
           style={{
             height: visualViewport.height,
             top: visualViewport.offsetTop,
-            paddingBottom: keyboardHeight > 0 ? `${keyboardHeight + 16}px` : '1rem'
+            paddingTop: 'calc(env(safe-area-inset-top) + 0.75rem)',
+            paddingBottom: effectiveKeyboardInset > 0 ? `${effectiveKeyboardInset + 16}px` : '1rem'
           }}
           onClick={resetAutoRecordModal}
         >
@@ -2933,9 +2937,10 @@ export const SettingsView: React.FC = () => {
             className="w-full max-w-md rounded-2xl bg-white dark:bg-zinc-900 p-4 shadow-xl max-h-full overflow-y-auto no-scrollbar"
             style={{
               WebkitOverflowScrolling: 'touch',
-              minHeight: keyboardHeight > 0
+              maxHeight: `calc(100% - ${effectiveKeyboardInset}px - env(safe-area-inset-top) - 2rem)`,
+              minHeight: isKeyboardVisible
                 ? undefined
-                : Math.min(Math.max(visualViewport.height - 32, 0), autoRecordModal.step === 1 ? 620 : 540),
+                : Math.min(Math.max(visualViewport.height - 96, 0), autoRecordModal.step === 1 ? 620 : 540),
             }}
             onClick={event => event.stopPropagation()}
           >
