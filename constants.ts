@@ -43,7 +43,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   exportStartDate: '',
   exportEndDate: '',
   isFirstRun: true,
-  version: '7.6.3',
+  version: '7.6.4',
   debugMode: typeof localStorage !== 'undefined' ? localStorage.getItem('debugMode') === 'true' : false,
   defaultLedgerId: '',
   homeQuickActions: [],

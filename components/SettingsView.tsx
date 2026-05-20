@@ -178,6 +178,7 @@ export const SettingsView: React.FC = () => {
     weekdays: [1],
     dayOfMonth: 1,
   });
+  const [showAutoRecordBulkMenu, setShowAutoRecordBulkMenu] = useState(false);
   const [selectedLedgerId, setSelectedLedgerId] = useState(state.currentLedgerId || state.ledgers[0]?.id || '');
   const [catType, setCatType] = useState<CategoryType>('expense');
   const [isAddingCat, setIsAddingCat] = useState(false);
@@ -209,6 +210,22 @@ export const SettingsView: React.FC = () => {
   );
   const autoRecords = state.settings.autoRecords || [];
   const enabledAutoRecordCount = autoRecords.filter(rule => rule.enabled).length;
+  const autoRecordTotals = useMemo(
+    () => autoRecords.reduce(
+      (totals, rule) => {
+        const amount = Number(rule.amount) || 0;
+        if (rule.type === 'income') {
+          totals.income += amount;
+        } else {
+          totals.expense += amount;
+        }
+        return totals;
+      },
+      { expense: 0, income: 0 }
+    ),
+    [autoRecords]
+  );
+  const autoRecordCountLabel = autoRecords.length === 0 ? '未设置' : `${enabledAutoRecordCount} 启用 / ${autoRecords.length} 个`;
   const accountingLedgers = useMemo(
     () => state.ledgers.filter(ledger => !ledger.isDeleted && !isTradingLedger(ledger)),
     [state.ledgers]
@@ -262,18 +279,6 @@ export const SettingsView: React.FC = () => {
     offsetTop: 0
   });
   const [keyboardHeight, setKeyboardHeight] = useState(0);
-  const isViewportKeyboardShrunk = typeof window !== 'undefined' && visualViewport.height < window.innerHeight - 120;
-  const keyboardInset = isViewportKeyboardShrunk ? 0 : keyboardHeight;
-  const visibleViewportHeight = typeof window !== 'undefined'
-    ? isViewportKeyboardShrunk
-      ? visualViewport.height
-      : Math.max(0, window.innerHeight - keyboardInset)
-    : visualViewport.height;
-  const isKeyboardVisible = isViewportKeyboardShrunk || keyboardInset > 0;
-  const autoRecordModalMaxHeight = Math.max(260, visibleViewportHeight - 32);
-  const autoRecordModalMinHeight = isKeyboardVisible
-    ? undefined
-    : Math.min(Math.max(visibleViewportHeight - 96, 0), autoRecordModal.step === 1 ? 620 : 540);
 
   useEffect(() => {
     const handleResize = () => {
@@ -855,7 +860,7 @@ export const SettingsView: React.FC = () => {
       id: existing?.id || generateId(),
       name,
       icon: autoRecordModal.icon || 'Clock',
-      enabled: autoRecordModal.enabled,
+      enabled: existing ? autoRecordModal.enabled : true,
       ledgerId: ledger.id,
       type: autoRecordModal.type,
       categoryId: category.id,
@@ -884,6 +889,22 @@ export const SettingsView: React.FC = () => {
         autoRecords: autoRecords.map(rule => rule.id === id ? { ...rule, enabled: !rule.enabled, updatedAt: now } : rule),
       },
     });
+    feedback.play('switch');
+    feedback.vibrate('light');
+  };
+
+  const setAllAutoRecordsEnabled = (enabled: boolean) => {
+    setShowAutoRecordBulkMenu(false);
+    if (autoRecords.length === 0) return;
+
+    const now = Date.now();
+    const nextRules = autoRecords.map(rule =>
+      rule.enabled === enabled ? rule : { ...rule, enabled, updatedAt: now }
+    );
+
+    if (nextRules.every((rule, index) => rule === autoRecords[index])) return;
+
+    dispatch({ type: 'UPDATE_SETTINGS', payload: { autoRecords: nextRules } });
     feedback.play('switch');
     feedback.vibrate('light');
   };
@@ -1192,7 +1213,7 @@ export const SettingsView: React.FC = () => {
           onClick={() => setShowLedgerSelect(true)}
         />
         <SettingsItem icon="Grid" label="分类管理" onClick={() => setPage('categories')} />
-        <SettingsItem icon="Clock" label="自动记录" value={`${enabledAutoRecordCount}/${autoRecords.length}`} onClick={() => setPage('autoRecords')} />
+        <SettingsItem icon="Clock" label="自动记录" value={autoRecordCountLabel} onClick={() => setPage('autoRecords')} />
         <SettingsItem icon="Image" label="图片缓存" onClick={() => setPage('storage')} />
         <SettingsItem icon="ClipboardList" label="操作历史" onClick={() => setPage('history')} />
       </SettingsGroup>
@@ -2623,80 +2644,133 @@ export const SettingsView: React.FC = () => {
   );
 
   const renderAutoRecords = () => (
-    <div className="px-4 pb-10">
-      <div className="h-4"></div>
-      <SettingsGroup title="自动记录">
+    <div className="pb-10">
+      <div className="h-3"></div>
+      <div className="relative px-4 pb-3">
+        <div className="grid grid-cols-4 overflow-hidden rounded-2xl border border-ios-border bg-white shadow-sm dark:bg-zinc-900">
+          <button
+            type="button"
+            onClick={() => setShowAutoRecordBulkMenu(prev => !prev)}
+            disabled={autoRecords.length === 0}
+            className="border-r border-ios-border px-2 py-2 text-center transition-colors active:bg-gray-50 disabled:opacity-60 dark:active:bg-zinc-800"
+          >
+            <div className="text-[10px] leading-4 text-ios-subtext">全部</div>
+            <div className="text-sm font-semibold tabular-nums text-ios-text">{autoRecords.length} 个</div>
+          </button>
+          <div className="border-r border-ios-border px-2 py-2 text-center">
+            <div className="text-[10px] leading-4 text-ios-subtext">开启</div>
+            <div className="text-sm font-semibold tabular-nums text-ios-primary">{enabledAutoRecordCount} 个</div>
+          </div>
+          <div className="border-r border-ios-border px-2 py-2 text-center">
+            <div className="text-[10px] leading-4 text-ios-subtext">支出</div>
+            <div className="truncate text-sm font-semibold tabular-nums text-red-500">{formatCurrency(autoRecordTotals.expense)}</div>
+          </div>
+          <div className="px-2 py-2 text-center">
+            <div className="text-[10px] leading-4 text-ios-subtext">收入</div>
+            <div className="truncate text-sm font-semibold tabular-nums text-green-600 dark:text-green-400">{formatCurrency(autoRecordTotals.income)}</div>
+          </div>
+        </div>
+
+        {showAutoRecordBulkMenu && autoRecords.length > 0 && (
+          <div className="absolute left-4 top-full z-30 -mt-2 w-36 overflow-hidden rounded-xl border border-ios-border bg-white shadow-xl dark:bg-zinc-900">
+            <button
+              type="button"
+              onClick={() => setAllAutoRecordsEnabled(true)}
+              className="flex w-full items-center justify-between px-3 py-2 text-left text-sm text-ios-text active:bg-gray-50 dark:active:bg-zinc-800"
+            >
+              <span>全部开启</span>
+              <Icon name="CheckCircle2" className="h-4 w-4 text-ios-primary" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setAllAutoRecordsEnabled(false)}
+              className="flex w-full items-center justify-between border-t border-ios-border px-3 py-2 text-left text-sm text-ios-text active:bg-gray-50 dark:active:bg-zinc-800"
+            >
+              <span>全部关闭</span>
+              <Icon name="XCircle" className="h-4 w-4 text-ios-subtext" />
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="mx-4 overflow-hidden rounded-2xl border border-ios-border bg-white shadow-sm dark:bg-zinc-900">
         {autoRecords.length === 0 ? (
-          <div className="p-4 text-sm text-ios-subtext">暂无自动记录</div>
+          <div className="px-4 py-10 text-center text-sm text-ios-subtext">暂无自动记录</div>
         ) : (
           autoRecords.map(rule => {
             const ledger = state.ledgers.find(item => item.id === rule.ledgerId);
             const category = state.categories.find(item => item.id === rule.categoryId);
             const isInvalid = !ledger || !category || isTradingLedger(ledger);
             return (
-              <div key={rule.id} className="p-4 border-b border-gray-100 dark:border-zinc-800/50 last:border-b-0">
-                <div className="flex items-start gap-3">
-                  <button
-                    type="button"
-                    onClick={() => openEditAutoRecord(rule)}
-                    className="mt-0.5 h-10 w-10 shrink-0 rounded-full bg-ios-primary/10 text-ios-primary flex items-center justify-center"
-                  >
-                    <Icon name={rule.icon || 'Clock'} className="h-5 w-5" />
-                  </button>
+              <div key={rule.id} className="flex items-center gap-3 border-b border-gray-100 px-4 py-3 last:border-b-0 dark:border-zinc-800/50">
+                <button
+                  type="button"
+                  onClick={() => openEditAutoRecord(rule)}
+                  className="h-11 w-11 shrink-0 rounded-full bg-ios-primary/10 text-ios-primary flex items-center justify-center"
+                >
+                  <Icon name={rule.icon || 'Clock'} className="h-5 w-5" />
+                </button>
 
-                  <button
-                    type="button"
-                    onClick={() => openEditAutoRecord(rule)}
-                    className="min-w-0 flex-1 text-left"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="truncate text-sm font-semibold text-ios-text">{rule.name}</span>
-                      {isInvalid && <span className="shrink-0 rounded-full bg-red-50 px-2 py-0.5 text-[10px] text-red-500 dark:bg-red-950/30">失效</span>}
-                    </div>
-                    <div className="mt-1 text-xs text-ios-subtext truncate">
-                      {ledger?.name || '账本已删除'} · {getAutoRecordTypeLabel(rule.type)} · {category?.name || '分类已删除'} · {formatCurrency(rule.amount)}
-                    </div>
-                    <div className="mt-1 text-xs text-ios-subtext truncate">
-                      {getAutoRecordScheduleLabel(rule.schedule)}
-                    </div>
-                  </button>
-
-                  <div className="flex shrink-0 items-center gap-1">
-                    <button
-                      type="button"
-                      aria-label={rule.enabled ? '停用自动记录' : '启用自动记录'}
-                      onClick={() => toggleAutoRecordEnabled(rule.id)}
-                      className={cn(
-                        'h-8 min-w-12 rounded-full px-2 text-xs font-medium transition-colors',
-                        rule.enabled ? 'bg-ios-primary text-white' : 'bg-gray-100 text-ios-subtext dark:bg-zinc-800'
-                      )}
-                    >
-                      {rule.enabled ? '开启' : '关闭'}
-                    </button>
-                    <button
-                      type="button"
-                      aria-label="删除自动记录"
-                      onClick={() => deleteAutoRecord(rule.id)}
-                      className="h-8 w-8 rounded-full bg-red-50 text-red-500 flex items-center justify-center active:scale-95 dark:bg-red-950/30"
-                    >
-                      <Icon name="Trash2" className="h-4 w-4" />
-                    </button>
+                <button
+                  type="button"
+                  onClick={() => openEditAutoRecord(rule)}
+                  className="min-w-0 flex-1 text-left"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-sm font-semibold text-ios-text">{rule.name}</span>
+                    {isInvalid && <span className="shrink-0 rounded-full bg-red-50 px-2 py-0.5 text-[10px] text-red-500 dark:bg-red-950/30">失效</span>}
                   </div>
+                  <div className="mt-1 truncate text-xs text-ios-subtext">
+                    {ledger?.name || '账本已删除'} · {getAutoRecordTypeLabel(rule.type)} · {category?.name || '分类已删除'}
+                  </div>
+                  <div className="mt-1 truncate text-xs text-ios-subtext">
+                    {getAutoRecordScheduleLabel(rule.schedule)}
+                  </div>
+                </button>
+
+                <div className="shrink-0 text-right">
+                  <div className={cn(
+                    'text-sm font-semibold tabular-nums',
+                    rule.type === 'income' ? 'text-green-600 dark:text-green-400' : 'text-red-500'
+                  )}>
+                    {rule.type === 'income' ? '+' : '-'}{formatCurrency(rule.amount)}
+                  </div>
+                  <button
+                    type="button"
+                    aria-label={rule.enabled ? '点击关闭自动记录' : '点击开启自动记录'}
+                    onClick={() => toggleAutoRecordEnabled(rule.id)}
+                    className={cn(
+                      'mt-2 h-7 min-w-12 rounded-full px-2 text-xs font-medium transition-colors',
+                      rule.enabled ? 'bg-ios-primary text-white' : 'bg-gray-100 text-ios-subtext dark:bg-zinc-800'
+                    )}
+                  >
+                    {rule.enabled ? '已开启' : '已关闭'}
+                  </button>
                 </div>
+
+                <button
+                  type="button"
+                  aria-label="删除自动记录"
+                  onClick={() => deleteAutoRecord(rule.id)}
+                  className="h-8 w-8 shrink-0 rounded-full bg-red-50 text-red-500 flex items-center justify-center active:scale-95 dark:bg-red-950/30"
+                >
+                  <Icon name="Trash2" className="h-4 w-4" />
+                </button>
               </div>
             );
           })
         )}
+      </div>
 
+      <div className="px-4 pt-4">
         <button
           type="button"
           onClick={openCreateAutoRecord}
-          className="w-full p-4 flex items-center justify-center gap-2 text-sm font-medium text-ios-primary active:bg-gray-50 dark:active:bg-zinc-800"
+          className="w-full rounded-2xl bg-ios-primary py-3 text-sm font-semibold text-white active:scale-[0.99]"
         >
-          <Icon name="Plus" className="w-4 h-4" />
           新建自动记录
         </button>
-      </SettingsGroup>
+      </div>
     </div>
   );
 
@@ -2933,27 +3007,17 @@ export const SettingsView: React.FC = () => {
       {showSyncLog && <SyncLogModal onClose={() => setShowSyncLog(false)} />}
       {autoRecordModal.isOpen && (
         <div
-          className="fixed left-0 z-50 flex w-full items-end justify-center bg-black/40 backdrop-blur-sm p-4 animate-in fade-in duration-200 transition-[height,top,padding] ease-out"
+          className="fixed left-0 z-50 flex w-full flex-col bg-black/30 p-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] pb-[calc(env(safe-area-inset-bottom)+0.75rem)] backdrop-blur-sm animate-in fade-in duration-200 transition-[height,top] ease-out"
           style={{
-            height: isViewportKeyboardShrunk
-              ? visualViewport.height
-              : typeof window !== 'undefined' ? window.innerHeight : visualViewport.height,
+            height: visualViewport.height,
             top: visualViewport.offsetTop,
-            paddingTop: 'calc(env(safe-area-inset-top) + 0.75rem)',
-            paddingBottom: keyboardInset > 0 ? `${keyboardInset + 16}px` : '1rem'
           }}
-          onClick={resetAutoRecordModal}
         >
           <div
-            className="w-full max-w-md rounded-2xl bg-white dark:bg-zinc-900 p-4 shadow-xl max-h-full overflow-y-auto no-scrollbar"
-            style={{
-              WebkitOverflowScrolling: 'touch',
-              maxHeight: autoRecordModalMaxHeight,
-              minHeight: autoRecordModalMinHeight,
-            }}
-            onClick={event => event.stopPropagation()}
+            className="flex min-h-0 flex-1 w-full flex-col overflow-hidden rounded-3xl border border-white/70 bg-ios-bg shadow-2xl dark:border-white/10 dark:bg-zinc-950"
           >
-            <div className="mb-3 flex items-center justify-between">
+            <div className="shrink-0 border-b border-ios-border bg-ios-bg/95 px-4 backdrop-blur-xl dark:bg-zinc-950/95">
+              <div className="flex h-14 items-center justify-between">
               <button
                 type="button"
                 onClick={autoRecordModal.step === 1 ? resetAutoRecordModal : goToAutoRecordBasicStep}
@@ -2971,8 +3035,10 @@ export const SettingsView: React.FC = () => {
               >
                 {autoRecordModal.step === 1 ? '下一步' : '保存'}
               </button>
+              </div>
             </div>
 
+            <div className="flex-1 overflow-y-auto px-4 py-4 pb-[calc(env(safe-area-inset-bottom)+2rem)] no-scrollbar" style={{ WebkitOverflowScrolling: 'touch' }}>
             <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-gray-100 p-1 text-xs font-medium dark:bg-zinc-800">
               {([
                 [1, '基本信息'],
@@ -3160,17 +3226,25 @@ export const SettingsView: React.FC = () => {
                 />
               </label>
 
-              <label className="flex items-center justify-between rounded-xl bg-gray-50 px-3 py-2 dark:bg-zinc-800">
-                <span className="text-sm font-medium text-ios-text">启用</span>
-                <input
-                  type="checkbox"
-                  checked={autoRecordModal.enabled}
-                  onChange={event => setAutoRecordModal(prev => ({ ...prev, enabled: event.target.checked }))}
-                  className="toggle-checkbox"
-                />
-              </label>
+              {autoRecordModal.mode === 'edit' ? (
+                <label className="flex items-center justify-between rounded-xl bg-gray-50 px-3 py-2 dark:bg-zinc-800">
+                  <span className="text-sm font-medium text-ios-text">启用</span>
+                  <input
+                    type="checkbox"
+                    checked={autoRecordModal.enabled}
+                    onChange={event => setAutoRecordModal(prev => ({ ...prev, enabled: event.target.checked }))}
+                    className="toggle-checkbox"
+                  />
+                </label>
+              ) : (
+                <div className="flex items-center justify-between rounded-xl bg-ios-primary/10 px-3 py-2">
+                  <span className="text-sm font-medium text-ios-text">创建后默认开启</span>
+                  <span className="text-xs font-semibold text-ios-primary">开启</span>
+                </div>
+              )}
                 </>
               )}
+            </div>
             </div>
           </div>
         </div>
