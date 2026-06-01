@@ -2,6 +2,23 @@
   "name": "personal-ledger-pwa",
   "private": true,
   "version": "7.6.4",
+  "description": "A privacy-friendly, local-first, self-hostable personal bookkeeping PWA.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SunnyDay00/Personal-Ledger-PWA.git"
+  },
+  "keywords": [
+    "pwa",
+    "personal-finance",
+    "ledger",
+    "bookkeeping",
+    "react",
+    "typescript",
+    "vite",
+    "webdav",
+    "cloudflare"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite",

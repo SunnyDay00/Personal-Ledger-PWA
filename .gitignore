@@ -11,16 +11,30 @@ node_modules
 dist
 dist-ssr
 builds/
+.env
+.env.*
+!.env.example
+!.env.*.example
+.dev.vars
+.wrangler
 .wrangler/
+.vite/
 .playwright-mcp/
+coverage/
+.nyc_output/
 backups/
+*.tsbuildinfo
 *.local
+*.tmp
+*.temp
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
 .idea
 .DS_Store
+Thumbs.db
+Desktop.ini
 *.suo
 *.ntvs*
 *.njsproj
