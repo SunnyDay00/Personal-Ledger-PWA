@@ -6,6 +6,8 @@ It is an early-stage public repository under active maintenance. The app can run
 
 中文简介：Personal Ledger PWA 是一个隐私友好、本地优先、可自托管的个人记账 PWA，支持离线使用、多账本、图片附件、WebDAV 备份，以及可选的 Cloudflare 同步后端。
 
+Online demo / 在线体验：<https://personal-ledger-pwa.pages.dev/>
+
 ## Highlights
 
 - Local-first personal finance records stored primarily in IndexedDB.
@@ -171,6 +173,21 @@ npm run build
 ```
 
 The current Vite config uses `base: './'`, which is friendly to static hosting paths. Suitable hosts include Cloudflare Pages, GitHub Pages, Nginx, or other static file hosting. Configure HTTPS for PWA installation and service worker behavior.
+
+The public Cloudflare Pages demo is available at:
+
+```text
+https://personal-ledger-pwa.pages.dev/
+```
+
+To publish the current build to Cloudflare Pages by direct upload:
+
+```bash
+npm run build
+npx wrangler pages deploy dist --project-name personal-ledger-pwa --branch main
+```
+
+The hosted demo supports the local-first browser/PWA workflow by default. Account sync still uses the fixed Worker endpoint configured in `constants.ts`, so registration and login require a valid account or invite code for that backend.
 
 ### Optional Cloudflare Sync Backend
 
