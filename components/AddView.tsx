@@ -3,7 +3,9 @@ import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { feedback } from '../services/feedback';
 import { TransactionType, Transaction, TradeAllocation, TradeKeyAllocation, TradeKey } from '../types';
-import { generateId } from '../utils';
+import { DEFAULT_CURRENCY } from '../constants';
+import { fetchLatestExchangeRates } from '../services/currency';
+import { generateId, getCurrencyName, getExchangeRateToCny, normalizeCurrencyCode } from '../utils';
 import { clsx } from 'clsx';
 import { format, addDays, isSameDay } from 'date-fns';
 import { Keyboard } from '@capacitor/keyboard';
@@ -179,12 +181,12 @@ const roundMoney = (value: number) => Math.round((value + Number.EPSILON) * 100)
 
 const getTransactionInputAmount = (transaction?: Partial<Transaction> | null) => {
     if (!transaction) return '0';
-    const amount = transaction.tradeGrossAmount ?? transaction.amount;
+    const amount = transaction.originalGrossAmount ?? transaction.tradeGrossAmount ?? transaction.amount;
     if (amount === undefined) return '0';
 
     const quantity = Number(transaction.tradeQuantity || 0);
-    if (transaction.tradeGrossAmount !== undefined && Number.isFinite(quantity) && quantity > 0) {
-        return String(roundMoney(Number(transaction.tradeGrossAmount) / quantity));
+    if ((transaction.originalGrossAmount !== undefined || transaction.tradeGrossAmount !== undefined) && Number.isFinite(quantity) && quantity > 0) {
+        return String(roundMoney(Number(amount) / quantity));
     }
 
     return String(amount);
@@ -212,7 +214,7 @@ const normalizeCardKeyQuantity = (value: string) => {
 };
 
 export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, initialClipboardImage, initialType = 'expense', targetLedgerId }) => {
-    const { state, addTransaction, updateTransaction } = useApp();
+    const { state, dispatch, addTransaction, updateTransaction } = useApp();
     const targetLedgerExists = !!targetLedgerId && state.ledgers.some(ledger => ledger.id === targetLedgerId);
     const effectiveLedgerId = initialTransaction?.ledgerId || (targetLedgerExists ? targetLedgerId : state.currentLedgerId);
     const currentLedger = state.ledgers.find(ledger => ledger.id === effectiveLedgerId);
@@ -250,6 +252,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     const [isUploading, setIsUploading] = useState(false);
     const [showPreview, setShowPreview] = useState(false);
     const [keyboardHeight, setKeyboardHeight] = useState(0);
+    const [exchangeRatePreviewStatus, setExchangeRatePreviewStatus] = useState<'idle' | 'loading' | 'error'>('idle');
     const inferredAllocationRef = useRef<string | null>(null);
 
     useEffect(() => {
@@ -292,6 +295,53 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         [categories, selectedCategoryId]
     );
     const isCardKeyCategory = isTrading && selectedCategory?.tradeItemType === 'cardKey';
+    const savedCurrency = useMemo(
+        () => normalizeCurrencyCode(initialTransaction?.currencyCode, DEFAULT_CURRENCY),
+        [initialTransaction?.currencyCode]
+    );
+    const selectedCurrency = useMemo(
+        () => {
+            if (!isTrading) return DEFAULT_CURRENCY;
+            if (initialTransaction?.id) return savedCurrency;
+            return normalizeCurrencyCode(type === 'income' ? selectedCategory?.sellCurrency : selectedCategory?.buyCurrency, DEFAULT_CURRENCY);
+        },
+        [isTrading, initialTransaction?.id, savedCurrency, selectedCategory?.buyCurrency, selectedCategory?.sellCurrency, type]
+    );
+    const savedExchangeRateToCny = Number(initialTransaction?.exchangeRateToCny);
+    const shouldUseSavedExchangeRate = isTrading
+        && !!initialTransaction?.id
+        && savedCurrency === selectedCurrency
+        && Number.isFinite(savedExchangeRateToCny)
+        && savedExchangeRateToCny > 0;
+
+    useEffect(() => {
+        if (!isTrading || selectedCurrency === DEFAULT_CURRENCY || shouldUseSavedExchangeRate) {
+            setExchangeRatePreviewStatus('idle');
+            return;
+        }
+
+        if (getExchangeRateToCny(selectedCurrency, state.exchangeRates) !== null) {
+            setExchangeRatePreviewStatus('idle');
+            return;
+        }
+
+        let cancelled = false;
+        setExchangeRatePreviewStatus('loading');
+        fetchLatestExchangeRates(true)
+            .then(snapshot => {
+                if (cancelled) return;
+                dispatch({ type: 'SET_EXCHANGE_RATES', payload: snapshot });
+                setExchangeRatePreviewStatus('idle');
+            })
+            .catch(error => {
+                console.warn('Failed to refresh exchange rates for preview', error);
+                if (!cancelled) setExchangeRatePreviewStatus('error');
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [dispatch, isTrading, selectedCurrency, shouldUseSavedExchangeRate, state.exchangeRates]);
 
     useEffect(() => {
         let cancelled = false;
@@ -959,7 +1009,39 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
             return;
         }
 
-        const grossAmount = isTrading ? roundMoney(inputAmount * quantity) : inputAmount;
+        const originalGrossAmount = isTrading ? roundMoney(inputAmount * quantity) : inputAmount;
+        let exchangeRateToCny = 1;
+        let exchangeRateUpdatedAt: number | undefined;
+        let exchangeRateSource: string | undefined;
+        if (isTrading) {
+            if (shouldUseSavedExchangeRate) {
+                exchangeRateToCny = savedExchangeRateToCny;
+                exchangeRateUpdatedAt = initialTransaction?.exchangeRateUpdatedAt;
+                exchangeRateSource = initialTransaction?.exchangeRateSource;
+            } else {
+                try {
+                    const snapshot = selectedCurrency === DEFAULT_CURRENCY
+                        ? state.exchangeRates
+                        : await fetchLatestExchangeRates();
+                    if (snapshot) {
+                        dispatch({ type: 'SET_EXCHANGE_RATES', payload: snapshot });
+                        exchangeRateUpdatedAt = snapshot.timeLastUpdateUnix ? snapshot.timeLastUpdateUnix * 1000 : snapshot.fetchedAt;
+                        exchangeRateSource = snapshot.provider;
+                    }
+                    const rate = getExchangeRateToCny(selectedCurrency, snapshot);
+                    if (rate === null) {
+                        alert(`无法获取 ${selectedCurrency} 的实时汇率，请联网刷新后重试`);
+                        return;
+                    }
+                    exchangeRateToCny = rate;
+                } catch (error: any) {
+                    alert(error?.message || `无法获取 ${selectedCurrency} 的实时汇率`);
+                    return;
+                }
+            }
+        }
+
+        const grossAmount = isTrading ? roundMoney(originalGrossAmount * exchangeRateToCny) : inputAmount;
         const defaultFeeRate = getCategoryFeeRate(selectedCategory, type);
         const parsedFeeRate = feeRateStr.trim() === '' ? defaultFeeRate : Number(feeRateStr);
         if (isTrading && (!Number.isFinite(parsedFeeRate) || parsedFeeRate < 0)) {
@@ -971,6 +1053,10 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         const amount = isTrading
             ? Math.max(0, roundMoney(type === 'expense' ? grossAmount + feeAmount : grossAmount - feeAmount))
             : grossAmount;
+        const originalFeeAmount = roundMoney(originalGrossAmount * feeRate / 100);
+        const originalAmount = isTrading
+            ? Math.max(0, roundMoney(type === 'expense' ? originalGrossAmount + originalFeeAmount : originalGrossAmount - originalFeeAmount))
+            : inputAmount;
 
         if (isTrading && type === 'income') {
             const exceededAllocation = sellAllocations.find(allocation => allocation.quantity > allocation.maxQuantity);
@@ -1021,6 +1107,12 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                     tradeAllocations: type === 'income' ? sellAllocations.map(({ buyTransactionId, quantity }) => ({ buyTransactionId, quantity })) : undefined,
                     tradeKeys: isCardKeyBuy ? preparedTradeKeys : undefined,
                     tradeKeyAllocations: isCardKeySell ? selectedTradeKeyAllocations : undefined,
+                    currencyCode: selectedCurrency,
+                    originalAmount,
+                    originalGrossAmount,
+                    exchangeRateToCny,
+                    exchangeRateUpdatedAt,
+                    exchangeRateSource,
                 } : {
                     tradeAction: undefined,
                     tradeQuantity: undefined,
@@ -1030,6 +1122,12 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                     tradeAllocations: undefined,
                     tradeKeys: undefined,
                     tradeKeyAllocations: undefined,
+                    currencyCode: DEFAULT_CURRENCY,
+                    originalAmount: undefined,
+                    originalGrossAmount: undefined,
+                    exchangeRateToCny: undefined,
+                    exchangeRateUpdatedAt: undefined,
+                    exchangeRateSource: undefined,
                 }),
                 date: date.getTime(),
                 note,
@@ -1125,15 +1223,23 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     const tradeSubtotalAmount = isTrading && calculatedAmount !== null && validTradeQuantity > 0
         ? roundMoney(calculatedAmount * validTradeQuantity)
         : null;
+    const previewExchangeRateToCny = isTrading
+        ? shouldUseSavedExchangeRate
+            ? savedExchangeRateToCny
+            : getExchangeRateToCny(selectedCurrency, state.exchangeRates)
+        : 1;
+    const tradeSubtotalCny = tradeSubtotalAmount !== null && previewExchangeRateToCny !== null
+        ? roundMoney(tradeSubtotalAmount * previewExchangeRateToCny)
+        : null;
     const parsedTradeFeeRate = feeRateStr.trim() === '' ? getCategoryFeeRate(selectedCategory, type) : Number(feeRateStr);
     const tradeFeeRate = isTrading && Number.isFinite(parsedTradeFeeRate) && parsedTradeFeeRate >= 0
         ? parsedTradeFeeRate
         : 0;
-    const tradeFeeAmount = tradeSubtotalAmount !== null
-        ? roundMoney(tradeSubtotalAmount * tradeFeeRate / 100)
+    const tradeFeeAmount = tradeSubtotalCny !== null
+        ? roundMoney(tradeSubtotalCny * tradeFeeRate / 100)
         : 0;
-    const tradeFinalAmount = tradeSubtotalAmount !== null
-        ? Math.max(0, roundMoney(type === 'expense' ? tradeSubtotalAmount + tradeFeeAmount : tradeSubtotalAmount - tradeFeeAmount))
+    const tradeFinalAmount = tradeSubtotalCny !== null
+        ? Math.max(0, roundMoney(type === 'expense' ? tradeSubtotalCny + tradeFeeAmount : tradeSubtotalCny - tradeFeeAmount))
         : null;
     const tradeSellCost = useMemo(
         () => isTrading && type === 'income' && selectedCategoryId && validTradeQuantity > 0
@@ -1144,11 +1250,26 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     const tradeEstimatedProfit = tradeFinalAmount !== null && tradeSellCost && tradeSellCost.matchedQuantity >= validTradeQuantity
         ? roundMoney(tradeFinalAmount - tradeSellCost.cost)
         : null;
+    const exchangeRatePreviewText = selectedCurrency === DEFAULT_CURRENCY || shouldUseSavedExchangeRate
+        ? null
+        : exchangeRatePreviewStatus === 'loading'
+            ? '汇率刷新中'
+            : exchangeRatePreviewStatus === 'error'
+                ? '需联网刷新汇率'
+                : null;
     const currentInventory = isTrading && type === 'income'
         ? isCardKeyCategory ? availableSellCardKeys.length : availableSellLots.reduce((sum, lot) => roundMoney(sum + lot.remainingQuantity), 0)
         : 0;
     const inputDateValue = useMemo(() => format(date, 'yyyy-MM-dd'), [date]);
     const isKeypadHidden = isNoteFocused || isKeypadCollapsed;
+    const exchangeRateSnapshotLabel = useMemo(() => {
+        if (!isTrading || !initialTransaction?.id || selectedCurrency === DEFAULT_CURRENCY) return null;
+        const rate = shouldUseSavedExchangeRate ? savedExchangeRateToCny : previewExchangeRateToCny;
+        if (!rate || !Number.isFinite(rate)) return `原币种 ${selectedCurrency}`;
+        const updatedAt = Number(initialTransaction.exchangeRateUpdatedAt || 0);
+        const updatedAtText = updatedAt > 0 ? ` · ${format(new Date(updatedAt), 'yyyy/MM/dd')}` : '';
+        return `原币种 ${selectedCurrency} · 入账汇率 1 ${selectedCurrency} = ${formatResultNumber(rate)} CNY${updatedAtText}`;
+    }, [isTrading, initialTransaction?.id, initialTransaction?.exchangeRateUpdatedAt, selectedCurrency, shouldUseSavedExchangeRate, savedExchangeRateToCny, previewExchangeRateToCny]);
 
     return (
         <div
@@ -1424,7 +1545,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                                     {selectedCategory ? `${selectedCategory.name} ${isCardKeyCategory ? '卡密买入' : '普通买入'}` : '选择买入类目'}
                                 </div>
                                 <div className="text-xs text-ios-subtext tabular-nums">
-                                    {selectedCategory ? `买入手续费 ${selectedCategory.buyFeeRate ?? 0}%` : '选择后再录入单价和数量'}
+                                    {selectedCategory ? `买入手续费 ${selectedCategory.buyFeeRate ?? 0}% · ${selectedCurrency} ${getCurrencyName(selectedCurrency)}` : '选择后再录入单价和数量'}
                                 </div>
                             </div>
                             <button
@@ -1595,7 +1716,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                     >
                         <div className="flex items-baseline justify-end gap-1.5 min-w-0">
                             {isTrading && (
-                                <span className="text-xs leading-4 text-ios-subtext shrink-0">单价</span>
+                                <span className="text-xs leading-4 text-ios-subtext shrink-0">单价 {selectedCurrency}</span>
                             )}
                             <span className={clsx(
                                 'font-bold tracking-tight text-ios-text tabular-nums leading-none transition-all duration-200 truncate',
@@ -1664,7 +1785,11 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                             </div>
                         )}
                         <div className="flex items-center justify-between text-xs text-ios-subtext">
-                            <span>小计 {tradeSubtotalAmount !== null ? `${formatResultNumber(calculatedAmount ?? 0)} × ${formatResultNumber(validTradeQuantity)} = ${formatResultNumber(tradeSubtotalAmount)}` : '-'}</span>
+                            <span>
+                                小计 {tradeSubtotalAmount !== null
+                                    ? `${formatResultNumber(calculatedAmount ?? 0)} ${selectedCurrency} × ${formatResultNumber(validTradeQuantity)} = ${formatResultNumber(tradeSubtotalAmount)} ${selectedCurrency}${tradeSubtotalCny !== null && selectedCurrency !== DEFAULT_CURRENCY ? ` ≈ ${formatResultNumber(tradeSubtotalCny)} CNY` : ''}`
+                                    : '-'}
+                            </span>
                         </div>
                         <div className="flex items-center justify-between gap-3 text-xs text-ios-subtext">
                             {type === 'income' ? (
@@ -1691,7 +1816,9 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                             ) : (
                                 <span>手续费 {tradeFeeRate}%：{formatResultNumber(tradeFeeAmount)}</span>
                             )}
-                            <span className="font-medium text-ios-text">最终金额 {tradeFinalAmount !== null ? formatResultNumber(tradeFinalAmount) : '-'}</span>
+                            <span className="font-medium text-ios-text">
+                                最终金额 {tradeFinalAmount !== null ? `${formatResultNumber(tradeFinalAmount)} CNY` : (exchangeRatePreviewText || '-')}
+                            </span>
                         </div>
                         {type === 'income' && (
                             <div className="flex items-center justify-between text-xs text-ios-subtext">
@@ -1706,6 +1833,16 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                                 </span>
                             </div>
                         )}
+                        {exchangeRateSnapshotLabel && (
+                            <div className="text-[10px] text-ios-subtext text-right">
+                                {exchangeRateSnapshotLabel}
+                            </div>
+                        )}
+                        <div className="text-[10px] text-ios-subtext text-right">
+                            <a href="https://www.exchangerate-api.com" target="_blank" rel="noreferrer" className="underline decoration-dotted underline-offset-2">
+                                Rates By Exchange Rate API
+                            </a>
+                        </div>
                     </div>
                 )}
 
@@ -1794,6 +1931,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                                 const sellInventory = tradeCategorySellInventory.get(category.id) ?? 0;
                                 const isOutOfStock = isSellPicker && sellInventory <= 0;
                                 const isSelected = selectedCategoryId === category.id;
+                                const categoryCurrency = normalizeCurrencyCode(isSellPicker ? category.sellCurrency : category.buyCurrency, DEFAULT_CURRENCY);
 
                                 return (
                                     <button
@@ -1825,7 +1963,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                                                 {category.name}
                                             </div>
                                             <div className="text-[11px] text-ios-subtext">
-                                                {(category.tradeItemType ?? 'normal') === 'cardKey' ? '卡密' : '普通'} · {type === 'income' ? '卖出' : '买入'}手续费 {type === 'income' ? category.sellFeeRate ?? 0 : category.buyFeeRate ?? 0}%
+                                                {(category.tradeItemType ?? 'normal') === 'cardKey' ? '卡密' : '普通'} · {type === 'income' ? '卖出' : '买入'}手续费 {type === 'income' ? category.sellFeeRate ?? 0 : category.buyFeeRate ?? 0}% · {categoryCurrency}
                                             </div>
                                             {isSellPicker && (
                                                 <div className={clsx(

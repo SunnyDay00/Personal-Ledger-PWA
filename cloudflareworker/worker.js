@@ -8,6 +8,9 @@ const USERNAME_RE = /^[a-z0-9_.-]{3,40}$/;
 const INVITE_CODE_RE = /^\d{6}$/;
 const DEFAULT_ALLOW_ORIGIN = '*'; // 不在白名单时用这个，测试可暂设为 '*'
 const tableInitPromises = new WeakMap();
+const DEFAULT_CURRENCY = 'CNY';
+const EXCHANGE_RATE_CACHE_PREFIX = 'exchange-rates:';
+const EXCHANGE_RATE_PROVIDER_URL = 'https://open.er-api.com/v6/latest';
 
 // ---- CORS 工具 ----
 function makeCorsHeaders(origin) {
@@ -53,6 +56,11 @@ function stringifyJsonArrayField(value) {
     }
   }
   return null;
+}
+
+function normalizeCurrencyCode(value, fallback = DEFAULT_CURRENCY) {
+  const code = String(value || '').trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(code) ? code : fallback;
 }
 
 function normalizeUsername(username) {
@@ -317,6 +325,7 @@ CREATE TABLE IF NOT EXISTS ledgers_v2 (
   name TEXT,
   theme_color TEXT,
   ledger_type TEXT DEFAULT 'accounting',
+  display_currency TEXT DEFAULT 'CNY',
   created_at INTEGER,
   updated_at INTEGER,
   server_updated_at INTEGER NOT NULL DEFAULT 0,
@@ -333,6 +342,8 @@ CREATE TABLE IF NOT EXISTS categories_v2 (
   trade_item_type TEXT DEFAULT 'normal',
   buy_fee_rate REAL DEFAULT 0,
   sell_fee_rate REAL DEFAULT 0,
+  buy_currency TEXT DEFAULT 'CNY',
+  sell_currency TEXT DEFAULT 'CNY',
   "order" INTEGER,
   is_custom INTEGER,
   updated_at INTEGER,
@@ -367,6 +378,12 @@ CREATE TABLE IF NOT EXISTS transactions_v2 (
   trade_allocations TEXT,
   trade_keys TEXT,
   trade_key_allocations TEXT,
+  currency_code TEXT DEFAULT 'CNY',
+  original_amount REAL,
+  original_gross_amount REAL,
+  exchange_rate_to_cny REAL DEFAULT 1,
+  exchange_rate_updated_at INTEGER,
+  exchange_rate_source TEXT,
   date INTEGER,
   note TEXT,
   attachments TEXT,
@@ -406,6 +423,9 @@ export default {
     if (url.pathname === '/health') return text('ok', 200, origin);
     if (url.pathname === '/time' && request.method === 'GET') {
       return json({ serverTime: Date.now() }, 200, origin);
+    }
+    if (url.pathname === '/exchange-rates/latest' && request.method === 'GET') {
+      return exchangeRatesHandler(url, env, origin);
     }
 
     if (url.pathname === '/auth/register' && request.method === 'POST') {
@@ -463,6 +483,84 @@ export default {
   }
 };
 
+async function exchangeRatesHandler(url, env, origin) {
+  const base = normalizeCurrencyCode(url.searchParams.get('base') || DEFAULT_CURRENCY);
+  if (base !== DEFAULT_CURRENCY) {
+    return json({ error: 'Only CNY base rates are supported' }, 400, origin);
+  }
+
+  const cacheKey = `${EXCHANGE_RATE_CACHE_PREFIX}${base}`;
+  let cached = null;
+  if (env.SYNC_KV) {
+    try {
+      cached = await env.SYNC_KV.get(cacheKey, 'json');
+    } catch (error) {
+      console.warn('Exchange rate cache read failed', error);
+    }
+  }
+
+  const now = Date.now();
+  if (cached?.payload && Number(cached.expiresAt || 0) > now) {
+    return json({ ...cached.payload, cached: true }, 200, origin);
+  }
+
+  try {
+    const upstream = await fetch(`${EXCHANGE_RATE_PROVIDER_URL}/${base}`, {
+      headers: { Accept: 'application/json' },
+      cf: { cacheTtl: 3600, cacheEverything: true },
+    });
+    if (!upstream.ok) {
+      throw new Error(`Exchange rate provider returned ${upstream.status}`);
+    }
+
+    const data = await upstream.json();
+    if (data?.result !== 'success' || !data?.rates || typeof data.rates !== 'object') {
+      throw new Error('Exchange rate provider returned invalid data');
+    }
+
+    const normalizedRates = {};
+    for (const [code, value] of Object.entries(data.rates)) {
+      const normalizedCode = normalizeCurrencyCode(code, '');
+      const parsed = Number(value);
+      if (normalizedCode && Number.isFinite(parsed) && parsed > 0) {
+        normalizedRates[normalizedCode] = parsed;
+      }
+    }
+    normalizedRates.CNY = 1;
+
+    const payload = {
+      result: 'success',
+      provider: data.provider || 'https://www.exchangerate-api.com',
+      documentation: data.documentation || 'https://www.exchangerate-api.com/docs/free',
+      terms_of_use: data.terms_of_use || 'https://www.exchangerate-api.com/terms',
+      time_last_update_unix: Number(data.time_last_update_unix || 0) || null,
+      time_last_update_utc: data.time_last_update_utc || '',
+      time_next_update_unix: Number(data.time_next_update_unix || 0) || null,
+      time_next_update_utc: data.time_next_update_utc || '',
+      base_code: base,
+      rates: normalizedRates,
+    };
+
+    const nextUpdateMs = payload.time_next_update_unix ? payload.time_next_update_unix * 1000 : now + 24 * 60 * 60 * 1000;
+    const ttlSeconds = Math.max(300, Math.ceil((nextUpdateMs - now) / 1000));
+    if (env.SYNC_KV) {
+      await env.SYNC_KV.put(
+        cacheKey,
+        JSON.stringify({ payload, expiresAt: nextUpdateMs }),
+        { expirationTtl: ttlSeconds }
+      );
+    }
+
+    return json({ ...payload, cached: false }, 200, origin);
+  } catch (error) {
+    console.warn('Exchange rate fetch failed', error);
+    if (cached?.payload) {
+      return json({ ...cached.payload, cached: true, stale: true }, 200, origin);
+    }
+    return json({ error: error?.message || 'Exchange rate fetch failed' }, 502, origin);
+  }
+}
+
 // ---- 辅助：确保表存在 ----
 async function ensureTables(env) {
     let promise = tableInitPromises.get(env.DB);
@@ -505,9 +603,12 @@ async function ensureServerUpdatedAtColumns(env) {
 async function ensureStructuredCompatibilityColumns(env) {
   const columns = [
     { table: AUTH_SYNC_TABLES.ledgers, name: 'ledger_type', ddl: "TEXT DEFAULT 'accounting'" },
+    { table: AUTH_SYNC_TABLES.ledgers, name: 'display_currency', ddl: "TEXT DEFAULT 'CNY'" },
     { table: AUTH_SYNC_TABLES.categories, name: 'trade_item_type', ddl: "TEXT DEFAULT 'normal'" },
     { table: AUTH_SYNC_TABLES.categories, name: 'buy_fee_rate', ddl: 'REAL DEFAULT 0' },
     { table: AUTH_SYNC_TABLES.categories, name: 'sell_fee_rate', ddl: 'REAL DEFAULT 0' },
+    { table: AUTH_SYNC_TABLES.categories, name: 'buy_currency', ddl: "TEXT DEFAULT 'CNY'" },
+    { table: AUTH_SYNC_TABLES.categories, name: 'sell_currency', ddl: "TEXT DEFAULT 'CNY'" },
     { table: AUTH_SYNC_TABLES.transactions, name: 'trade_action', ddl: 'TEXT' },
     { table: AUTH_SYNC_TABLES.transactions, name: 'trade_quantity', ddl: 'REAL' },
     { table: AUTH_SYNC_TABLES.transactions, name: 'trade_gross_amount', ddl: 'REAL' },
@@ -516,6 +617,12 @@ async function ensureStructuredCompatibilityColumns(env) {
     { table: AUTH_SYNC_TABLES.transactions, name: 'trade_allocations', ddl: 'TEXT' },
     { table: AUTH_SYNC_TABLES.transactions, name: 'trade_keys', ddl: 'TEXT' },
     { table: AUTH_SYNC_TABLES.transactions, name: 'trade_key_allocations', ddl: 'TEXT' },
+    { table: AUTH_SYNC_TABLES.transactions, name: 'currency_code', ddl: "TEXT DEFAULT 'CNY'" },
+    { table: AUTH_SYNC_TABLES.transactions, name: 'original_amount', ddl: 'REAL' },
+    { table: AUTH_SYNC_TABLES.transactions, name: 'original_gross_amount', ddl: 'REAL' },
+    { table: AUTH_SYNC_TABLES.transactions, name: 'exchange_rate_to_cny', ddl: 'REAL DEFAULT 1' },
+    { table: AUTH_SYNC_TABLES.transactions, name: 'exchange_rate_updated_at', ddl: 'INTEGER' },
+    { table: AUTH_SYNC_TABLES.transactions, name: 'exchange_rate_source', ddl: 'TEXT' },
   ];
 
   for (const column of columns) {
@@ -527,6 +634,21 @@ async function ensureStructuredCompatibilityColumns(env) {
 
   await env.DB.prepare(
     `UPDATE ${AUTH_SYNC_TABLES.ledgers} SET ledger_type='accounting' WHERE ledger_type IS NULL OR ledger_type=''`
+  ).run();
+  await env.DB.prepare(
+    `UPDATE ${AUTH_SYNC_TABLES.ledgers} SET display_currency='CNY' WHERE display_currency IS NULL OR display_currency=''`
+  ).run();
+  await env.DB.prepare(
+    `UPDATE ${AUTH_SYNC_TABLES.categories} SET buy_currency='CNY' WHERE buy_currency IS NULL OR buy_currency=''`
+  ).run();
+  await env.DB.prepare(
+    `UPDATE ${AUTH_SYNC_TABLES.categories} SET sell_currency='CNY' WHERE sell_currency IS NULL OR sell_currency=''`
+  ).run();
+  await env.DB.prepare(
+    `UPDATE ${AUTH_SYNC_TABLES.transactions} SET currency_code='CNY' WHERE currency_code IS NULL OR currency_code=''`
+  ).run();
+  await env.DB.prepare(
+    `UPDATE ${AUTH_SYNC_TABLES.transactions} SET exchange_rate_to_cny=1 WHERE exchange_rate_to_cny IS NULL OR exchange_rate_to_cny<=0`
   ).run();
 }
 
@@ -871,12 +993,13 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
   // Ledgers
   if (Array.isArray(payload.ledgers) && payload.ledgers.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO ${tables.ledgers} (id,user_id,name,theme_color,ledger_type,created_at,updated_at,server_updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?,?,?)
+      `INSERT INTO ${tables.ledgers} (id,user_id,name,theme_color,ledger_type,display_currency,created_at,updated_at,server_updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT${tables.recordConflict} DO UPDATE SET
          name=excluded.name, 
          theme_color=excluded.theme_color, 
          ledger_type=excluded.ledger_type,
+         display_currency=excluded.display_currency,
          updated_at=excluded.updated_at, 
          server_updated_at=excluded.server_updated_at,
          is_deleted=excluded.is_deleted, 
@@ -898,6 +1021,7 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
         l.name || '',
         l.themeColor || l.theme_color || '#007AFF',
         l.ledgerType || l.ledger_type || 'accounting',
+        normalizeCurrencyCode(l.displayCurrency || l.display_currency || 'CNY'),
         createdAt,
         updatedAt,
         newVersion,
@@ -911,8 +1035,8 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
   // Categories
   if (Array.isArray(payload.categories) && payload.categories.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO ${tables.categories} (id,user_id,ledger_id,name,icon,type,trade_item_type,buy_fee_rate,sell_fee_rate,"order",is_custom,updated_at,server_updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO ${tables.categories} (id,user_id,ledger_id,name,icon,type,trade_item_type,buy_fee_rate,sell_fee_rate,buy_currency,sell_currency,"order",is_custom,updated_at,server_updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT${tables.recordConflict} DO UPDATE SET
          ledger_id=excluded.ledger_id, 
          name=excluded.name, 
@@ -921,6 +1045,8 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
           trade_item_type=excluded.trade_item_type,
          buy_fee_rate=excluded.buy_fee_rate,
          sell_fee_rate=excluded.sell_fee_rate,
+         buy_currency=excluded.buy_currency,
+         sell_currency=excluded.sell_currency,
          "order"=excluded."order", 
          is_custom=excluded.is_custom, 
          updated_at=excluded.updated_at, 
@@ -948,6 +1074,8 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
         c.tradeItemType || c.trade_item_type || 'normal',
         Number(c.buyFeeRate ?? c.buy_fee_rate ?? 0) || 0,
         Number(c.sellFeeRate ?? c.sell_fee_rate ?? 0) || 0,
+        normalizeCurrencyCode(c.buyCurrency || c.buy_currency || 'CNY'),
+        normalizeCurrencyCode(c.sellCurrency || c.sell_currency || 'CNY'),
         c.order ?? 0,
         isCustom ? 1 : 0,
         updatedAt,
@@ -1010,8 +1138,8 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
   // Transactions
   if (Array.isArray(payload.transactions) && payload.transactions.length > 0) {
     const stmt = env.DB.prepare(
-      `INSERT INTO ${tables.transactions} (id,user_id,ledger_id,amount,type,category_id,trade_action,trade_quantity,trade_gross_amount,trade_fee_rate,trade_fee_amount,trade_allocations,trade_keys,trade_key_allocations,date,note,attachments,created_at,updated_at,server_updated_at,is_deleted)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO ${tables.transactions} (id,user_id,ledger_id,amount,type,category_id,trade_action,trade_quantity,trade_gross_amount,trade_fee_rate,trade_fee_amount,trade_allocations,trade_keys,trade_key_allocations,currency_code,original_amount,original_gross_amount,exchange_rate_to_cny,exchange_rate_updated_at,exchange_rate_source,date,note,attachments,created_at,updated_at,server_updated_at,is_deleted)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT${tables.recordConflict} DO UPDATE SET
          ledger_id=excluded.ledger_id, 
          amount=excluded.amount, 
@@ -1025,6 +1153,12 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
           trade_allocations=excluded.trade_allocations,
           trade_keys=excluded.trade_keys,
           trade_key_allocations=excluded.trade_key_allocations,
+          currency_code=excluded.currency_code,
+          original_amount=excluded.original_amount,
+          original_gross_amount=excluded.original_gross_amount,
+          exchange_rate_to_cny=excluded.exchange_rate_to_cny,
+          exchange_rate_updated_at=excluded.exchange_rate_updated_at,
+          exchange_rate_source=excluded.exchange_rate_source,
           date=excluded.date,
           note=excluded.note,
          attachments=excluded.attachments,
@@ -1059,6 +1193,12 @@ async function pushHandler(request, userId, env, origin, ctx, tables) {
         stringifyJsonArrayField(t.tradeAllocations ?? t.trade_allocations),
         stringifyJsonArrayField(t.tradeKeys ?? t.trade_keys),
         stringifyJsonArrayField(t.tradeKeyAllocations ?? t.trade_key_allocations),
+        normalizeCurrencyCode(t.currencyCode || t.currency_code || 'CNY'),
+        t.originalAmount ?? t.original_amount ?? null,
+        t.originalGrossAmount ?? t.original_gross_amount ?? null,
+        t.exchangeRateToCny ?? t.exchange_rate_to_cny ?? null,
+        t.exchangeRateUpdatedAt ?? t.exchange_rate_updated_at ?? null,
+        t.exchangeRateSource || t.exchange_rate_source || null,
         t.date || now,
         t.note || '',
         JSON.stringify(t.attachments || []),

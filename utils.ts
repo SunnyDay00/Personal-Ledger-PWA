@@ -1,7 +1,8 @@
 
 import { ClassValue, clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { AppState, Transaction, Category, Ledger, CategoryType, TradeItemType } from './types';
+import { AppState, Transaction, Category, CurrencyCode, ExchangeRatesSnapshot, Ledger, CategoryType, TradeItemType } from './types';
+import { DEFAULT_CURRENCY, SUPPORTED_CURRENCIES } from './constants';
 import { format } from 'date-fns';
 
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
@@ -12,11 +13,90 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export function formatCurrency(amount: number): string {
+const currencyCodes = new Set(SUPPORTED_CURRENCIES.map(currency => currency.code));
+
+export function normalizeCurrencyCode(value: unknown, fallback: CurrencyCode = DEFAULT_CURRENCY): CurrencyCode {
+  const code = String(value || '').trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(code) && currencyCodes.has(code) ? code : fallback;
+}
+
+export function getCurrencyName(code: CurrencyCode): string {
+  return SUPPORTED_CURRENCIES.find(currency => currency.code === code)?.name || code;
+}
+
+export function getLedgerDisplayCurrency(ledger?: Pick<Ledger, 'displayCurrency'> | null): CurrencyCode {
+  return normalizeCurrencyCode(ledger?.displayCurrency, DEFAULT_CURRENCY);
+}
+
+const formatCurrencyNumber = (amount: number): string => {
+  const hasDecimal = amount % 1 !== 0;
+  return new Intl.NumberFormat('zh-CN', {
+    minimumFractionDigits: hasDecimal ? 2 : 0,
+    maximumFractionDigits: hasDecimal ? 2 : 2,
+  }).format(amount);
+};
+
+export function formatCurrency(
+  amount: number,
+  currency: CurrencyCode = DEFAULT_CURRENCY,
+  options: { hideCurrency?: boolean } = {}
+): string {
+  const normalizedCurrency = normalizeCurrencyCode(currency);
+  if (options.hideCurrency) return formatCurrencyNumber(amount);
+
+  const hasDecimal = amount % 1 !== 0;
+  try {
+    return new Intl.NumberFormat('zh-CN', {
+      style: 'currency',
+      currency: normalizedCurrency,
+      minimumFractionDigits: hasDecimal ? 2 : 0,
+      maximumFractionDigits: hasDecimal ? 2 : 2
+    }).format(amount);
+  } catch {
+    return `${normalizedCurrency} ${formatCurrencyNumber(amount)}`;
+  }
+}
+
+export function convertCnyToDisplayCurrency(
+  amount: number,
+  currency: CurrencyCode = DEFAULT_CURRENCY,
+  exchangeRates?: ExchangeRatesSnapshot
+): number {
+  const normalizedCurrency = normalizeCurrencyCode(currency);
+  if (normalizedCurrency === DEFAULT_CURRENCY) return amount;
+  const rate = Number(exchangeRates?.rates?.[normalizedCurrency]);
+  return Number.isFinite(rate) && rate > 0 ? amount * rate : amount;
+}
+
+export function formatDisplayCurrency(
+  amountCny: number,
+  ledgerOrCurrency?: Pick<Ledger, 'displayCurrency'> | CurrencyCode | null,
+  exchangeRates?: ExchangeRatesSnapshot,
+  options: { hideCurrency?: boolean } = {}
+): string {
+  const currency = typeof ledgerOrCurrency === 'string'
+    ? normalizeCurrencyCode(ledgerOrCurrency)
+    : getLedgerDisplayCurrency(ledgerOrCurrency);
+  const hasRate = currency === DEFAULT_CURRENCY || !!exchangeRates?.rates?.[currency];
+  const outputCurrency = hasRate ? currency : DEFAULT_CURRENCY;
+  const outputAmount = hasRate ? convertCnyToDisplayCurrency(amountCny, currency, exchangeRates) : amountCny;
+  return formatCurrency(outputAmount, outputCurrency, options);
+}
+
+export function getExchangeRateToCny(currency: CurrencyCode, exchangeRates?: ExchangeRatesSnapshot): number | null {
+  const normalizedCurrency = normalizeCurrencyCode(currency);
+  if (normalizedCurrency === DEFAULT_CURRENCY) return 1;
+  const cnyToCurrencyRate = Number(exchangeRates?.rates?.[normalizedCurrency]);
+  if (!Number.isFinite(cnyToCurrencyRate) || cnyToCurrencyRate <= 0) return null;
+  return 1 / cnyToCurrencyRate;
+}
+
+export function formatCurrencyAmount(amount: number, currency: CurrencyCode = DEFAULT_CURRENCY): string {
+  const normalizedCurrency = normalizeCurrencyCode(currency);
   const hasDecimal = amount % 1 !== 0;
   return new Intl.NumberFormat('zh-CN', {
     style: 'currency',
-    currency: 'CNY',
+    currency: normalizedCurrency,
     minimumFractionDigits: hasDecimal ? 2 : 0,
     maximumFractionDigits: hasDecimal ? 2 : 0
   }).format(amount);
@@ -70,9 +150,10 @@ export async function exportToJson(data: object, filename: string) {
 export function transactionsToCsv(transactions: Transaction[], categories: Category[] = [], ledgers: Ledger[] = []): string {
     const headers = [
         'Time', 'Category', 'Amount', 'Type', 'Note', 'Ledger',
-        'id', 'ledgerId', 'categoryId', 'rawType', 'ledgerType',
+        'id', 'ledgerId', 'categoryId', 'rawType', 'ledgerType', 'ledgerDisplayCurrency',
         'tradeAction', 'tradeQuantity', 'tradeGrossAmount', 'tradeFeeRate', 'tradeFeeAmount', 'tradeAllocations', 'tradeKeys', 'tradeKeyAllocations',
-        'categoryBuyFeeRate', 'categorySellFeeRate', 'categoryTradeItemType',
+        'transactionCurrencyCode', 'originalAmount', 'originalGrossAmount', 'exchangeRateToCny', 'exchangeRateUpdatedAt', 'exchangeRateSource',
+        'categoryBuyFeeRate', 'categorySellFeeRate', 'categoryBuyCurrency', 'categorySellCurrency', 'categoryTradeItemType',
         'dateTs', 'createdAtTs', 'updatedAtTs', 'isDeleted', 'attachments'
     ];
     
@@ -101,6 +182,7 @@ export function transactionsToCsv(transactions: Transaction[], categories: Categ
             t.categoryId,
             t.type,
             ledgerType,
+            ledger?.displayCurrency || DEFAULT_CURRENCY,
             t.tradeAction || '',
             t.tradeQuantity || '',
             t.tradeGrossAmount || '',
@@ -109,8 +191,16 @@ export function transactionsToCsv(transactions: Transaction[], categories: Categ
             t.tradeAllocations && t.tradeAllocations.length > 0 ? `"${JSON.stringify(t.tradeAllocations).replace(/"/g, '""')}"` : '',
             t.tradeKeys && t.tradeKeys.length > 0 ? `"${JSON.stringify(t.tradeKeys).replace(/"/g, '""')}"` : '',
             t.tradeKeyAllocations && t.tradeKeyAllocations.length > 0 ? `"${JSON.stringify(t.tradeKeyAllocations).replace(/"/g, '""')}"` : '',
+            t.currencyCode || DEFAULT_CURRENCY,
+            t.originalAmount ?? '',
+            t.originalGrossAmount ?? '',
+            t.exchangeRateToCny ?? '',
+            t.exchangeRateUpdatedAt ?? '',
+            t.exchangeRateSource || '',
             cat?.buyFeeRate ?? '',
             cat?.sellFeeRate ?? '',
+            cat?.buyCurrency || DEFAULT_CURRENCY,
+            cat?.sellCurrency || DEFAULT_CURRENCY,
             cat?.tradeItemType ?? 'normal',
             t.date,
             t.createdAt,
@@ -153,7 +243,7 @@ const detectDelimiter = (headerLine: string): ',' | '\t' => {
     return headerLine.includes('\t') ? '\t' : ',';
 };
 
-export function extractCategoriesFromCsv(csvContent: string): { id: string, name: string, type: CategoryType, buyFeeRate?: number, sellFeeRate?: number, tradeItemType?: TradeItemType }[] {
+export function extractCategoriesFromCsv(csvContent: string): { id: string, name: string, type: CategoryType, buyFeeRate?: number, sellFeeRate?: number, buyCurrency?: CurrencyCode, sellCurrency?: CurrencyCode, tradeItemType?: TradeItemType }[] {
     let content = csvContent;
     if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
     
@@ -170,12 +260,14 @@ export function extractCategoriesFromCsv(csvContent: string): { id: string, name
         ledgerType: headers.indexOf('ledgerType'),
         buyFeeRate: headers.indexOf('categoryBuyFeeRate'),
         sellFeeRate: headers.indexOf('categorySellFeeRate'),
+        buyCurrency: headers.indexOf('categoryBuyCurrency'),
+        sellCurrency: headers.indexOf('categorySellCurrency'),
         tradeItemType: headers.indexOf('categoryTradeItemType')
     };
 
     if (idx.name === -1) return [];
 
-    const uniqueMap = new Map<string, { id: string, name: string, type: CategoryType, buyFeeRate?: number, sellFeeRate?: number, tradeItemType?: TradeItemType }>();
+    const uniqueMap = new Map<string, { id: string, name: string, type: CategoryType, buyFeeRate?: number, sellFeeRate?: number, buyCurrency?: CurrencyCode, sellCurrency?: CurrencyCode, tradeItemType?: TradeItemType }>();
 
     for (let i = 1; i < lines.length; i++) {
         try {
@@ -191,6 +283,8 @@ export function extractCategoriesFromCsv(csvContent: string): { id: string, name
             if (idx.ledgerType !== -1 && cols[idx.ledgerType] === 'trading') type = 'trade';
             const buyFeeRate = idx.buyFeeRate !== -1 ? Number(cols[idx.buyFeeRate] || 0) : 0;
             const sellFeeRate = idx.sellFeeRate !== -1 ? Number(cols[idx.sellFeeRate] || 0) : 0;
+            const buyCurrency = idx.buyCurrency !== -1 ? normalizeCurrencyCode(cols[idx.buyCurrency]) : DEFAULT_CURRENCY;
+            const sellCurrency = idx.sellCurrency !== -1 ? normalizeCurrencyCode(cols[idx.sellCurrency]) : DEFAULT_CURRENCY;
             const tradeItemType: TradeItemType = idx.tradeItemType !== -1 && (cols[idx.tradeItemType] === 'cardKey' || cols[idx.tradeItemType] === 'card_key')
                 ? 'cardKey'
                 : 'normal';
@@ -198,7 +292,7 @@ export function extractCategoriesFromCsv(csvContent: string): { id: string, name
             if (name) {
                 const key = id || name; 
                 if (!uniqueMap.has(key)) {
-                    uniqueMap.set(key, { id: id || `auto_${Date.now()}_${Math.floor(Math.random()*1000)}`, name, type, buyFeeRate, sellFeeRate, tradeItemType });
+                    uniqueMap.set(key, { id: id || `auto_${Date.now()}_${Math.floor(Math.random()*1000)}`, name, type, buyFeeRate, sellFeeRate, buyCurrency, sellCurrency, tradeItemType });
                 }
             }
         } catch (e) { continue; }
@@ -223,6 +317,7 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
         id: 0, ledgerId: 1, amount: 2, type: 3, categoryId: 4, date: 5, note: 6, createdAt: 7, updatedAt: 8,
         timeStr: -1, isDeleted: -1, catName: -1, ledgerName: -1, attachments: -1,
         tradeAction: -1, tradeQuantity: -1, tradeGrossAmount: -1, tradeFeeRate: -1, tradeFeeAmount: -1, tradeAllocations: -1,
+        currencyCode: -1, originalAmount: -1, originalGrossAmount: -1, exchangeRateToCny: -1, exchangeRateUpdatedAt: -1, exchangeRateSource: -1,
         tradeKeys: -1, tradeKeyAllocations: -1
     };
 
@@ -248,6 +343,12 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
             tradeFeeRate: headers.indexOf('tradeFeeRate'),
             tradeFeeAmount: headers.indexOf('tradeFeeAmount'),
             tradeAllocations: headers.indexOf('tradeAllocations'),
+            currencyCode: headers.indexOf('transactionCurrencyCode'),
+            originalAmount: headers.indexOf('originalAmount'),
+            originalGrossAmount: headers.indexOf('originalGrossAmount'),
+            exchangeRateToCny: headers.indexOf('exchangeRateToCny'),
+            exchangeRateUpdatedAt: headers.indexOf('exchangeRateUpdatedAt'),
+            exchangeRateSource: headers.indexOf('exchangeRateSource'),
             tradeKeys: headers.indexOf('tradeKeys'),
             tradeKeyAllocations: headers.indexOf('tradeKeyAllocations')
         };
@@ -334,6 +435,12 @@ export function parseCsvToTransactions(csvContent: string): Transaction[] {
                 tradeAllocations,
                 tradeKeys,
                 tradeKeyAllocations,
+                currencyCode: idx.currencyCode !== -1 && cols[idx.currencyCode] ? normalizeCurrencyCode(cols[idx.currencyCode]) : DEFAULT_CURRENCY,
+                originalAmount: idx.originalAmount !== -1 && cols[idx.originalAmount] ? Number(cols[idx.originalAmount]) : undefined,
+                originalGrossAmount: idx.originalGrossAmount !== -1 && cols[idx.originalGrossAmount] ? Number(cols[idx.originalGrossAmount]) : undefined,
+                exchangeRateToCny: idx.exchangeRateToCny !== -1 && cols[idx.exchangeRateToCny] ? Number(cols[idx.exchangeRateToCny]) : undefined,
+                exchangeRateUpdatedAt: idx.exchangeRateUpdatedAt !== -1 && cols[idx.exchangeRateUpdatedAt] ? Number(cols[idx.exchangeRateUpdatedAt]) : undefined,
+                exchangeRateSource: idx.exchangeRateSource !== -1 && cols[idx.exchangeRateSource] ? cols[idx.exchangeRateSource] : undefined,
                 date: dateTs,
                 note: note || '',
                 createdAt: (idx.createdAt !== -1 && parseInt(cols[idx.createdAt])) || Date.now(),

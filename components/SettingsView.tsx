@@ -3,14 +3,14 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { CloudSyncButton } from './CloudSyncButton';
-import { THEME_PRESETS, AVAILABLE_ICONS, DEFAULT_CATEGORIES, DEFAULT_TRADE_CATEGORIES } from '../constants';
+import { THEME_PRESETS, AVAILABLE_ICONS, DEFAULT_CATEGORIES, DEFAULT_TRADE_CATEGORIES, DEFAULT_CURRENCY, SUPPORTED_CURRENCIES } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
 import { generateId, exportToJson, exportToCsv, cn, readCsvFileWithEncoding, formatCurrency } from '../utils';
 import { WebDAVService } from '../services/webdav';
 import { db } from '../services/db';
 import { format } from 'date-fns';
 import { SyncLogModal } from './SyncLogModal';
-import { Ledger, Category, CategoryType, LedgerType, TradeItemType, HomeQuickAction, TransactionType, AutoRecordRule, AutoRecordScheduleKind } from '../types';
+import { Ledger, Category, CategoryType, CurrencyCode, LedgerType, TradeItemType, HomeQuickAction, TransactionType, AutoRecordRule, AutoRecordScheduleKind } from '../types';
 import { feedback } from '../services/feedback';
 import { imageService } from '../services/imageService';
 import { normalizeAppSettings, normalizeBackupAutoEnabled, normalizeBackupIntervalDays, normalizeBackupReminderDays } from '../services/settingsUtils';
@@ -156,8 +156,8 @@ export const SettingsView: React.FC = () => {
 
   const [showSyncLog, setShowSyncLog] = useState(false);
   const [showLedgerSelect, setShowLedgerSelect] = useState(false);
-  const [ledgerModal, setLedgerModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; color: string; ledgerType: LedgerType }>(
-    { isOpen: false, mode: 'create', name: '', color: '#007AFF', ledgerType: 'accounting' }
+  const [ledgerModal, setLedgerModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; color: string; ledgerType: LedgerType; displayCurrency: CurrencyCode }>(
+    { isOpen: false, mode: 'create', name: '', color: '#007AFF', ledgerType: 'accounting', displayCurrency: DEFAULT_CURRENCY }
   );
   const [quickActionModal, setQuickActionModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; title: string; ledgerId: string; type: TransactionType }>(
     { isOpen: false, mode: 'create', title: '', ledgerId: '', type: 'expense' }
@@ -187,6 +187,8 @@ export const SettingsView: React.FC = () => {
   const [newCatIcon, setNewCatIcon] = useState('Circle');
   const [newCatBuyFeeRate, setNewCatBuyFeeRate] = useState('0');
   const [newCatSellFeeRate, setNewCatSellFeeRate] = useState('0');
+  const [newCatBuyCurrency, setNewCatBuyCurrency] = useState<CurrencyCode>(DEFAULT_CURRENCY);
+  const [newCatSellCurrency, setNewCatSellCurrency] = useState<CurrencyCode>(DEFAULT_CURRENCY);
   const [newCatTradeItemType, setNewCatTradeItemType] = useState<TradeItemType>('normal');
   const [isReordering, setIsReordering] = useState(false);
   const [dragCategoryId, setDragCategoryId] = useState<string | null>(null);
@@ -491,8 +493,8 @@ export const SettingsView: React.FC = () => {
     }
   };
 
-  const openCreateLedger = () => setLedgerModal({ isOpen: true, mode: 'create', name: '', color: '#007AFF', ledgerType: 'accounting' });
-  const openEditLedger = (l: Ledger) => setLedgerModal({ isOpen: true, mode: 'edit', id: l.id, name: l.name, color: l.themeColor, ledgerType: normalizeLedgerType(l.ledgerType) });
+  const openCreateLedger = () => setLedgerModal({ isOpen: true, mode: 'create', name: '', color: '#007AFF', ledgerType: 'accounting', displayCurrency: DEFAULT_CURRENCY });
+  const openEditLedger = (l: Ledger) => setLedgerModal({ isOpen: true, mode: 'edit', id: l.id, name: l.name, color: l.themeColor, ledgerType: normalizeLedgerType(l.ledgerType), displayCurrency: l.displayCurrency || DEFAULT_CURRENCY });
 
   const saveLedger = async () => {
     if (!ledgerModal.name.trim()) {
@@ -510,6 +512,7 @@ export const SettingsView: React.FC = () => {
           name: ledgerModal.name,
           themeColor: ledgerModal.color,
           ledgerType: hasTransactions ? normalizeLedgerType(original.ledgerType) : ledgerModal.ledgerType,
+          displayCurrency: ledgerModal.displayCurrency || DEFAULT_CURRENCY,
           updatedAt: Date.now()
         };
         dispatch({ type: 'UPDATE_LEDGER', payload: updated });
@@ -523,6 +526,7 @@ export const SettingsView: React.FC = () => {
         name: ledgerModal.name,
         themeColor: ledgerModal.color,
         ledgerType: ledgerModal.ledgerType,
+        displayCurrency: ledgerModal.displayCurrency || DEFAULT_CURRENCY,
         createdAt: Date.now(),
         updatedAt: Date.now(),
         isDeleted: false
@@ -530,7 +534,7 @@ export const SettingsView: React.FC = () => {
       // Use context method to ensure default categories are seeded
       await addLedger(newLedger);
     }
-    setLedgerModal({ isOpen: false, mode: 'create', id: undefined, name: '', color: '#007AFF', ledgerType: 'accounting' });
+    setLedgerModal({ isOpen: false, mode: 'create', id: undefined, name: '', color: '#007AFF', ledgerType: 'accounting', displayCurrency: DEFAULT_CURRENCY });
   };
 
   const handleDeleteLedger = (l: Ledger) => {
@@ -947,6 +951,8 @@ export const SettingsView: React.FC = () => {
         tradeItemType: isSelectedTradingLedger ? newCatTradeItemType : undefined,
         buyFeeRate: isSelectedTradingLedger ? Number(newCatBuyFeeRate || 0) : 0,
         sellFeeRate: isSelectedTradingLedger ? Number(newCatSellFeeRate || 0) : 0,
+        buyCurrency: isSelectedTradingLedger ? newCatBuyCurrency : undefined,
+        sellCurrency: isSelectedTradingLedger ? newCatSellCurrency : undefined,
         order,
         isCustom: true,
         updatedAt: Date.now(),
@@ -957,6 +963,8 @@ export const SettingsView: React.FC = () => {
     setNewCatIcon('Circle');
     setNewCatBuyFeeRate('0');
     setNewCatSellFeeRate('0');
+    setNewCatBuyCurrency(DEFAULT_CURRENCY);
+    setNewCatSellCurrency(DEFAULT_CURRENCY);
     setNewCatTradeItemType('normal');
     feedback.play('success');
     feedback.vibrate('success');
@@ -968,6 +976,8 @@ export const SettingsView: React.FC = () => {
     setNewCatIcon(c.icon);
     setNewCatBuyFeeRate(String(c.buyFeeRate ?? 0));
     setNewCatSellFeeRate(String(c.sellFeeRate ?? 0));
+    setNewCatBuyCurrency(c.buyCurrency || DEFAULT_CURRENCY);
+    setNewCatSellCurrency(c.sellCurrency || DEFAULT_CURRENCY);
     setNewCatTradeItemType(c.tradeItemType ?? 'normal');
   };
 
@@ -977,12 +987,14 @@ export const SettingsView: React.FC = () => {
       window.alert('已有交易的买卖类目不能切换普通/卡密类型');
       return;
     }
-    dispatch({ type: 'UPDATE_CATEGORY', payload: { ...editingCat, name: newCatName, icon: newCatIcon, tradeItemType: isSelectedTradingLedger ? newCatTradeItemType : editingCat.tradeItemType, buyFeeRate: Number(newCatBuyFeeRate || 0), sellFeeRate: Number(newCatSellFeeRate || 0), updatedAt: Date.now() } });
+    dispatch({ type: 'UPDATE_CATEGORY', payload: { ...editingCat, name: newCatName, icon: newCatIcon, tradeItemType: isSelectedTradingLedger ? newCatTradeItemType : editingCat.tradeItemType, buyFeeRate: Number(newCatBuyFeeRate || 0), sellFeeRate: Number(newCatSellFeeRate || 0), buyCurrency: isSelectedTradingLedger ? newCatBuyCurrency : editingCat.buyCurrency, sellCurrency: isSelectedTradingLedger ? newCatSellCurrency : editingCat.sellCurrency, updatedAt: Date.now() } });
     setEditingCat(null);
     setNewCatName('');
     setNewCatIcon('Circle');
     setNewCatBuyFeeRate('0');
     setNewCatSellFeeRate('0');
+    setNewCatBuyCurrency(DEFAULT_CURRENCY);
+    setNewCatSellCurrency(DEFAULT_CURRENCY);
     setNewCatTradeItemType('normal');
   };
 
@@ -1731,7 +1743,7 @@ export const SettingsView: React.FC = () => {
               <div className="w-4 h-4 rounded-full" style={{ backgroundColor: l.themeColor }}></div>
               <div className="flex flex-col">
                 <span className="font-medium text-sm">{l.name}</span>
-                <span className="text-[10px] text-ios-subtext">创建于 {format(l.createdAt, 'yyyy/MM/dd')} · {getLedgerTypeLabel(l)}</span>
+                <span className="text-[10px] text-ios-subtext">创建于 {format(l.createdAt, 'yyyy/MM/dd')} · {getLedgerTypeLabel(l)} · 显示 {l.displayCurrency || DEFAULT_CURRENCY}</span>
               </div>
               {state.currentLedgerId === l.id && <span className="text-[10px] bg-gray-100 dark:bg-zinc-800 px-2 py-0.5 rounded text-ios-subtext">当前</span>}
             </div>
@@ -1844,6 +1856,21 @@ export const SettingsView: React.FC = () => {
               </section>
 
               <section>
+                <label className="text-xs font-medium text-ios-subtext ml-1 mb-2 block">显示货币</label>
+                <select
+                  value={ledgerModal.displayCurrency}
+                  onChange={(event) => setLedgerModal(prev => ({ ...prev, displayCurrency: event.target.value }))}
+                  className="w-full bg-white dark:bg-zinc-900 border border-ios-border p-4 rounded-2xl text-base outline-none focus:ring-2 focus:ring-ios-primary/20 min-h-[52px]"
+                >
+                  {SUPPORTED_CURRENCIES.map(currency => (
+                    <option key={currency.code} value={currency.code}>
+                      {currency.code} · {currency.name}
+                    </option>
+                  ))}
+                </select>
+              </section>
+
+              <section>
                 <div className="ml-1 mb-3">
                   <h4 className="text-xs font-semibold text-ios-subtext uppercase tracking-wider">账本类型</h4>
                   <p className="mt-1 text-xs leading-5 text-ios-subtext">选择后会生成对应的分类和录入方式。</p>
@@ -1947,6 +1974,18 @@ export const SettingsView: React.FC = () => {
                 />
               ))}
             </div>
+            <label className="block text-xs text-ios-subtext mb-1 ml-1">显示货币</label>
+            <select
+              value={ledgerModal.displayCurrency}
+              onChange={(event) => setLedgerModal(prev => ({ ...prev, displayCurrency: event.target.value }))}
+              className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl mb-5 text-sm outline-none"
+            >
+              {SUPPORTED_CURRENCIES.map(currency => (
+                <option key={currency.code} value={currency.code}>
+                  {currency.code} · {currency.name}
+                </option>
+              ))}
+            </select>
             {(() => {
               const locked = ledgerModal.mode === 'edit' && !!ledgerModal.id && state.transactions.some(transaction => transaction.ledgerId === ledgerModal.id && !transaction.isDeleted);
               return (
@@ -2009,6 +2048,8 @@ export const SettingsView: React.FC = () => {
           tradeItemType: isSelectedTradingLedger ? cat.tradeItemType ?? 'normal' : undefined,
           buyFeeRate: cat.buyFeeRate ?? 0,
           sellFeeRate: cat.sellFeeRate ?? 0,
+          buyCurrency: isSelectedTradingLedger ? cat.buyCurrency ?? DEFAULT_CURRENCY : undefined,
+          sellCurrency: isSelectedTradingLedger ? cat.sellCurrency ?? DEFAULT_CURRENCY : undefined,
           order: order++,
           isCustom: false,
           updatedAt: Date.now()
@@ -2240,7 +2281,7 @@ export const SettingsView: React.FC = () => {
                 <span className="text-xs text-center truncate w-full">{c.name}</span>
                 {isSelectedTradingLedger && (
                   <span className="text-[10px] text-ios-subtext text-center leading-tight">
-                    {(c.tradeItemType ?? 'normal') === 'cardKey' ? '卡密' : '普通'} · 买 {c.buyFeeRate ?? 0}% / 卖 {c.sellFeeRate ?? 0}%
+                    {(c.tradeItemType ?? 'normal') === 'cardKey' ? '卡密' : '普通'} · 买 {c.buyFeeRate ?? 0}% {c.buyCurrency || DEFAULT_CURRENCY} / 卖 {c.sellFeeRate ?? 0}% {c.sellCurrency || DEFAULT_CURRENCY}
                   </span>
                 )}
                 {isReordering && (
@@ -2285,6 +2326,8 @@ export const SettingsView: React.FC = () => {
           {!isReordering && (
             <button
               onClick={() => {
+                setNewCatBuyCurrency(DEFAULT_CURRENCY);
+                setNewCatSellCurrency(DEFAULT_CURRENCY);
                 setNewCatTradeItemType('normal');
                 setIsAddingCat(true);
               }}
@@ -2313,6 +2356,8 @@ export const SettingsView: React.FC = () => {
                 setNewCatIcon('Circle');
                 setNewCatBuyFeeRate('0');
                 setNewCatSellFeeRate('0');
+                setNewCatBuyCurrency(DEFAULT_CURRENCY);
+                setNewCatSellCurrency(DEFAULT_CURRENCY);
                 setNewCatTradeItemType('normal');
               }} className="text-ios-subtext">取消</button>
               <h3 className="font-bold text-lg">添加{isSelectedTradingLedger ? '类目' : catType === 'expense' ? '支出' : '收入'}分类</h3>
@@ -2383,6 +2428,35 @@ export const SettingsView: React.FC = () => {
               </div>
             )}
 
+            {isSelectedTradingLedger && (
+              <div className="grid grid-cols-2 gap-3 mb-4">
+                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                  买入货币
+                  <select
+                    value={newCatBuyCurrency}
+                    onChange={(event) => setNewCatBuyCurrency(event.target.value)}
+                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                  >
+                    {SUPPORTED_CURRENCIES.map(currency => (
+                      <option key={currency.code} value={currency.code}>{currency.code} · {currency.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                  卖出货币
+                  <select
+                    value={newCatSellCurrency}
+                    onChange={(event) => setNewCatSellCurrency(event.target.value)}
+                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                  >
+                    {SUPPORTED_CURRENCIES.map(currency => (
+                      <option key={currency.code} value={currency.code}>{currency.code} · {currency.name}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            )}
+
             <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
               <div className="grid grid-cols-6 gap-3 pb-[calc(env(safe-area-inset-bottom)+1rem)]">
                 {AVAILABLE_ICONS.map((icon) => (
@@ -2420,6 +2494,8 @@ export const SettingsView: React.FC = () => {
                   setNewCatIcon('Circle');
                   setNewCatBuyFeeRate('0');
                   setNewCatSellFeeRate('0');
+                  setNewCatBuyCurrency(DEFAULT_CURRENCY);
+                  setNewCatSellCurrency(DEFAULT_CURRENCY);
                   setNewCatTradeItemType('normal');
                 }}
                 className="text-ios-subtext"
@@ -2494,6 +2570,35 @@ export const SettingsView: React.FC = () => {
                     onChange={(e) => setNewCatSellFeeRate(e.target.value)}
                     className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
                   />
+                </label>
+              </div>
+            )}
+
+            {isSelectedTradingLedger && (
+              <div className="grid grid-cols-2 gap-3 mb-4">
+                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                  买入货币
+                  <select
+                    value={newCatBuyCurrency}
+                    onChange={(event) => setNewCatBuyCurrency(event.target.value)}
+                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                  >
+                    {SUPPORTED_CURRENCIES.map(currency => (
+                      <option key={currency.code} value={currency.code}>{currency.code} · {currency.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                  卖出货币
+                  <select
+                    value={newCatSellCurrency}
+                    onChange={(event) => setNewCatSellCurrency(event.target.value)}
+                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                  >
+                    {SUPPORTED_CURRENCIES.map(currency => (
+                      <option key={currency.code} value={currency.code}>{currency.code} · {currency.name}</option>
+                    ))}
+                  </select>
                 </label>
               </div>
             )}

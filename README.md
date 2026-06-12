@@ -13,6 +13,7 @@ Online demo / 在线体验：<https://personal-ledger-pwa.pages.dev/>
 - Local-first personal finance records stored primarily in IndexedDB.
 - Installable PWA with offline-capable static assets through `vite-plugin-pwa` and Workbox.
 - Multiple ledgers, income/expense records, trading-style ledgers, categories, groups, budgets, search, batch operations, and statistics.
+- Ledger display currency can be changed per ledger. Existing data defaults to CNY, and displayed totals are converted from the CNY base amount.
 - Image attachments with local caching and optional remote object storage.
 - WebDAV backup for file-based backup and restore flows.
 - Optional Cloudflare Worker sync backend using D1, KV, and R2, based on the implementation in `cloudflareworker/`.
@@ -38,9 +39,10 @@ The goal of a Codex Security review would be to improve data protection, authent
 - Local ledger creation and management.
 - Accounting ledgers for income and expense records.
 - Trading-style ledgers for buy/sell records, inventory-like quantity tracking, fees, realized profit, and card-key style items.
+- Trading categories can set separate buy and sell currencies. New foreign-currency buy/sell records keep the original currency amount plus an exchange-rate snapshot while storing CNY as the base amount for inventory, cost, and profit math.
 - Category and category group management per ledger.
 - Daily, weekly, monthly, and yearly statistics with charts.
-- Budget display and progress tracking.
+- Budget display, progress tracking, and budget target inputs follow the current ledger display currency while keeping CNY as the stored base.
 - Search, filtering, batch edit, batch delete, and undo delete flows.
 - JSON and CSV import/export.
 - Operation logs and backup logs.
@@ -102,9 +104,11 @@ The goal of a Codex Security review would be to improve data protection, authent
 
 The core app is local-first. Ledger operations are written to IndexedDB before the UI reports success, so records remain available while offline.
 
-The local IndexedDB database stores ledgers, categories, category groups, transactions, settings, operation logs, backup logs, cached images, pending image uploads, and a sync queue. Older local storage and earlier IndexedDB database names are migrated when supported by the current code.
+The local IndexedDB database stores ledgers, categories, category groups, transactions, settings, operation logs, backup logs, cached images, pending image uploads, and a sync queue. Ledger display currency, trading category buy/sell currencies, transaction original-currency amounts, and exchange-rate snapshots are stored with the related records. Older local storage and earlier IndexedDB database names are migrated when supported by the current code, and missing currency fields default to CNY.
 
 When optional Cloudflare sync is enabled, local changes are queued and later pushed to the Worker. If the network is unavailable, a session expires, or sync fails, local data is kept and the queue is retried later.
+
+Exchange-rate lookup uses the public ExchangeRate-API Open Access endpoint through the Cloudflare Worker. The Worker exposes a CNY-base proxy, caches the provider response in `SYNC_KV` until the provider's next update time, and the frontend stores a local cache. Foreign-currency trading records require a fresh rate when they are created or edited; previously saved records keep their original snapshot and do not change when future rates update.
 
 Image attachments are saved locally first. When cloud sync is configured, pending images can be uploaded to R2, while transactions keep attachment keys instead of embedding binary image data.
 
@@ -228,6 +232,9 @@ The current Worker exposes account/session routes, sync routes, image routes, an
 - `GET /image/:key`
 - `DELETE /image/:key`
 - `GET /time`
+- `GET /exchange-rates/latest?base=CNY`
+
+`GET /exchange-rates/latest?base=CNY` is public and returns the latest CNY-base rates used by ledger display conversion and foreign-currency trading entries. Rates are provided by ExchangeRate-API Open Access and require the in-app attribution link `Rates By Exchange Rate API`.
 
 Initialize or update invite-code data when needed:
 

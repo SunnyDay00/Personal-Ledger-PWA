@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { BudgetType, AppSettings } from '../types';
+import { DEFAULT_CURRENCY } from '../constants';
+import { convertCnyToDisplayCurrency, getLedgerDisplayCurrency } from '../utils';
 
 interface BudgetModalProps {
   onClose: () => void;
@@ -10,12 +12,21 @@ interface BudgetModalProps {
 export const BudgetModal: React.FC<BudgetModalProps> = ({ onClose }) => {
   const { state, dispatch } = useApp();
   const { budget } = state.settings;
+  const currentLedger = state.ledgers.find(ledger => ledger.id === state.currentLedgerId) || state.ledgers[0];
+  const ledgerCurrency = getLedgerDisplayCurrency(currentLedger);
+  const displayRate = ledgerCurrency === DEFAULT_CURRENCY ? 1 : Number(state.exchangeRates?.rates?.[ledgerCurrency]);
+  const displayCurrency = Number.isFinite(displayRate) && displayRate > 0 ? ledgerCurrency : DEFAULT_CURRENCY;
   const [activeType, setActiveType] = useState<BudgetType>('month');
 
+  const formatInputAmount = (amountCny: number) => {
+    const converted = convertCnyToDisplayCurrency(amountCny, displayCurrency, state.exchangeRates);
+    return Number.isInteger(converted) ? String(converted) : String(Number(converted.toFixed(2)));
+  };
+
   const buildInputs = () => ({
-    week: { expense: String(budget.targets.week.expense ?? 0), income: String(budget.targets.week.income ?? 0) },
-    month: { expense: String(budget.targets.month.expense ?? 0), income: String(budget.targets.month.income ?? 0) },
-    year: { expense: String(budget.targets.year.expense ?? 0), income: String(budget.targets.year.income ?? 0) },
+    week: { expense: formatInputAmount(budget.targets.week.expense ?? 0), income: formatInputAmount(budget.targets.week.income ?? 0) },
+    month: { expense: formatInputAmount(budget.targets.month.expense ?? 0), income: formatInputAmount(budget.targets.month.income ?? 0) },
+    year: { expense: formatInputAmount(budget.targets.year.expense ?? 0), income: formatInputAmount(budget.targets.year.income ?? 0) },
   });
 
   const [targetInputs, setTargetInputs] = useState(buildInputs);
@@ -30,7 +41,14 @@ export const BudgetModal: React.FC<BudgetModalProps> = ({ onClose }) => {
     budget.targets.month.income,
     budget.targets.year.expense,
     budget.targets.year.income,
+    displayCurrency,
+    displayRate,
   ]);
+
+  const toCnyAmount = (amount: number) => {
+    if (displayCurrency === DEFAULT_CURRENCY) return amount;
+    return amount / displayRate;
+  };
 
   const updateBudget = (updates: Partial<AppSettings['budget']>) => {
     dispatch({ type: 'UPDATE_SETTINGS', payload: { budget: { ...budget, ...updates } } });
@@ -58,13 +76,13 @@ export const BudgetModal: React.FC<BudgetModalProps> = ({ onClose }) => {
     setTargetInputs((prev) => ({ ...prev, [type]: { ...prev[type], [field]: raw } }));
     if (raw === '') return;
     const numVal = parseFloat(raw);
-    if (!Number.isNaN(numVal)) updateTarget(type, field, numVal);
+    if (!Number.isNaN(numVal)) updateTarget(type, field, toCnyAmount(numVal));
   };
 
   const handleTargetBlur = (type: BudgetType, field: 'expense' | 'income') => {
     const current = targetInputs[type][field];
     const numVal = parseFloat(current || '0') || 0;
-    updateTarget(type, field, numVal);
+    updateTarget(type, field, toCnyAmount(numVal));
     setTargetInputs((prev) => ({ ...prev, [type]: { ...prev[type], [field]: String(numVal) } }));
   };
 
@@ -129,9 +147,9 @@ export const BudgetModal: React.FC<BudgetModalProps> = ({ onClose }) => {
 
               <div className="p-4 space-y-4">
                 <div>
-                  <label className="text-xs text-ios-subtext uppercase ml-1">支出预算 ({activeType === 'week' ? '每周' : activeType === 'month' ? '每月' : '每年'})</label>
+                  <label className="text-xs text-ios-subtext uppercase ml-1">支出预算 ({activeType === 'week' ? '每周' : activeType === 'month' ? '每月' : '每年'} · {displayCurrency})</label>
                   <div className="flex items-center gap-2 mt-1 bg-gray-100 dark:bg-zinc-800 px-3 py-2 rounded-xl">
-                    <span className="text-ios-subtext tabular-nums">?</span>
+                    <span className="text-ios-subtext tabular-nums">{displayCurrency}</span>
                     <input
                       type="number"
                       className="flex-1 bg-transparent outline-none tabular-nums text-lg"
@@ -142,9 +160,9 @@ export const BudgetModal: React.FC<BudgetModalProps> = ({ onClose }) => {
                   </div>
                 </div>
                 <div>
-                  <label className="text-xs text-ios-subtext uppercase ml-1">收入目标 ({activeType === 'week' ? '每周' : activeType === 'month' ? '每月' : '每年'})</label>
+                  <label className="text-xs text-ios-subtext uppercase ml-1">收入目标 ({activeType === 'week' ? '每周' : activeType === 'month' ? '每月' : '每年'} · {displayCurrency})</label>
                   <div className="flex items-center gap-2 mt-1 bg-gray-100 dark:bg-zinc-800 px-3 py-2 rounded-xl">
-                    <span className="text-ios-subtext tabular-nums">?</span>
+                    <span className="text-ios-subtext tabular-nums">{displayCurrency}</span>
                     <input
                       type="number"
                       className="flex-1 bg-transparent outline-none tabular-nums text-lg"

@@ -1,7 +1,72 @@
-import { Category, CategoryType, Ledger, AppSettings } from './types';
+import { Category, CategoryType, CurrencyCode, Ledger, AppSettings } from './types';
 
 export const DEFAULT_THEME_COLOR = '#007AFF';
 export const FIXED_SYNC_ENDPOINT = 'https://sync.sssr.edu.kg';
+export const DEFAULT_CURRENCY: CurrencyCode = 'CNY';
+
+export const SUPPORTED_CURRENCIES: Array<{ code: CurrencyCode; name: string }> = [
+  { code: 'CNY', name: '人民币' },
+  { code: 'USD', name: '美元' },
+  { code: 'EUR', name: '欧元' },
+  { code: 'JPY', name: '日元' },
+  { code: 'KRW', name: '韩元' },
+  { code: 'TRY', name: '土耳其里拉' },
+  { code: 'GBP', name: '英镑' },
+  { code: 'HKD', name: '港币' },
+  { code: 'TWD', name: '新台币' },
+  { code: 'MOP', name: '澳门元' },
+  { code: 'SGD', name: '新加坡元' },
+  { code: 'MYR', name: '马来西亚林吉特' },
+  { code: 'THB', name: '泰铢' },
+  { code: 'VND', name: '越南盾' },
+  { code: 'IDR', name: '印尼盾' },
+  { code: 'PHP', name: '菲律宾比索' },
+  { code: 'INR', name: '印度卢比' },
+  { code: 'PKR', name: '巴基斯坦卢比' },
+  { code: 'BDT', name: '孟加拉塔卡' },
+  { code: 'LKR', name: '斯里兰卡卢比' },
+  { code: 'NPR', name: '尼泊尔卢比' },
+  { code: 'AUD', name: '澳大利亚元' },
+  { code: 'NZD', name: '新西兰元' },
+  { code: 'CAD', name: '加拿大元' },
+  { code: 'MXN', name: '墨西哥比索' },
+  { code: 'BRL', name: '巴西雷亚尔' },
+  { code: 'ARS', name: '阿根廷比索' },
+  { code: 'CLP', name: '智利比索' },
+  { code: 'COP', name: '哥伦比亚比索' },
+  { code: 'PEN', name: '秘鲁索尔' },
+  { code: 'CHF', name: '瑞士法郎' },
+  { code: 'SEK', name: '瑞典克朗' },
+  { code: 'NOK', name: '挪威克朗' },
+  { code: 'DKK', name: '丹麦克朗' },
+  { code: 'PLN', name: '波兰兹罗提' },
+  { code: 'CZK', name: '捷克克朗' },
+  { code: 'HUF', name: '匈牙利福林' },
+  { code: 'RON', name: '罗马尼亚列伊' },
+  { code: 'BGN', name: '保加利亚列弗' },
+  { code: 'RUB', name: '俄罗斯卢布' },
+  { code: 'UAH', name: '乌克兰格里夫纳' },
+  { code: 'KZT', name: '哈萨克斯坦坚戈' },
+  { code: 'AED', name: '阿联酋迪拉姆' },
+  { code: 'SAR', name: '沙特里亚尔' },
+  { code: 'QAR', name: '卡塔尔里亚尔' },
+  { code: 'KWD', name: '科威特第纳尔' },
+  { code: 'BHD', name: '巴林第纳尔' },
+  { code: 'OMR', name: '阿曼里亚尔' },
+  { code: 'ILS', name: '以色列新谢克尔' },
+  { code: 'EGP', name: '埃及镑' },
+  { code: 'ZAR', name: '南非兰特' },
+  { code: 'MAD', name: '摩洛哥迪拉姆' },
+  { code: 'NGN', name: '尼日利亚奈拉' },
+  { code: 'KES', name: '肯尼亚先令' },
+  { code: 'MMK', name: '缅甸元' },
+  { code: 'LAK', name: '老挝基普' },
+  { code: 'KHR', name: '柬埔寨瑞尔' },
+  { code: 'MNT', name: '蒙古图格里克' },
+  { code: 'GEL', name: '格鲁吉亚拉里' },
+  { code: 'AMD', name: '亚美尼亚德拉姆' },
+  { code: 'AZN', name: '阿塞拜疆马纳特' },
+];
 
 export const DEFAULT_SETTINGS: AppSettings = {
   themeMode: 'auto',
@@ -43,7 +108,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   exportStartDate: '',
   exportEndDate: '',
   isFirstRun: true,
-  version: '7.6.4',
+  version: '7.6.5',
   debugMode: typeof localStorage !== 'undefined' ? localStorage.getItem('debugMode') === 'true' : false,
   defaultLedgerId: '',
   homeQuickActions: [],
@@ -51,7 +116,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 export const INITIAL_LEDGERS: Ledger[] = [
-  { id: 'l1', name: '个人生活', themeColor: '#007AFF', ledgerType: 'accounting', createdAt: Date.now() },
+  { id: 'l1', name: '个人生活', themeColor: '#007AFF', ledgerType: 'accounting', displayCurrency: DEFAULT_CURRENCY, createdAt: Date.now() },
 ];
 
 export const DEFAULT_CATEGORY_GROUPS = [];
@@ -112,9 +177,9 @@ export const DEFAULT_CATEGORIES: Category[] = [
 }));
 
 export const DEFAULT_TRADE_CATEGORIES: Category[] = [
-  { id: 'trade_default_0', name: '商品', icon: 'Package', type: 'trade', order: 0, isCustom: false, buyFeeRate: 0, sellFeeRate: 0, updatedAt: Date.now(), isDeleted: false },
-  { id: 'trade_default_1', name: '原料', icon: 'Boxes', type: 'trade', order: 1, isCustom: false, buyFeeRate: 0, sellFeeRate: 0, updatedAt: Date.now(), isDeleted: false },
-  { id: 'trade_default_2', name: '其他', icon: 'MoreHorizontal', type: 'trade', order: 2, isCustom: false, buyFeeRate: 0, sellFeeRate: 0, updatedAt: Date.now(), isDeleted: false },
+  { id: 'trade_default_0', name: '商品', icon: 'Package', type: 'trade', order: 0, isCustom: false, buyFeeRate: 0, sellFeeRate: 0, buyCurrency: DEFAULT_CURRENCY, sellCurrency: DEFAULT_CURRENCY, updatedAt: Date.now(), isDeleted: false },
+  { id: 'trade_default_1', name: '原料', icon: 'Boxes', type: 'trade', order: 1, isCustom: false, buyFeeRate: 0, sellFeeRate: 0, buyCurrency: DEFAULT_CURRENCY, sellCurrency: DEFAULT_CURRENCY, updatedAt: Date.now(), isDeleted: false },
+  { id: 'trade_default_2', name: '其他', icon: 'MoreHorizontal', type: 'trade', order: 2, isCustom: false, buyFeeRate: 0, sellFeeRate: 0, buyCurrency: DEFAULT_CURRENCY, sellCurrency: DEFAULT_CURRENCY, updatedAt: Date.now(), isDeleted: false },
 ];
 
 export const THEME_PRESETS = [

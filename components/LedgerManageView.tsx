@@ -4,14 +4,17 @@ import { Icon } from './ui/Icon';
 import { feedback } from '../services/feedback';
 import { format } from 'date-fns';
 import { clsx } from 'clsx';
-import { Ledger, LedgerType } from '../types';
+import { DEFAULT_CURRENCY, SUPPORTED_CURRENCIES } from '../constants';
+import { Ledger, CurrencyCode, LedgerType } from '../types';
 import { getLedgerTypeLabel, getTransactionTypeLabel } from '../services/ledgerUtils';
+import { formatDisplayCurrency } from '../utils';
 
 export const LedgerManageView: React.FC = () => {
     const { state, dispatch, addLedger } = useApp();
     const [isEditing, setIsEditing] = useState(false);
     const [newLedgerName, setNewLedgerName] = useState('');
     const [newLedgerType, setNewLedgerType] = useState<LedgerType>('accounting');
+    const [newLedgerCurrency, setNewLedgerCurrency] = useState<CurrencyCode>(DEFAULT_CURRENCY);
 
     // Compute stats for each ledger
     const ledgerStats = useMemo(() => {
@@ -44,6 +47,7 @@ export const LedgerManageView: React.FC = () => {
             name: newLedgerName.trim(),
             themeColor: '#007AFF', // Default Blue
             ledgerType: newLedgerType,
+            displayCurrency: newLedgerCurrency,
             createdAt: Date.now(),
             updatedAt: Date.now(),
             isDeleted: false
@@ -53,6 +57,7 @@ export const LedgerManageView: React.FC = () => {
         feedback.play('success');
         setNewLedgerName('');
         setNewLedgerType('accounting');
+        setNewLedgerCurrency(DEFAULT_CURRENCY);
         setIsEditing(false);
     };
 
@@ -129,6 +134,16 @@ export const LedgerManageView: React.FC = () => {
                                 </button>
                             ))}
                         </div>
+                        <label className="mt-3 block text-xs font-medium text-gray-500 mb-2">显示货币</label>
+                        <select
+                            value={newLedgerCurrency}
+                            onChange={event => setNewLedgerCurrency(event.target.value)}
+                            className="w-full px-4 py-2 bg-gray-100 dark:bg-zinc-800 rounded-xl outline-none focus:ring-2 focus:ring-ios-primary/50 text-ios-text transition-all"
+                        >
+                            {SUPPORTED_CURRENCIES.map(currency => (
+                                <option key={currency.code} value={currency.code}>{currency.code} · {currency.name}</option>
+                            ))}
+                        </select>
                     </div>
                 )}
 
@@ -180,10 +195,10 @@ export const LedgerManageView: React.FC = () => {
                                                         : "text-red-500 dark:text-red-400"
                                                 )}>
                                                     {(stats.incomeTotal - stats.expenseTotal) >= 0 ? '' : '-'}
-                                                    ¥{Math.abs(stats.incomeTotal - stats.expenseTotal).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                    {formatDisplayCurrency(Math.abs(stats.incomeTotal - stats.expenseTotal), ledger, state.exchangeRates)}
                                                 </span>
                                                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-gray-100 dark:bg-zinc-700 text-ios-subtext">
-                                                    {getLedgerTypeLabel(ledger)}
+                                                    {getLedgerTypeLabel(ledger)} · {ledger.displayCurrency || DEFAULT_CURRENCY}
                                                 </span>
                                             </div>
                                             <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
@@ -200,14 +215,14 @@ export const LedgerManageView: React.FC = () => {
                                             <span>总{expenseLabel}</span>
                                             <span className="text-[11px] text-gray-600 dark:text-gray-400 font-medium mt-0.5">共 {stats.expenseCount} 笔</span>
                                         </div>
-                                        <span className="font-medium text-ios-text text-base">¥{stats.expenseTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 元</span>
+                                        <span className="font-medium text-ios-text text-base">{formatDisplayCurrency(stats.expenseTotal, ledger, state.exchangeRates)}</span>
                                     </div>
                                     <div className="flex justify-between items-center text-gray-500">
                                         <div className="flex flex-col">
                                             <span>总{incomeLabel}</span>
                                             <span className="text-[11px] text-gray-600 dark:text-gray-400 font-medium mt-0.5">共 {stats.incomeCount} 笔</span>
                                         </div>
-                                        <span className="font-medium text-green-600 dark:text-green-400 text-base">¥{stats.incomeTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 元</span>
+                                        <span className="font-medium text-green-600 dark:text-green-400 text-base">{formatDisplayCurrency(stats.incomeTotal, ledger, state.exchangeRates)}</span>
                                     </div>
                                     <div className="col-span-2 mt-1 text-right">
                                         {/* Actions (visible when not active, or just delete) */}

@@ -2,13 +2,14 @@
 import { AppState, AppAction, Transaction, Ledger, OperationLog, BackupLog, Category, CategoryGroup, AppSettings, SyncQueueItem, AuthSession } from '../types';
 import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, DEFAULT_TRADE_CATEGORIES, INITIAL_LEDGERS } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
-import { generateId, extractCategoriesFromCsv, formatCurrency, parseCsvToTransactions } from '../utils';
+import { generateId, extractCategoriesFromCsv, parseCsvToTransactions } from '../utils';
 import { db, initAndMigrateDB, dbAPI, ensureStoresReady, createSyncQueueItem, queueSyncItem, markAllLocalDataForSync, queueCachedImagesForUpload } from '../services/db';
 import { pushToCloud, pullFromCloud, getCloudVersion, D1PullResponse, D1PushResponse, D1SyncPayload } from '../services/d1Sync';
 import { login as authLogin, register as authRegister, logout as authLogout, getMe, AuthApiError } from '../services/auth';
 import { SyncService } from '../services/sync';
 import { feedback } from '../services/feedback';
 import { imageService } from '../services/imageService';
+import { CNY_EXCHANGE_RATES, fetchLatestExchangeRates, getDisplayExchangeRates } from '../services/currency';
 import { normalizeAppSettings, normalizeBackupReminderDays } from '../services/settingsUtils';
 import { checkSystemTimeSkew } from '../services/timeSkew';
 import { createAutoRecordTransaction, createAutoRecordTransactionId, getDueAutoRecordOccurrences, isAutoRecordRunnable } from '../services/autoRecords';
@@ -26,6 +27,7 @@ const initialState: AppState = {
     operationLogs: [],
     backupLogs: [],
     updateLogs: UPDATE_LOGS,
+    exchangeRates: getDisplayExchangeRates(),
     syncStatus: 'idle',
     isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
     pendingSyncCount: 0,
@@ -139,13 +141,16 @@ function appReducer(state: AppState, action: AppAction): AppState {
             return { ...state, pendingSyncCount: action.payload };
         case 'SET_LAST_SYNC_ERROR':
             return { ...state, lastSyncError: action.payload };
+        case 'SET_EXCHANGE_RATES':
+            return { ...state, exchangeRates: action.payload };
         case 'RESTORE_DATA':
             const newSettings = normalizeAppSettings({ ...state.settings, ...(action.payload.settings || {}) }, DEFAULT_SETTINGS);
             return {
                 ...state,
                 ...action.payload,
                 categoryGroups: action.payload.categoryGroups ?? state.categoryGroups,
-                settings: newSettings
+                settings: newSettings,
+                exchangeRates: action.payload.exchangeRates ?? state.exchangeRates
             };
         case 'SET_THEME_MODE':
             return { ...state, settings: { ...state.settings, themeMode: action.payload } };
@@ -420,6 +425,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const haptics = (state.settings as any).enableHaptics ?? true;
         feedback.updateSettings(sound, haptics);
     }, [(state.settings as any).enableSound, (state.settings as any).enableHaptics]);
+
+    useEffect(() => {
+        let cancelled = false;
+        fetchLatestExchangeRates()
+            .then(snapshot => {
+                if (!cancelled) dispatch({ type: 'SET_EXCHANGE_RATES', payload: snapshot });
+            })
+            .catch(error => {
+                console.warn('Failed to refresh exchange rates', error);
+                if (!cancelled && !stateRef.current.exchangeRates) {
+                    dispatch({ type: 'SET_EXCHANGE_RATES', payload: CNY_EXCHANGE_RATES });
+                }
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     // Initialize DB and Load State
     useEffect(() => {
@@ -1511,6 +1534,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                         name: '',
                         themeColor: '#007AFF',
                         ledgerType: 'accounting',
+                        displayCurrency: 'CNY',
                         createdAt: item.updatedAt,
                         updatedAt: item.updatedAt,
                         isDeleted: true,
@@ -1523,6 +1547,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                         type: 'expense',
                         buyFeeRate: 0,
                         sellFeeRate: 0,
+                        buyCurrency: 'CNY',
+                        sellCurrency: 'CNY',
                         order: 0,
                         isCustom: true,
                         updatedAt: item.updatedAt,
@@ -1561,6 +1587,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 name: l.name,
                 theme_color: l.themeColor || l.theme_color,
                 ledger_type: normalizeLedgerType(l.ledgerType || l.ledger_type),
+                display_currency: l.displayCurrency || l.display_currency || 'CNY',
                 created_at: l.createdAt || l.created_at || Date.now(),
                 updated_at: l.updatedAt || l.updated_at || Date.now(),
                 is_deleted: !!l.isDeleted
@@ -1574,6 +1601,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 trade_item_type: c.tradeItemType || c.trade_item_type || 'normal',
                 buy_fee_rate: Number(c.buyFeeRate ?? c.buy_fee_rate ?? 0) || 0,
                 sell_fee_rate: Number(c.sellFeeRate ?? c.sell_fee_rate ?? 0) || 0,
+                buy_currency: c.buyCurrency || c.buy_currency || 'CNY',
+                sell_currency: c.sellCurrency || c.sell_currency || 'CNY',
                 order: c.order ?? 0,
                 is_custom: !!(c.isCustom ?? c.is_custom),
                 updated_at: c.updatedAt || c.updated_at || Date.now(),
@@ -1603,6 +1632,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 trade_allocations: t.tradeAllocations || t.trade_allocations || null,
                 trade_keys: t.tradeKeys || t.trade_keys || null,
                 trade_key_allocations: t.tradeKeyAllocations || t.trade_key_allocations || null,
+                currency_code: t.currencyCode || t.currency_code || 'CNY',
+                original_amount: Number(t.originalAmount ?? t.original_amount ?? 0) || null,
+                original_gross_amount: Number(t.originalGrossAmount ?? t.original_gross_amount ?? 0) || null,
+                exchange_rate_to_cny: Number(t.exchangeRateToCny ?? t.exchange_rate_to_cny ?? 0) || null,
+                exchange_rate_updated_at: Number(t.exchangeRateUpdatedAt ?? t.exchange_rate_updated_at ?? 0) || null,
+                exchange_rate_source: t.exchangeRateSource || t.exchange_rate_source || null,
                 date: t.date,
                 note: t.note || '',
                 attachments: t.attachments || [],
@@ -2088,7 +2123,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 trade: Math.max(-1, ...state.categories.filter(c => c.type === 'trade').map(c => c.order ?? 0)) + 1,
             };
 
-            const registerCat = (nameRaw: string, typeRaw: 'expense' | 'income', tradeItemType: Category['tradeItemType'] = 'normal'): string => {
+            const registerCat = (
+                nameRaw: string,
+                typeRaw: 'expense' | 'income',
+                tradeItemType: Category['tradeItemType'] = 'normal',
+                buyCurrency = 'CNY',
+                sellCurrency = 'CNY',
+                buyFeeRate = 0,
+                sellFeeRate = 0
+            ): string => {
                 const type = isTradingImport ? 'trade' : (typeRaw === 'income' ? 'income' : 'expense');
                 const name = (nameRaw || 'Other').trim();
                 const key = type + ':' + name;
@@ -2098,14 +2141,29 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     catMap.set(key, existing.id);
                     return existing.id;
                 }
-                const newCat: Category = { id: generateId(), ledgerId: targetLedgerId, name, icon: 'Circle', type, tradeItemType: isTradingImport ? tradeItemType : undefined, order: nextOrder[type]++, isCustom: true, buyFeeRate: 0, sellFeeRate: 0, updatedAt: Date.now(), isDeleted: false };
+                const newCat: Category = {
+                    id: generateId(),
+                    ledgerId: targetLedgerId,
+                    name,
+                    icon: 'Circle',
+                    type,
+                    tradeItemType: isTradingImport ? tradeItemType : undefined,
+                    buyCurrency: isTradingImport ? buyCurrency : undefined,
+                    sellCurrency: isTradingImport ? sellCurrency : undefined,
+                    order: nextOrder[type]++,
+                    isCustom: true,
+                    buyFeeRate,
+                    sellFeeRate,
+                    updatedAt: Date.now(),
+                    isDeleted: false
+                };
                 newCats.push(newCat);
                 catMap.set(key, newCat.id);
                 return newCat.id;
             };
 
             // Register categories first
-            csvCats.forEach(c => registerCat(c.name, c.type === 'income' ? 'income' : 'expense', c.tradeItemType || 'normal'));
+            csvCats.forEach(c => registerCat(c.name, c.type === 'income' ? 'income' : 'expense', c.tradeItemType || 'normal', c.buyCurrency || 'CNY', c.sellCurrency || 'CNY', c.buyFeeRate || 0, c.sellFeeRate || 0));
 
             // Persist new categories
             newCats.forEach(c => enhancedDispatch({ type: 'ADD_CATEGORY', payload: c }));
@@ -2113,7 +2171,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             // Normalize and persist transactions
             for (const tx of parsedTxs) {
                 const csvCat = csvCats.find(c => c.id === tx.categoryId || c.name === tx.categoryId);
-                const mappedCatId = registerCat(csvCat?.name || tx.categoryId || 'Other', tx.type === 'income' ? 'income' : 'expense', csvCat?.tradeItemType || 'normal');
+                const mappedCatId = registerCat(
+                    csvCat?.name || tx.categoryId || 'Other',
+                    tx.type === 'income' ? 'income' : 'expense',
+                    csvCat?.tradeItemType || 'normal',
+                    csvCat?.buyCurrency || 'CNY',
+                    csvCat?.sellCurrency || 'CNY',
+                    csvCat?.buyFeeRate || 0,
+                    csvCat?.sellFeeRate || 0
+                );
                 const normalized: Transaction = {
                     ...normalizeTransaction(tx),
                     id: tx.id || generateId(),
@@ -2125,6 +2191,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     tradeGrossAmount: isTradingImport ? (tx.tradeGrossAmount || tx.amount) : tx.tradeGrossAmount,
                     tradeFeeRate: isTradingImport ? (tx.tradeFeeRate || 0) : tx.tradeFeeRate,
                     tradeFeeAmount: isTradingImport ? (tx.tradeFeeAmount || 0) : tx.tradeFeeAmount,
+                    currencyCode: tx.currencyCode || 'CNY',
+                    originalAmount: tx.originalAmount,
+                    originalGrossAmount: tx.originalGrossAmount,
+                    exchangeRateToCny: tx.exchangeRateToCny,
+                    exchangeRateUpdatedAt: tx.exchangeRateUpdatedAt,
+                    exchangeRateSource: tx.exchangeRateSource,
                     note: tx.note || '',
                     createdAt: tx.createdAt || tx.date || Date.now(),
                     updatedAt: tx.updatedAt || tx.date || Date.now(),
@@ -2202,6 +2274,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             tradeItemType: savedLedger.ledgerType === 'trading' ? c.tradeItemType ?? 'normal' : undefined,
             buyFeeRate: c.buyFeeRate ?? 0,
             sellFeeRate: c.sellFeeRate ?? 0,
+            buyCurrency: savedLedger.ledgerType === 'trading' ? c.buyCurrency ?? 'CNY' : undefined,
+            sellCurrency: savedLedger.ledgerType === 'trading' ? c.sellCurrency ?? 'CNY' : undefined,
             order: idx,
             updatedAt: timestamp,
             isDeleted: false

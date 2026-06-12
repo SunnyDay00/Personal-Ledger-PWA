@@ -1,7 +1,7 @@
 {
   "name": "personal-ledger-pwa",
   "private": true,
-  "version": "7.6.4",
+  "version": "7.6.5",
   "description": "A privacy-friendly, local-first, self-hostable personal bookkeeping PWA.",
   "license": "MIT",
   "repository": {

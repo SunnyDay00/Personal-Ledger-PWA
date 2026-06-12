@@ -1,7 +1,7 @@
 ﻿import React, { useState, useMemo } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
-import { formatCurrency, getWeekRange, getMonthRange, getYearRange } from '../utils';
+import { formatDisplayCurrency, getWeekRange, getMonthRange, getYearRange } from '../utils';
 import {
     addWeeks, addMonths, addYears, format, getMonth
 } from 'date-fns';
@@ -31,7 +31,7 @@ interface PieBreakdownItem {
     transactionCount: number;
 }
 
-const CustomTooltip = ({ active, payload, label }: any) => {
+const CustomTooltip = ({ active, payload, label, formatAmount }: any) => {
     if (active && payload && payload.length) {
         return (
             <div className="bg-white/90 dark:bg-zinc-800/90 backdrop-blur-md p-3 rounded-xl shadow-xl border border-gray-100 dark:border-zinc-700 min-w-[120px]">
@@ -42,7 +42,7 @@ const CustomTooltip = ({ active, payload, label }: any) => {
                             <div className="w-2 h-2 rounded-full" style={{ backgroundColor: entry.color || entry.payload.fill }}></div>
                             <span className="text-ios-text opacity-90">{entry.name}</span>
                         </div>
-                        <span className="font-semibold tabular-nums text-ios-text">{formatCurrency(entry.value)}</span>
+                        <span className="font-semibold tabular-nums text-ios-text">{formatAmount(entry.value)}</span>
                     </div>
                 ))}
             </div>
@@ -60,6 +60,8 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
     const { transactions, ledgers, categories, settings, currentLedgerId, timeRange, currentDate: currentDateTs } = state;
     const currentLedger = ledgers.find(l => l.id === currentLedgerId);
     const isTrading = isTradingLedger(currentLedger);
+    const formatStatsAmount = (amount: number, options: { hideCurrency?: boolean } = {}) =>
+        formatDisplayCurrency(amount, currentLedger, state.exchangeRates, options);
     const expenseLabel = getTransactionTypeLabel(currentLedger, 'expense');
     const incomeLabel = getTransactionTypeLabel(currentLedger, 'income');
     const currentDate = new Date(currentDateTs);
@@ -451,15 +453,15 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                     <div className="grid grid-cols-3 gap-3 mb-6">
                         <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
                             <span className="text-xs text-ios-subtext mb-1">{incomeLabel}</span>
-                            <span className="text-sm font-bold text-green-500 tabular-nums">{formatCurrency(income)}</span>
+                            <span className="text-sm font-bold text-green-500 tabular-nums">{formatStatsAmount(income)}</span>
                         </div>
                         <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
                             <span className="text-xs text-ios-subtext mb-1">{expenseLabel}</span>
-                            <span className="text-sm font-bold text-red-500 tabular-nums">{formatCurrency(expense)}</span>
+                            <span className="text-sm font-bold text-red-500 tabular-nums">{formatStatsAmount(expense)}</span>
                         </div>
                         <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
                             <span className="text-xs text-ios-subtext mb-1">结余</span>
-                            <span className="text-sm font-bold text-ios-primary tabular-nums">{formatCurrency(balance)}</span>
+                            <span className="text-sm font-bold text-ios-primary tabular-nums">{formatStatsAmount(balance)}</span>
                         </div>
                     </div>
 
@@ -521,7 +523,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                                 />
                                             ))}
                                         </Pie>
-                                        <Tooltip content={<CustomTooltip />} />
+                                        <Tooltip content={<CustomTooltip formatAmount={formatStatsAmount} />} />
                                     </PieChart>
                                 </ResponsiveContainer>
                             </div>
@@ -533,7 +535,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border-color)" />
                                             <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
                                             <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
-                                            <Tooltip cursor={{ fill: 'rgba(0,0,0,0.05)' }} content={<CustomTooltip />} />
+                                            <Tooltip cursor={{ fill: 'rgba(0,0,0,0.05)' }} content={<CustomTooltip formatAmount={formatStatsAmount} />} />
                                             <Bar
                                                 dataKey="value"
                                                 name={dataType === 'income' ? incomeLabel : expenseLabel}
@@ -548,7 +550,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border-color)" />
                                             <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
                                             <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: 'var(--text-secondary)' }} />
-                                            <Tooltip content={<CustomTooltip />} />
+                                            <Tooltip content={<CustomTooltip formatAmount={formatStatsAmount} />} />
                                             <Line
                                                 type="monotone"
                                                 dataKey="value"
@@ -584,7 +586,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                         </div>
                                         <div className="flex items-center gap-2 shrink-0">
                                             <span className="text-xs text-ios-subtext">{currentPieTotal > 0 ? Math.round((item.value / currentPieTotal) * 100) : 0}%</span>
-                                            <span className="font-medium tabular-nums text-ios-text">{formatCurrency(item.value)}</span>
+                                            <span className="font-medium tabular-nums text-ios-text">{formatStatsAmount(item.value)}</span>
                                             <Icon name="ChevronRight" className="w-4 h-4 text-ios-subtext" />
                                         </div>
                                     </button>
@@ -599,6 +601,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                             <ExtremeCard
                                 title={`日均${expenseLabel}`}
                                 amount={advancedStats.avgDaily}
+                                formatAmount={formatStatsAmount}
                                 desc="本周期内平均"
                                 icon="TrendingDown"
                                 color="text-orange-500"
@@ -607,6 +610,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                             <ExtremeCard
                                 title={`日均${incomeLabel}`}
                                 amount={advancedStats.avgIncomeDaily}
+                                formatAmount={formatStatsAmount}
                                 desc="本周期内平均"
                                 icon="TrendingUp"
                                 color="text-green-500"
@@ -617,6 +621,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                     <ExtremeCard
                                         title="日均利润"
                                         amount={advancedStats.avgProfitDaily}
+                                        formatAmount={formatStatsAmount}
                                         desc="已实现利润平均"
                                         icon="LineChart"
                                         color={advancedStats.avgProfitDaily >= 0 ? 'text-green-500' : 'text-red-500'}
@@ -642,6 +647,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                             <ExtremeCard
                                 title="平均交易额"
                                 amount={advancedStats.avgTx}
+                                formatAmount={formatStatsAmount}
                                 desc="笔均金额"
                                 icon="CreditCard"
                                 color="text-blue-500"
@@ -657,6 +663,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                 <ExtremeCard
                                     title={`单笔最高${expenseLabel}`}
                                     amount={extremes.maxExpTx?.amount}
+                                    formatAmount={formatStatsAmount}
                                     desc={extremes.maxExpTx ? `${categories.find(c => c.id === extremes.maxExpTx!.categoryId)?.name} · ${format(extremes.maxExpTx.date, 'MM-dd')}` : '-'}
                                     icon="ArrowDownCircle"
                                     color="text-red-500"
@@ -665,6 +672,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                 <ExtremeCard
                                     title={`单笔最高${incomeLabel}`}
                                     amount={extremes.maxIncTx?.amount}
+                                    formatAmount={formatStatsAmount}
                                     desc={extremes.maxIncTx ? `${categories.find(c => c.id === extremes.maxIncTx!.categoryId)?.name} · ${format(extremes.maxIncTx.date, 'MM-dd')}` : '-'}
                                     icon="ArrowUpCircle"
                                     color="text-green-500"
@@ -675,6 +683,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                         <ExtremeCard
                                             title="单笔最高利润"
                                             amount={extremes.maxProfitTx?.profit}
+                                            formatAmount={formatStatsAmount}
                                             desc={extremes.maxProfitTx ? `${categories.find(c => c.id === extremes.maxProfitTx!.transaction.categoryId)?.name} · ${format(extremes.maxProfitTx.transaction.date, 'MM-dd')}` : '-'}
                                             icon="LineChart"
                                             color={extremes.maxProfitTx && extremes.maxProfitTx.profit < 0 ? 'text-red-500' : 'text-green-500'}
@@ -683,6 +692,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                         <ExtremeCard
                                             title={`利润最高${timeRange === 'year' ? '月' : '天'}`}
                                             amount={extremes.maxProfitPeriod?.amount}
+                                            formatAmount={formatStatsAmount}
                                             desc={extremes.maxProfitPeriod ? extremes.maxProfitPeriod.date : '-'}
                                             icon="Calendar"
                                             color={extremes.maxProfitPeriod && extremes.maxProfitPeriod.amount < 0 ? 'text-red-500' : 'text-green-500'}
@@ -693,6 +703,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                 <ExtremeCard
                                     title={`${expenseLabel}最高${timeRange === 'year' ? '月' : '天'}`}
                                     amount={extremes.maxExpPeriod?.amount}
+                                    formatAmount={formatStatsAmount}
                                     desc={extremes.maxExpPeriod ? extremes.maxExpPeriod.date : '-'}
                                     icon="Calendar"
                                     color="text-orange-500"
@@ -701,6 +712,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
                                 <ExtremeCard
                                     title={`${incomeLabel}最高${timeRange === 'year' ? '月' : '天'}`}
                                     amount={extremes.maxIncPeriod?.amount}
+                                    formatAmount={formatStatsAmount}
                                     desc={extremes.maxIncPeriod ? extremes.maxIncPeriod.date : '-'}
                                     icon="Wallet"
                                     color="text-blue-500"
@@ -728,7 +740,7 @@ export const StatsView: React.FC<StatsViewProps> = ({ onOpenHomeTransaction }) =
     );
 };
 
-const ExtremeCard: React.FC<{ title: string; amount?: number; value?: string; desc: string; icon: string; color: string; bg: string }> = ({ title, amount, value, desc, icon, color, bg }) => (
+const ExtremeCard: React.FC<{ title: string; amount?: number; value?: string; desc: string; icon: string; color: string; bg: string; formatAmount?: (amount: number) => string }> = ({ title, amount, value, desc, icon, color, bg, formatAmount }) => (
     <div className="bg-white dark:bg-zinc-900 p-3 rounded-2xl shadow-sm border border-ios-border">
         <div className="flex items-center gap-2 mb-2">
             <div className={`w-6 h-6 rounded-full ${bg} flex items-center justify-center`}>
@@ -736,7 +748,7 @@ const ExtremeCard: React.FC<{ title: string; amount?: number; value?: string; de
             </div>
             <span className="text-[10px] text-ios-subtext">{title}</span>
         </div>
-        <div className="font-bold text-sm tabular-nums mb-0.5">{value ?? (amount !== undefined ? formatCurrency(amount) : desc)}</div>
+        <div className="font-bold text-sm tabular-nums mb-0.5">{value ?? (amount !== undefined ? (formatAmount ? formatAmount(amount) : String(amount)) : desc)}</div>
         {(value !== undefined || amount !== undefined) && <div className="text-[10px] text-ios-subtext truncate">{desc}</div>}
     </div>
 );

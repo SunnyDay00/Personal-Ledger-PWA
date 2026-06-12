@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
-import { formatCurrency } from '../utils';
+import { formatDisplayCurrency } from '../utils';
 import { format } from 'date-fns';
 import { Transaction } from '../types';
 import { ImagePreview } from './ImagePreview';
@@ -505,7 +505,7 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
                                         </div>
                                     </div>
                                     <span className={`tabular-nums font-medium ${t.type === 'expense' ? 'text-ios-text' : 'text-green-500'}`}>
-                                        {t.type === 'expense' ? '-' : '+'}{formatCurrency(t.amount)}
+                                        {t.type === 'expense' ? '-' : '+'}{formatDisplayCurrency(t.amount, ledger, state.exchangeRates)}
                                     </span>
                                 </div>
                             )

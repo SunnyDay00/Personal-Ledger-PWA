@@ -7,7 +7,7 @@ import { AddView } from './AddView';
 import { ImagePreview } from './ImagePreview';
 import { Icon } from './ui/Icon';
 import { feedback } from '../services/feedback';
-import { formatCurrency } from '../utils';
+import { formatDisplayCurrency } from '../utils';
 import { getTransactionTypeLabel, isTradingLedger } from '../services/ledgerUtils';
 
 interface StatsBreakdownDetailViewProps {
@@ -85,6 +85,8 @@ export const StatsBreakdownDetailView: React.FC<StatsBreakdownDetailViewProps> =
     const detailLedger = state.ledgers.find(ledger => ledger.id === sortedTransactions[0]?.ledgerId);
     const isTrading = isTradingLedger(detailLedger);
     const dataTypeLabel = getTransactionTypeLabel(detailLedger, dataType);
+    const formatDetailAmount = (amount: number) =>
+        formatDisplayCurrency(amount, detailLedger, state.exchangeRates);
 
     const groupedTransactions = useMemo<TransactionDayGroup[]>(() => {
         const groups = new Map<string, TransactionDayGroup>();
@@ -152,7 +154,7 @@ export const StatsBreakdownDetailView: React.FC<StatsBreakdownDetailViewProps> =
                                         dataType === 'expense' ? 'text-red-500' : 'text-green-500'
                                     )}
                                 >
-                                    {formatCurrency(totalAmount)}
+                                    {formatDetailAmount(totalAmount)}
                                 </p>
                             </div>
                             <div className="rounded-2xl bg-white/38 dark:bg-zinc-800/40 backdrop-blur-[18px] p-4 border border-white/45 dark:border-white/10">
@@ -189,7 +191,7 @@ export const StatsBreakdownDetailView: React.FC<StatsBreakdownDetailViewProps> =
                                             )}
                                         >
                                             {dataType === 'expense' ? '-' : '+'}
-                                            {formatCurrency(group.total)}
+                                            {formatDetailAmount(group.total)}
                                         </span>
                                     </div>
 
@@ -201,7 +203,7 @@ export const StatsBreakdownDetailView: React.FC<StatsBreakdownDetailViewProps> =
                                             const metaParts = [
                                                 ...(title !== category?.name && category?.name ? [category.name] : []),
                                                 ...(isTrading ? [`${getTransactionTypeLabel(detailLedger, transaction.type)} ${transaction.tradeQuantity || 0} 个`] : []),
-                                                ...(isTrading && transaction.tradeFeeAmount ? [`手续费 ${formatCurrency(transaction.tradeFeeAmount)}`] : []),
+                                                ...(isTrading && transaction.tradeFeeAmount ? [`手续费 ${formatDetailAmount(transaction.tradeFeeAmount)}`] : []),
                                                 timeLabel,
                                             ];
 
@@ -278,7 +280,7 @@ export const StatsBreakdownDetailView: React.FC<StatsBreakdownDetailViewProps> =
                                                             )}
                                                         >
                                                             {transaction.type === 'expense' ? '-' : '+'}
-                                                            {formatCurrency(transaction.amount)}
+                                                            {formatDetailAmount(transaction.amount)}
                                                         </span>
                                                         <Icon name="ChevronRight" className="w-4 h-4 text-ios-subtext" />
                                                     </div>

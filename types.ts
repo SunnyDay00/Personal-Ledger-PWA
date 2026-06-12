@@ -5,6 +5,21 @@ export type CategoryType = TransactionType | 'trade';
 export type LedgerType = 'accounting' | 'trading';
 export type TradeAction = 'buy' | 'sell';
 export type TradeItemType = 'normal' | 'cardKey';
+export type CurrencyCode = string;
+
+export interface ExchangeRatesSnapshot {
+  baseCode: CurrencyCode;
+  provider: string;
+  documentation?: string;
+  termsOfUse?: string;
+  timeLastUpdateUnix?: number;
+  timeLastUpdateUtc?: string;
+  timeNextUpdateUnix?: number;
+  timeNextUpdateUtc?: string;
+  fetchedAt: number;
+  rates: Record<string, number>;
+}
+
 export interface HomeQuickAction {
   id: string;
   title: string;
@@ -70,6 +85,7 @@ export interface Ledger {
   name: string;
   themeColor: string; // Hex code
   ledgerType?: LedgerType;
+  displayCurrency?: CurrencyCode;
   createdAt: number;
   updatedAt?: number;
   isDeleted?: boolean; // Soft delete
@@ -84,6 +100,8 @@ export interface Category {
   tradeItemType?: TradeItemType;
   buyFeeRate?: number;
   sellFeeRate?: number;
+  buyCurrency?: CurrencyCode;
+  sellCurrency?: CurrencyCode;
   isCustom?: boolean;
   order: number;
   updatedAt?: number;
@@ -114,6 +132,12 @@ export interface Transaction {
   tradeAllocations?: TradeAllocation[];
   tradeKeys?: TradeKey[];
   tradeKeyAllocations?: TradeKeyAllocation[];
+  currencyCode?: CurrencyCode;
+  originalAmount?: number;
+  originalGrossAmount?: number;
+  exchangeRateToCny?: number;
+  exchangeRateUpdatedAt?: number;
+  exchangeRateSource?: string;
   date: number; // Timestamp
   note: string;
   attachments: string[]; // R2 keys
@@ -252,6 +276,7 @@ export interface AppState {
   operationLogs: OperationLog[];
   backupLogs: BackupLog[];
   updateLogs: UpdateLog[]; // Static or dynamic
+  exchangeRates?: ExchangeRatesSnapshot;
   syncStatus: 'idle' | 'syncing' | 'success' | 'error';
   isOnline: boolean;
   pendingSyncCount: number;
@@ -282,6 +307,7 @@ export type AppAction =
   | { type: 'SET_ONLINE_STATUS'; payload: boolean }
   | { type: 'SET_PENDING_SYNC_COUNT'; payload: number }
   | { type: 'SET_LAST_SYNC_ERROR'; payload?: string }
+  | { type: 'SET_EXCHANGE_RATES'; payload: ExchangeRatesSnapshot }
   | { type: 'RESTORE_DATA'; payload: Partial<AppState> }
   | { type: 'SET_THEME_MODE'; payload: ThemeMode }
   | { type: 'ADD_SEARCH_HISTORY'; payload: string }

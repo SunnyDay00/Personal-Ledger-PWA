@@ -3,7 +3,7 @@ import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { feedback } from '../services/feedback';
 import { CloudSyncButton } from './CloudSyncButton'; // Import
-import { formatCurrency, getWeekRange, getMonthRange, getYearRange } from '../utils';
+import { formatCurrency, formatDisplayCurrency, getWeekRange, getMonthRange, getYearRange } from '../utils';
 import { format, isSameDay, addWeeks, addMonths, addYears, addDays } from 'date-fns';
 import { Transaction, Category } from '../types';
 import { AddView } from './AddView';
@@ -28,6 +28,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
     const { currentLedgerId, transactions, categories, ledgers, settings, timeRange, currentDate: currentDateTs } = state;
     const currentLedger = ledgers.find(l => l.id === currentLedgerId) || ledgers[0];
     const isTrading = isTradingLedger(currentLedger);
+    const formatLedgerAmount = (amount: number, options: { hideCurrency?: boolean } = {}) =>
+        formatDisplayCurrency(amount, currentLedger, state.exchangeRates, options);
     const currentDate = new Date(currentDateTs);
 
     const [showLedgerMenu, setShowLedgerMenu] = useState(false);
@@ -275,11 +277,11 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                 <div className={clsx("grid grid-cols-3 gap-3", settings.budget.enabled && !isTrading ? "mb-3" : "mb-2")}>
                     <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
                         <span className="text-xs text-ios-subtext mb-1">{isTrading ? '卖出' : '收入'}</span>
-                        <span className="text-sm font-bold text-green-500 tabular-nums">{formatCurrency(income)}</span>
+                        <span className="text-sm font-bold text-green-500 tabular-nums">{formatLedgerAmount(income)}</span>
                     </div>
                     <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
                         <span className="text-xs text-ios-subtext mb-1">{isTrading ? '买入' : '支出'}</span>
-                        <span className="text-sm font-bold text-red-500 tabular-nums">{formatCurrency(expense)}</span>
+                        <span className="text-sm font-bold text-red-500 tabular-nums">{formatLedgerAmount(expense)}</span>
                     </div>
                     <div className="bg-white dark:bg-zinc-900 rounded-2xl p-3 shadow-sm border border-ios-border flex flex-col items-center">
                         <span className="text-xs text-ios-subtext mb-1">{isTrading ? '利润' : '结余'}</span>
@@ -288,7 +290,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                             isTrading
                                 ? thirdSummaryValue > 0 ? 'text-green-500' : thirdSummaryValue < 0 ? 'text-red-500' : 'text-ios-primary'
                                 : 'text-ios-primary'
-                        )}>{formatCurrency(thirdSummaryValue)}</span>
+                        )}>{formatLedgerAmount(thirdSummaryValue)}</span>
                     </div>
                 </div>
 
@@ -297,9 +299,9 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                         {isOverBudget && <div className="absolute inset-0 bg-red-50/50 dark:bg-red-900/10 pointer-events-none"></div>}
                         <div className="relative z-10">
                             <div className="flex justify-between text-[10px] text-ios-subtext mb-1.5">
-                                <span>预算 {formatCurrency(budgetTarget)}</span>
+                                <span>预算 {formatLedgerAmount(budgetTarget)}</span>
                                 <span className={clsx("font-medium", isOverBudget ? "text-red-500 font-bold" : "")}>
-                                    {isOverBudget ? `超支 ${formatCurrency(Math.abs(remainingBudget))}` : `剩余 ${formatCurrency(remainingBudget)}`}
+                                    {isOverBudget ? `超支 ${formatLedgerAmount(Math.abs(remainingBudget))}` : `剩余 ${formatLedgerAmount(remainingBudget)}`}
                                 </span>
                             </div>
                             <div className="h-2.5 bg-gray-100 dark:bg-zinc-800 rounded-full overflow-hidden flex relative">
@@ -356,8 +358,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                                             const dayExpense = groupedTransactions[dateKey].reduce((acc, t) => t.type === 'expense' ? acc + t.amount : acc, 0);
                                             return (
                                                 <>
-                                                    {dayIncome > 0 && <span className="text-green-500 font-medium">+{formatCurrency(dayIncome).replace('¥', '')}</span>}
-                                                    {dayExpense > 0 && <span className="text-ios-text/60 font-medium">-{formatCurrency(dayExpense).replace('¥', '')}</span>}
+                                                    {dayIncome > 0 && <span className="text-green-500 font-medium">+{formatLedgerAmount(dayIncome, { hideCurrency: true })}</span>}
+                                                    {dayExpense > 0 && <span className="text-ios-text/60 font-medium">-{formatLedgerAmount(dayExpense, { hideCurrency: true })}</span>}
                                                 </>
                                             )
                                         })()}
@@ -430,13 +432,16 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                                                                 <span>{format(t.createdAt, 'HH:mm')}</span>
                                                                 <span>· {getTransactionTypeLabel(currentLedger, t.type)}</span>
                                                                 {t.type === 'expense' && tradingBuyUnitCost !== null && (
-                                                                    <span>· 单个成本 {formatCurrency(tradingBuyUnitCost).replace('¥', '')}</span>
+                                                                    <span>· 单个成本 {formatLedgerAmount(tradingBuyUnitCost, { hideCurrency: true })}</span>
                                                                 )}
                                                                 {t.type === 'expense' && tradingBuySellResult && tradingBuySellResult.soldQuantity > 0 && (
                                                                     <span>· 已卖 {formatQuantity(tradingBuySellResult.soldQuantity)} 个</span>
                                                                 )}
                                                                 {t.type === 'income' && !!t.tradeFeeAmount && (
-                                                                    <span>· 手续费 {formatCurrency(t.tradeFeeAmount).replace('¥', '')}</span>
+                                                                    <span>· 手续费 {formatLedgerAmount(t.tradeFeeAmount, { hideCurrency: true })}</span>
+                                                                )}
+                                                                {t.currencyCode && t.currencyCode !== 'CNY' && !!t.originalGrossAmount && (
+                                                                    <span>· 原币种 {formatCurrency(t.originalGrossAmount, t.currencyCode)}</span>
                                                                 )}
                                                                 {t.note && <span>· {t.note}</span>}
                                                             </div>
@@ -458,14 +463,14 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                                                                     {formatQuantity(Number(t.tradeQuantity || 0))} 个
                                                                 </div>
                                                                 <div className="text-[10px] text-ios-subtext tabular-nums">
-                                                                    卖出 {formatCurrency(t.amount).replace('¥', '')}
+                                                                    卖出 {formatLedgerAmount(t.amount, { hideCurrency: true })}
                                                                 </div>
                                                                 <div className={clsx(
                                                                     'text-[10px] font-semibold tabular-nums',
                                                                     tradingSellResult && tradingSellResult.profit > 0 ? 'text-green-500' :
                                                                         tradingSellResult && tradingSellResult.profit < 0 ? 'text-red-500' : 'text-ios-subtext'
                                                                 )}>
-                                                                    利润 {tradingSellResult ? `${tradingSellResult.profit > 0 ? '+' : tradingSellResult.profit < 0 ? '-' : ''}${formatCurrency(Math.abs(tradingSellResult.profit)).replace('¥', '')}` : '-'}
+                                                                    利润 {tradingSellResult ? `${tradingSellResult.profit > 0 ? '+' : tradingSellResult.profit < 0 ? '-' : ''}${formatLedgerAmount(Math.abs(tradingSellResult.profit), { hideCurrency: true })}` : '-'}
                                                                 </div>
                                                             </div>
                                                         ) : (
@@ -474,7 +479,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                                                                     {formatQuantity(Number(t.tradeQuantity || 0))} 个
                                                                 </div>
                                                                 <div className="text-[10px] text-ios-subtext tabular-nums">
-                                                                    买入 {formatCurrency(t.amount).replace('¥', '')}
+                                                                    买入 {formatLedgerAmount(t.amount, { hideCurrency: true })}
                                                                 </div>
                                                                 {tradingBuySellResult && (
                                                                     <div className={clsx(
@@ -482,14 +487,14 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                                                                         tradingBuySellResult.profit > 0 ? 'text-green-500' :
                                                                             tradingBuySellResult.profit < 0 ? 'text-red-500' : 'text-ios-subtext'
                                                                     )}>
-                                                                        利润 {tradingBuySellResult.profit > 0 ? '+' : tradingBuySellResult.profit < 0 ? '-' : ''}{formatCurrency(Math.abs(tradingBuySellResult.profit)).replace('¥', '')}
+                                                                        利润 {tradingBuySellResult.profit > 0 ? '+' : tradingBuySellResult.profit < 0 ? '-' : ''}{formatLedgerAmount(Math.abs(tradingBuySellResult.profit), { hideCurrency: true })}
                                                                     </div>
                                                                 )}
                                                             </div>
                                                         )
                                                     ) : (
                                                         <div className={`font-semibold text-sm tabular-nums ${t.type === 'expense' ? 'text-ios-text' : 'text-green-500'}`}>
-                                                            {t.type === 'expense' ? '-' : '+'}{formatCurrency(t.amount).replace('¥', '')}
+                                                            {t.type === 'expense' ? '-' : '+'}{formatLedgerAmount(t.amount, { hideCurrency: true })}
                                                         </div>
                                                     )}
                                                     {!isSelectionMode && (

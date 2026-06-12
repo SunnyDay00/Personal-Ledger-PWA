@@ -1,4 +1,6 @@
 import { Category, CategoryType, Ledger, LedgerType, TradeAction, TradeAllocation, TradeItemType, TradeKey, TradeKeyAllocation, Transaction } from '../types';
+import { DEFAULT_CURRENCY } from '../constants';
+import { normalizeCurrencyCode } from '../utils';
 
 export const normalizeLedgerType = (value: unknown): LedgerType =>
   value === 'trading' ? 'trading' : 'accounting';
@@ -84,6 +86,7 @@ export const normalizeLedger = <T extends Partial<Ledger> & Record<string, any>>
   name: ledger.name || '',
   themeColor: ledger.themeColor || ledger.theme_color || '#007AFF',
   ledgerType: normalizeLedgerType(ledger.ledgerType ?? ledger.ledger_type),
+  displayCurrency: normalizeCurrencyCode(ledger.displayCurrency ?? ledger.display_currency, DEFAULT_CURRENCY),
   createdAt: Number(ledger.createdAt ?? ledger.created_at ?? Date.now()),
   updatedAt: Number(ledger.updatedAt ?? ledger.updated_at ?? Date.now()),
   isDeleted: !!(ledger.isDeleted ?? ledger.is_deleted),
@@ -99,6 +102,8 @@ export const normalizeCategory = <T extends Partial<Category> & Record<string, a
   tradeItemType: normalizeTradeItemType(category.tradeItemType ?? category.trade_item_type),
   buyFeeRate: Number(category.buyFeeRate ?? category.buy_fee_rate ?? 0) || 0,
   sellFeeRate: Number(category.sellFeeRate ?? category.sell_fee_rate ?? 0) || 0,
+  buyCurrency: normalizeCurrencyCode(category.buyCurrency ?? category.buy_currency, DEFAULT_CURRENCY),
+  sellCurrency: normalizeCurrencyCode(category.sellCurrency ?? category.sell_currency, DEFAULT_CURRENCY),
   order: Number(category.order ?? 0),
   isCustom: !!(category.isCustom ?? category.is_custom),
   updatedAt: Number(category.updatedAt ?? category.updated_at ?? Date.now()),
@@ -120,6 +125,12 @@ export const normalizeTransaction = <T extends Partial<Transaction> & Record<str
   tradeAllocations: normalizeTradeAllocations(transaction.tradeAllocations ?? transaction.trade_allocations),
   tradeKeys: normalizeTradeKeys(transaction.tradeKeys ?? transaction.trade_keys),
   tradeKeyAllocations: normalizeTradeKeyAllocations(transaction.tradeKeyAllocations ?? transaction.trade_key_allocations),
+  currencyCode: normalizeCurrencyCode(transaction.currencyCode ?? transaction.currency_code, DEFAULT_CURRENCY),
+  originalAmount: Number(transaction.originalAmount ?? transaction.original_amount ?? 0) || undefined,
+  originalGrossAmount: Number(transaction.originalGrossAmount ?? transaction.original_gross_amount ?? 0) || undefined,
+  exchangeRateToCny: Number(transaction.exchangeRateToCny ?? transaction.exchange_rate_to_cny ?? 0) || undefined,
+  exchangeRateUpdatedAt: Number(transaction.exchangeRateUpdatedAt ?? transaction.exchange_rate_updated_at ?? 0) || undefined,
+  exchangeRateSource: transaction.exchangeRateSource ?? transaction.exchange_rate_source,
   date: Number(transaction.date ?? Date.now()),
   note: transaction.note || '',
   attachments: Array.isArray(transaction.attachments)
