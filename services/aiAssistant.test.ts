@@ -4,6 +4,7 @@ import { AiConversation, AiMessage, AppState } from '../types';
 import {
   buildAiContextMessages,
   buildGroundedFallback,
+  shouldUseLedgerTools,
   validateGroundedAnswer,
 } from './aiAssistant';
 
@@ -62,7 +63,7 @@ describe('AI conversation context', () => {
     expect(context.some(message => message.content === '停止')).toBe(false);
   });
 
-  it('does not reuse an older assistant answer as financial evidence', () => {
+  it('keeps older assistant wording for conversation continuity but marks its data as stale', () => {
     const context = buildAiContextMessages(state, conversation, [
       { id: '1', conversationId: conversation.id, role: 'user', content: '我什么时候买了某商品？', status: 'complete', createdAt: 1 },
       {
@@ -80,8 +81,36 @@ describe('AI conversation context', () => {
         createdAt: 2,
       },
     ]);
-    expect(context.at(-1)?.content).not.toContain('不存在的日期');
-    expect(context.at(-1)?.content).toContain('不作为当前财务事实');
+    expect(context.at(-1)?.content).toContain('不存在的日期');
+    expect(context.at(-1)?.content).toContain('必须重新查询');
+  });
+});
+
+describe('AI ledger intent routing', () => {
+  const userMessage = (content: string, createdAt: number): AiMessage => ({
+    id: String(createdAt),
+    conversationId: conversation.id,
+    role: 'user',
+    content,
+    status: 'complete',
+    createdAt,
+  });
+
+  it('uses local tools for explicit data questions', () => {
+    expect(shouldUseLedgerTools([userMessage('分析近半年的支出', 1)])).toBe(true);
+    expect(shouldUseLedgerTools([userMessage('收入呢？', 1)])).toBe(true);
+  });
+
+  it('uses local tools for short follow-ups to a data question', () => {
+    expect(shouldUseLedgerTools([
+      userMessage('分析近一年的消费', 1),
+      userMessage('为什么这么高？', 2),
+    ])).toBe(true);
+  });
+
+  it('does not force ordinary conversation through ledger tools', () => {
+    expect(shouldUseLedgerTools([userMessage('你怎么傻乎乎的？', 1)])).toBe(false);
+    expect(shouldUseLedgerTools([userMessage('你能做什么？', 1)])).toBe(false);
   });
 });
 
@@ -109,7 +138,7 @@ describe('AI answer grounding', () => {
     expect(validation.reason).toContain('单笔明细');
   });
 
-  it('rejects a percentage that was not calculated by the local tool', () => {
+  it('allows the model to explain a percentage derived from local totals', () => {
     const validation = validateGroundedAnswer(
       '这类支出占比为 50%。',
       [{
@@ -120,8 +149,22 @@ describe('AI answer grounding', () => {
         },
       }]
     );
-    expect(validation.valid).toBe(false);
-    expect(validation.reason).toContain('百分比');
+    expect(validation.valid).toBe(true);
+  });
+
+  it('allows aggregate rows to be presented naturally without a detail query', () => {
+    const validation = validateGroundedAnswer(
+      '| 日期 | 分类 | 金额 |\n|---|---|---:|\n| 2026-01 | 餐饮 | ¥100.00 |',
+      [{
+        tool: 'aggregate_transactions',
+        result: {
+          trace,
+          groups: [{ key: '2026-01', label: '2026-01', category: '餐饮', amount_cny: 100 }],
+          total: { count: 2, amount_cny: 100, expense_cny: 100, income_cny: 0, net_cny: -100 },
+        },
+      }]
+    );
+    expect(validation.valid).toBe(true);
   });
 
   it('requires a zero-result detail search to be reported as not found', () => {
