@@ -1,12 +1,15 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { Capacitor } from '@capacitor/core';
+import { Keyboard } from '@capacitor/keyboard';
 import { useApp } from '../contexts/AppContext';
 import { AiConfig, AiConversation, AiMessage } from '../types';
 import { generateId } from '../utils';
 import { aiStorage } from '../services/aiStorage';
 import { getDeepSeekModelName } from '../services/aiConfig';
 import { maybeSummarizeConversation, runAiTurn } from '../services/aiAssistant';
+import { resolveAiKeyboardLayout } from '../services/aiKeyboardLayout';
 import { feedback } from '../services/feedback';
 import { Icon } from './ui/Icon';
 import { clsx } from 'clsx';
@@ -81,7 +84,9 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
   const [showHistory, setShowHistory] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isNearBottom, setIsNearBottom] = useState(true);
-  const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [textareaFocused, setTextareaFocused] = useState(false);
+  const [nativeKeyboardHeight, setNativeKeyboardHeight] = useState(0);
+  const [visualViewportReduction, setVisualViewportReduction] = useState(0);
   const [viewport, setViewport] = useState({
     height: typeof window !== 'undefined' ? window.innerHeight : 0,
     offsetTop: 0,
@@ -93,6 +98,12 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
   const positionLoadedConversationRef = useRef(true);
   const isNearBottomRef = useRef(true);
   const fullViewportHeightRef = useRef(typeof window !== 'undefined' ? window.innerHeight : 0);
+  const keyboardLayout = useMemo(() => resolveAiKeyboardLayout({
+    nativeKeyboardHeight,
+    visualViewportReduction,
+    textareaFocused,
+  }), [nativeKeyboardHeight, textareaFocused, visualViewportReduction]);
+  const { keyboardVisible, nativeOverlayInset } = keyboardLayout;
 
   const updateNearBottom = useCallback(() => {
     const element = scrollRef.current;
@@ -194,13 +205,12 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
       } else {
         fullViewportHeightRef.current = Math.max(window.innerHeight, currentHeight);
       }
-      const nextKeyboardVisible = textareaFocused
-        && fullViewportHeightRef.current - currentHeight > 100;
+      const nextViewportReduction = Math.max(0, fullViewportHeightRef.current - currentHeight);
       setViewport({
         height: currentHeight,
         offsetTop: visualViewport?.offsetTop || 0,
       });
-      setKeyboardVisible(nextKeyboardVisible);
+      setVisualViewportReduction(nextViewportReduction);
     };
     update();
     visualViewport?.addEventListener('resize', update);
@@ -214,8 +224,41 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
   }, []);
 
   useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let disposed = false;
+    const handles: Array<{ remove: () => Promise<void> }> = [];
+    const show = (info: { keyboardHeight: number }) => {
+      setNativeKeyboardHeight(Math.max(0, Number(info.keyboardHeight) || 0));
+    };
+    const hide = () => setNativeKeyboardHeight(0);
+    const register = async () => {
+      const registered = await Promise.all([
+        Keyboard.addListener('keyboardWillShow', show),
+        Keyboard.addListener('keyboardDidShow', show),
+        Keyboard.addListener('keyboardDidHide', hide),
+      ]);
+      if (disposed) {
+        await Promise.all(registered.map(handle => handle.remove()));
+        return;
+      }
+      handles.push(...registered);
+    };
+    void register();
+    return () => {
+      disposed = true;
+      handles.forEach(handle => { void handle.remove(); });
+    };
+  }, []);
+
+  useEffect(() => {
     onComposerFocusChange?.(keyboardVisible);
   }, [keyboardVisible, onComposerFocusChange]);
+
+  useEffect(() => {
+    if (!keyboardVisible || !isNearBottomRef.current) return;
+    const frame = window.requestAnimationFrame(() => scrollToBottom('auto'));
+    return () => window.cancelAnimationFrame(frame);
+  }, [keyboardVisible, nativeOverlayInset, scrollToBottom]);
 
   useLayoutEffect(() => {
     const element = scrollRef.current;
@@ -472,7 +515,12 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
         ref={scrollRef}
         onScroll={updateNearBottom}
         className="min-h-0 flex-1 overflow-y-auto px-4 pb-[calc(env(safe-area-inset-bottom)+10.5rem)] pt-4 no-scrollbar"
-        style={{ WebkitOverflowScrolling: 'touch' }}
+        style={{
+          WebkitOverflowScrolling: 'touch',
+          paddingBottom: nativeOverlayInset > 0
+            ? `${nativeOverlayInset + 88}px`
+            : undefined,
+        }}
       >
         {!keyReady ? (
           <div className="mx-auto mt-12 max-w-sm rounded-3xl border border-ios-border bg-white p-6 text-center shadow-sm dark:bg-zinc-900">
@@ -599,6 +647,7 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
               ? 'bottom-[calc(env(safe-area-inset-bottom)+5.25rem)]'
               : 'bottom-[calc(env(safe-area-inset-bottom)+10.25rem)]'
           )}
+          style={nativeOverlayInset > 0 ? { bottom: nativeOverlayInset + 88 } : undefined}
           aria-label="回到对话底部"
         >
           <Icon name="ChevronDown" className="h-5 w-5" />
@@ -607,18 +656,19 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
 
       {keyReady && (
         <div className={clsx(
-          'absolute left-0 right-0 z-30 px-3 transition-[bottom]',
+          'absolute left-0 right-0 z-30 px-3 transition-[bottom] duration-200',
           keyboardVisible
             ? 'bottom-[calc(env(safe-area-inset-bottom)+0.5rem)]'
             : 'bottom-[calc(env(safe-area-inset-bottom)+5.75rem)]'
-        )}>
+        )} style={nativeOverlayInset > 0 ? { bottom: nativeOverlayInset + 8 } : undefined}>
           <div className="mx-auto flex max-w-2xl items-end gap-2 rounded-[1.4rem] border border-white/60 bg-white/85 p-2 shadow-[0_10px_35px_rgba(0,0,0,0.15)] backdrop-blur-xl dark:border-white/10 dark:bg-zinc-900/90">
             <textarea
               ref={textareaRef}
               value={input}
               rows={1}
               onChange={event => setInput(event.target.value)}
-              onBlur={() => setKeyboardVisible(false)}
+              onFocus={() => setTextareaFocused(true)}
+              onBlur={() => setTextareaFocused(false)}
               onKeyDown={event => {
                 if (event.key === 'Enter' && !event.shiftKey) {
                   event.preventDefault();

@@ -280,7 +280,7 @@ The provider card uses a DeepSeek logo stored locally at `public/deepseek-logo.p
 
 The in-app **Settings → AI Assistant** page also contains expandable guidance covering the local tool-query flow, supported and unsupported data, context compression and limits, statistical rules, DeepSeek data transmission, API-key synchronization, conversation storage, local answer grounding, and verification precautions.
 
-When the user scrolls away from the latest message, the conversation view shows a floating down button that returns directly to the bottom. The bottom navigation is hidden only while the software keyboard actually occupies the visual viewport and is restored when the keyboard closes; merely retaining textarea focus no longer leaves the navigation hidden.
+When the user scrolls away from the latest message, the conversation view shows a floating down button that returns directly to the bottom. Keyboard positioning combines browser `visualViewport` changes with Capacitor's native keyboard height events. On iOS, where `KeyboardResize.None` leaves the WebView at full height, the composer and scroll padding are lifted by the actual native keyboard height so the input remains visible; environments that already resize `visualViewport` do not receive the offset twice. The bottom navigation is hidden only while a keyboard is actually visible and is restored when it closes.
 
 Supported read-only queries include:
 
