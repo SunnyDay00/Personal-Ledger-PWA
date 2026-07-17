@@ -42,6 +42,7 @@ The goal of a Codex Security review would be to improve data protection, authent
 - Trading categories can set separate buy and sell currencies. New foreign-currency buy/sell records keep the original currency amount plus an exchange-rate snapshot while storing CNY as the base amount for inventory, cost, and profit math.
 - Category and category group management per ledger.
 - Daily, weekly, monthly, and yearly statistics with charts.
+- Read-only DeepSeek AI assistant for natural-language transaction lookup, deterministic aggregation, category/group analysis, and trading-ledger summaries.
 - Budget display, progress tracking, and budget target inputs follow the current ledger display currency while keeping CNY as the stored base.
 - Search, filtering, batch edit, batch delete, and undo delete flows.
 - JSON and CSV import/export.
@@ -104,7 +105,7 @@ The goal of a Codex Security review would be to improve data protection, authent
 
 The core app is local-first. Ledger operations are written to IndexedDB before the UI reports success, so records remain available while offline.
 
-The local IndexedDB database stores ledgers, categories, category groups, transactions, settings, operation logs, backup logs, cached images, pending image uploads, and a sync queue. Ledger display currency, trading category buy/sell currencies, transaction original-currency amounts, and exchange-rate snapshots are stored with the related records. Older local storage and earlier IndexedDB database names are migrated when supported by the current code, and missing currency fields default to CNY.
+The local IndexedDB database stores ledgers, categories, category groups, transactions, settings, operation logs, backup logs, cached images, pending image uploads, a sync queue, and AI conversation tables. The DeepSeek API key is part of the main application settings, with the dedicated `aiConfig` table retained as a compatibility mirror for earlier AI builds. Ledger display currency, trading category buy/sell currencies, transaction original-currency amounts, and exchange-rate snapshots are stored with the related records. Older local storage and earlier IndexedDB database names are migrated when supported by the current code, and missing currency fields default to CNY.
 
 When optional Cloudflare sync is enabled, local changes are queued and later pushed to the Worker. If the network is unavailable, a session expires, or sync fails, local data is kept and the queue is retried later.
 
@@ -112,7 +113,9 @@ Exchange-rate lookup uses the public ExchangeRate-API Open Access endpoint throu
 
 Image attachments are saved locally first. When cloud sync is configured, pending images can be uploaded to R2, while transactions keep attachment keys instead of embedding binary image data.
 
-WebDAV backup is file-based backup, not real-time row-level sync. It stores ledger/settings data and transaction exports and uses retry behavior in the WebDAV service.
+WebDAV backup is file-based backup, not real-time row-level sync. It stores ledger/settings data and transaction exports and uses retry behavior in the WebDAV service. Because the DeepSeek API key is part of the main settings, it is included in WebDAV `settings.json`; AI conversations and messages are not.
+
+The AI assistant never connects DeepSeek directly to IndexedDB and never sends the full database to a model. DeepSeek selects from fixed read-only tool schemas, the frontend validates the call and calculates the requested filters or aggregates locally, and only the user question plus the necessary metadata/result rows are sent back to DeepSeek. No AI tool can call transaction mutation, import, backup, or sync workflows.
 
 ## Local Development
 
@@ -158,6 +161,14 @@ Production assets are written to:
 ```text
 dist/
 ```
+
+### Test
+
+```bash
+npm test
+```
+
+The AI analytics, synchronized API-key storage boundary, DeepSeek stream parser, and conversation context window have automated Vitest coverage.
 
 ### Preview A Production Build
 
@@ -254,6 +265,70 @@ The frontend currently imports a fixed sync endpoint from `constants.ts`. If you
 
 Users can use WebDAV backup without deploying the Cloudflare backend. Browser/PWA deployments may still be affected by WebDAV provider CORS policies. The iOS Capacitor build can use native HTTP behavior for WebDAV backup flows.
 
+## DeepSeek AI Assistant
+
+Long-press the second bottom tab and choose **Statistics / 统计** or **AI Assistant / AI 助手**. After AI is selected, the tab icon and label change to **AI**, and normal taps continue opening the AI conversation view. The selected mode is stored on the current device and remains in effect across tab changes, refreshes, and app restarts until the user long-presses the tab and explicitly switches modes again.
+
+Configure the assistant from **Settings → AI Assistant**:
+
+- Provider: DeepSeek
+- API base URL: `https://api.deepseek.com`
+- Models: `deepseek-v4-flash` (default) and `deepseek-v4-pro`
+- User input: only a DeepSeek API key
+
+The provider card uses a DeepSeek logo stored locally at `public/deepseek-logo.png`, so the interface does not depend on a runtime image URL. Users can switch between Flash and Pro from AI settings; the selected model is stored and synchronized with the API key. The connection test uses DeepSeek's `/models` endpoint and does not create a chat completion. Responses are received through SSE but are displayed and saved only after local evidence validation; they can use Markdown tables and include a collapsible query-evidence section. The conversation-history drawer enters horizontally from the left. Conversations are saved by default and can be deleted individually or cleared together. The last selected conversation ID is stored on the current device, so reopening the AI view, refreshing, or restarting restores that conversation when it still exists.
+
+The in-app **Settings → AI Assistant** page also contains expandable guidance covering the local tool-query flow, supported and unsupported data, context compression and limits, statistical rules, DeepSeek data transmission, API-key synchronization, conversation storage, local answer grounding, and verification precautions.
+
+When the user scrolls away from the latest message, the conversation view shows a floating down button that returns directly to the bottom. The bottom navigation is hidden only while the software keyboard actually occupies the visual viewport and is restored when the keyboard closes; merely retaining textarea focus no longer leaves the navigation hidden.
+
+Supported read-only queries include:
+
+- Highest/lowest or matching transaction details.
+- Date presets such as the latest 15 days, 6 months, 12 months, this week/month/year, or all records.
+- Amount, count, average, maximum, minimum, income, expense, and net summaries.
+- Breakdowns by day, week, month, year, ledger, type, category, or category group.
+- Note-keyword filtering.
+- Trading-ledger buy/sell counts, realized revenue/cost/profit, and inventory quantity.
+
+The default scope is the ledger active when a conversation is created. The assistant only queries every ledger when the user explicitly asks for all ledgers. Accounting and trading ledgers are reported separately, and cross-ledger currency totals are labeled as CNY rather than silently mixing display currencies.
+
+### AI 如何查询账本数据
+
+AI 使用的是“模型理解问题 + 本地只读工具计算”的方式，不是让 DeepSeek 直接连接 IndexedDB，也不是把整库记录放进提示词：
+
+1. 前端把用户问题、当前时间和时区、会话默认账本、必要的近期上下文，以及固定的只读工具定义发送给 DeepSeek。
+2. DeepSeek 只负责理解自然语言并返回结构化工具调用，例如要求查询最近一年的支出、按分类聚合，或查找金额最高的明细。
+3. `services/aiAssistant.ts` 解析工具调用并限制调用轮数和结果大小；`services/aiAnalytics.ts` 再次校验账本、日期、类型、分类、分类组、备注关键字和金额范围等参数，不信任模型直接给出的参数。
+4. 查询在设备本地执行。主要数据源是当前 `AppState` 中的账本、交易、分类和分类组快照，这些数据在应用启动时从 IndexedDB 载入，并随正常记账操作保持更新。为了正确显示历史记录引用的已删除分类或分类组，查询引擎会按需通过 `dbAPI` 读取本地 IndexedDB 中的历史元数据。
+5. 日期范围解析、筛选、排序、合计、平均值、最大/最小值、收支差额、分组统计、币种展示和买卖本利润计算都由本地 TypeScript 代码确定性完成。
+6. 前端只把回答当前问题所需的聚合结果或受数量上限约束的明细返回 DeepSeek；附件不会读取，备注只在明细查询或备注搜索确有需要时包含。
+7. DeepSeek 根据本地工具结果组织自然语言答案。`aggregate_transactions` 只能支持汇总或分组结论；任何单笔日期、分类或备注都必须有 `find_transactions` 的匹配结果，查询为 0 时只能说明未找到。
+8. 最终文字在显示和保存前经过本地证据校验：金额、笔数、完整日期和 Markdown 明细单元格必须存在于本轮工具结果中。校验失败时会要求模型基于现有证据重答；在限定轮数内仍不合格时，前端改用本地工具结果直接生成保底答案。
+9. 历史助手回复不会被当作财务事实重新提供给模型；后续追问必须重新查询当前账本，避免错误回答或旧数据继续传播。回答中的“查询依据”会显示使用的工具、账本、实际日期范围、筛选条件、记录数以及是否发生截断。
+
+目前提供四个只读工具：
+
+| 工具 | 用途 | 本地返回内容 |
+| --- | --- | --- |
+| `get_ledger_catalog` | 识别账本、账本类型、显示币种、分类和分类组 | 查询所需的元数据目录 |
+| `find_transactions` | 查最高消费、备注匹配或其他具体明细 | 最多 50 条匹配明细及查询口径 |
+| `aggregate_transactions` | 计算合计、数量、平均、极值、净额和各维度分组 | 本地计算后的聚合结果 |
+| `get_trading_summary` | 查询买卖本的买入、卖出、成本、利润和库存 | 复用本地买卖本口径的摘要 |
+
+这些工具没有新增、修改、删除、导入、同步或备份入口。账目备注等内容也被视为不可信数据，不能覆盖系统规则或扩大工具权限。模型不会因为用户问题或历史回答中出现了某个商品名、备注、金额或日期，就把它视为数据库中已存在的记录。
+
+AI limitations and privacy boundaries:
+
+- The assistant is read-only and cannot add, edit, delete, import, back up, or sync ledger data.
+- Attachments are never read or sent to DeepSeek.
+- Notes are included only when a detail query or note search needs them.
+- The API key is stored locally in IndexedDB as `AppSettings.aiConfig`.
+- When account sync is enabled, `aiConfig` is included in the D1 `settings.data` payload. WebDAV backup includes it under `settings.aiConfig` in `settings.json`, and a full JSON export includes it as part of application settings.
+- Conversations, messages, context summaries, and query traces stay in the local `aiConversations` and `aiMessages` tables. They are excluded from D1 account sync, WebDAV backup, the sync queue, and JSON export.
+- Browser/PWA storage, D1 settings, WebDAV JSON, and exported JSON are not equivalent to an operating-system keychain and do not add separate API-key encryption. Protect the device, account, WebDAV access, and exported files.
+- AI history remains available offline, but sending a new question requires network access.
+
 ## Android And iOS Packaging
 
 Sync built web assets into the native projects:
@@ -290,6 +365,8 @@ build-ios-github.cmd
 - Cloud sync uses session-token authentication for normal sync and image routes.
 - WebDAV credentials are entered by users at runtime.
 - Cloudflare API configuration is not intended to be synced as account settings.
+- DeepSeek API keys are stored in local IndexedDB and are included in D1 account settings sync, WebDAV `settings.json`, and full JSON exports. AI conversations, messages, summaries, and query traces remain local-only.
+- AI queries send the user's question and the minimum locally calculated tool result required to answer it directly to `api.deepseek.com`; image attachments are excluded.
 - Public Worker deployments should review origin policy, authentication, rate limiting, secret handling, D1/KV/R2 access boundaries, and logging behavior.
 
 For vulnerability reporting and review scope, see [SECURITY.md](SECURITY.md).
@@ -298,7 +375,7 @@ For vulnerability reporting and review scope, see [SECURITY.md](SECURITY.md).
 
 - Improve setup documentation for self-hosted Cloudflare deployments.
 - Add clearer threat-model notes for local storage, WebDAV, Worker APIs, and attachment handling.
-- Add automated linting and test scripts when the project is ready for stricter contribution checks.
+- Expand automated tests beyond the current AI analytics and provider coverage.
 - Expand security-focused tests around sync isolation, image access, and backup flows.
 - Continue improving mobile packaging notes for Android and iOS.
 

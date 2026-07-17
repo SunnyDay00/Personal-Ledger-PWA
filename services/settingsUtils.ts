@@ -1,10 +1,53 @@
 import { DEFAULT_SETTINGS } from '../constants';
 import { AppSettings, AutoRecordRule, AutoRecordSchedule, HomeQuickAction, TransactionType } from '../types';
+import { normalizeAiConfig } from './aiConfig';
 
 const BACKUP_REMINDER_MIN_DAYS = 0;
 const BACKUP_REMINDER_MAX_DAYS = 60;
 const BACKUP_INTERVAL_MIN_DAYS = 1;
 const BACKUP_INTERVAL_MAX_DAYS = 60;
+
+export const SYNCABLE_SETTINGS_KEYS: (keyof AppSettings)[] = [
+  'themeMode',
+  'customThemeColor',
+  'enableAnimations',
+  'enableSound',
+  'enableHaptics',
+  'hapticStrength',
+  'fontContrast',
+  'webdavUrl',
+  'webdavUser',
+  'webdavPass',
+  'enableCloudSync',
+  'backupReminderDays',
+  'backupAutoEnabled',
+  'backupIntervalDays',
+  'syncDebounceSeconds',
+  'versionCheckIntervalFg',
+  'versionCheckIntervalBg',
+  'budget',
+  'keypadHeight',
+  'categoryRows',
+  'imageCacheLimit',
+  'categoryNotes',
+  'searchHistory',
+  'exportStartDate',
+  'exportEndDate',
+  'defaultLedgerId',
+  'homeQuickActions',
+  'autoRecords',
+  'aiConfig',
+];
+
+export const getSyncableSettings = (settings: AppSettings): Partial<AppSettings> => {
+  const syncable: Partial<AppSettings> = {};
+  for (const key of SYNCABLE_SETTINGS_KEYS) {
+    if (settings[key] !== undefined) {
+      (syncable as Record<string, unknown>)[key] = settings[key];
+    }
+  }
+  return syncable;
+};
 
 const clampInteger = (value: unknown, min: number, max: number, fallback: number): number => {
   const parsed = typeof value === 'string' && value.trim() === '' ? Number.NaN : Number(value);
@@ -152,5 +195,6 @@ export const normalizeAppSettings = (
     ),
     homeQuickActions: normalizeHomeQuickActions(merged.homeQuickActions),
     autoRecords: normalizeAutoRecords(merged.autoRecords),
+    aiConfig: normalizeAiConfig(merged.aiConfig, baseSettings.aiConfig),
   };
 };

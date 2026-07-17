@@ -1,5 +1,5 @@
 import Dexie, { Table } from 'dexie';
-import { Transaction, Ledger, Category, CategoryGroup, AppSettings, OperationLog, BackupLog, SyncEntityType, SyncOperation, SyncQueueItem } from '../types';
+import { Transaction, Ledger, Category, CategoryGroup, AppSettings, OperationLog, BackupLog, SyncEntityType, SyncOperation, SyncQueueItem, AiConfig, AiConversation, AiMessage } from '../types';
 import { loadState } from './storage';
 import { normalizeCategory, normalizeLedger, normalizeTransaction } from './ledgerUtils';
 
@@ -18,6 +18,9 @@ export class FinanceDB extends Dexie {
   images!: Table<{ key: string; blob: Blob; size: number; lastAccess: number }>;
   pending_uploads!: Table<{ key: string; blob: Blob; createdAt: number }>;
   syncQueue!: Table<SyncQueueItem>;
+  aiConfig!: Table<AiConfig>;
+  aiConversations!: Table<AiConversation>;
+  aiMessages!: Table<AiMessage>;
 
   constructor() {
     super(DB_NAME);
@@ -40,6 +43,11 @@ export class FinanceDB extends Dexie {
     });
     (this as any).version(4).stores({
         syncQueue: 'id, entityType, entityId, updatedAt'
+    });
+    (this as any).version(5).stores({
+        aiConfig: 'id, updatedAt',
+        aiConversations: 'id, updatedAt, createdAt',
+        aiMessages: 'id, conversationId, createdAt, [conversationId+createdAt]'
     });
   }
 
@@ -189,6 +197,9 @@ export async function ensureStoresReady(): Promise<boolean> {
       db.operationLogs.count(),
       db.backupLogs.count(),
       db.syncQueue.count(),
+      db.aiConfig.count(),
+      db.aiConversations.count(),
+      db.aiMessages.count(),
     ]);
     return true;
   } catch (e: any) {

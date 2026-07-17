@@ -10,7 +10,8 @@ import { SyncService } from '../services/sync';
 import { feedback } from '../services/feedback';
 import { imageService } from '../services/imageService';
 import { CNY_EXCHANGE_RATES, fetchLatestExchangeRates, getDisplayExchangeRates } from '../services/currency';
-import { normalizeAppSettings, normalizeBackupReminderDays } from '../services/settingsUtils';
+import { getSyncableSettings, normalizeAppSettings, normalizeBackupReminderDays } from '../services/settingsUtils';
+import { normalizeAiConfig } from '../services/aiConfig';
 import { checkSystemTimeSkew } from '../services/timeSkew';
 import { createAutoRecordTransaction, createAutoRecordTransactionId, getDueAutoRecordOccurrences, isAutoRecordRunnable } from '../services/autoRecords';
 import { getAvailableTradeBuyLots, getAvailableTradeCardKeys, getTradeInventory, getTransactionTypeLabel, isTradingLedger, normalizeCategory, normalizeLedger, normalizeLedgerType, normalizeTradeAllocations, normalizeTradeKeyAllocations, normalizeTradeKeys, normalizeTransaction, tradeKeyAllocationsToTradeAllocations } from '../services/ledgerUtils';
@@ -217,52 +218,11 @@ const countLocalDataRecords = async () => {
     return ledgers + categories + groups + transactions;
 };
 
-const SYNCABLE_SETTINGS_KEYS: (keyof AppSettings)[] = [
-    'themeMode',
-    'customThemeColor',
-    'enableAnimations',
-    'enableSound',
-    'enableHaptics',
-    'hapticStrength',
-    'fontContrast',
-    'webdavUrl',
-    'webdavUser',
-    'webdavPass',
-    'enableCloudSync',
-    'backupReminderDays',
-    'backupAutoEnabled',
-    'backupIntervalDays',
-    'syncDebounceSeconds',
-    'versionCheckIntervalFg',
-    'versionCheckIntervalBg',
-    'budget',
-    'keypadHeight',
-    'categoryRows',
-    'imageCacheLimit',
-    'categoryNotes',
-    'searchHistory',
-    'exportStartDate',
-    'exportEndDate',
-    'defaultLedgerId',
-    'homeQuickActions',
-    'autoRecords',
-];
-
-const withoutLocalAuthSecrets = (settings: AppSettings): Partial<AppSettings> => {
-    const syncable: Partial<AppSettings> = {};
-    for (const key of SYNCABLE_SETTINGS_KEYS) {
-        if (settings[key] !== undefined) {
-            (syncable as Record<string, unknown>)[key] = settings[key];
-        }
-    }
-    return syncable;
-};
-
 const SETTINGS_SYNC_ENTITY_ID = 'main';
 type CloudSyncMode = 'incremental' | 'full-repair' | 'migration';
 type CloudSyncTrigger = 'auto' | 'manual' | 'migration';
 
-const createSettingsSyncHash = (settings: AppSettings) => JSON.stringify(withoutLocalAuthSecrets(settings));
+const createSettingsSyncHash = (settings: AppSettings) => JSON.stringify(getSyncableSettings(settings));
 
 const countD1DataRows = (payload: Pick<D1PullResponse, 'ledgers' | 'categories' | 'groups' | 'transactions' | 'settings'>) =>
     (payload.ledgers?.length || 0) +
@@ -463,7 +423,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 }
 
                 // Load data from DB to Memory for UI (ViewModel)
-                const [settings, ledgers, categories, transactions, operationLogs, backupLogs, groups, queuedItems] = await Promise.all([
+                const [settings, ledgers, categories, transactions, operationLogs, backupLogs, groups, queuedItems, legacyAiConfig] = await Promise.all([
                     dbAPI.getSettings(),
                     dbAPI.getLedgers(),
                     dbAPI.getCategories(),
@@ -471,10 +431,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     dbAPI.getOperationLogs(),
                     dbAPI.getBackupLogs(),
                     groupStoreAvailableRef.current ? dbAPI.getCategoryGroups() : Promise.resolve([]),
-                    dbAPI.getSyncQueueItems()
+                    dbAPI.getSyncQueueItems(),
+                    db.aiConfig.get('main')
                 ]);
 
-                const loadedSettings = restoreStoredAuthSettings(normalizeAppSettings(settings, DEFAULT_SETTINGS));
+                const settingsHasAiConfig = !!settings
+                    && Object.prototype.hasOwnProperty.call(settings, 'aiConfig')
+                    && !!settings.aiConfig;
+                const migratedLegacyAiConfig = !settingsHasAiConfig && !!legacyAiConfig;
+                const migratedSettingsUpdatedAt = migratedLegacyAiConfig
+                    ? nextMutationTime()
+                    : settings?.settingsUpdatedAt;
+                const loadedSettings = restoreStoredAuthSettings(normalizeAppSettings({
+                    ...(settings || {}),
+                    aiConfig: normalizeAiConfig(
+                        settingsHasAiConfig ? settings?.aiConfig : legacyAiConfig,
+                        DEFAULT_SETTINGS.aiConfig
+                    ),
+                    settingsUpdatedAt: migratedSettingsUpdatedAt,
+                }, DEFAULT_SETTINGS));
                 if (loadedSettings.enableCloudSync === undefined) loadedSettings.enableCloudSync = false;
 
                 const lastLedgerId = typeof window !== 'undefined' ? localStorage.getItem('lastLedgerId') : null;
@@ -495,6 +470,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     if (serializedLoaded !== serializedStored) {
                         await db.settings.put({ key: 'main', value: loadedSettings });
                     }
+                }
+                if (migratedLegacyAiConfig) {
+                    await queueCloudSave('settings', SETTINGS_SYNC_ENTITY_ID, 'upsert', migratedSettingsUpdatedAt);
                 }
 
                 lastLocalMutationRef.current = maxNumeric([
@@ -533,7 +511,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
         };
         init();
-    }, [refreshPendingSyncCount]);
+    }, [nextMutationTime, queueCloudSave, refreshPendingSyncCount]);
 
     // Persist Changes to DB (Write-Behind / Side-Effects)
     // We use this useEffect to save Settings whenever they change
@@ -1653,7 +1631,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             if (forceFullSync || txFiltered.length > 0) payload.transactions = txFiltered.map(mapTx);
             if (settingsQueueItem) {
                 payload.settings = {
-                    data: withoutLocalAuthSecrets(stateRef.current.settings),
+                    data: getSyncableSettings(stateRef.current.settings),
                     updated_at: settingsQueueItem.updatedAt,
                 };
             }

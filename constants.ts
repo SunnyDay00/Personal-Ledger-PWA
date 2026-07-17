@@ -1,4 +1,5 @@
 import { Category, CategoryType, CurrencyCode, Ledger, AppSettings } from './types';
+import { createDefaultAiConfig } from './services/aiConfig';
 
 export const DEFAULT_THEME_COLOR = '#007AFF';
 export const FIXED_SYNC_ENDPOINT = 'https://sync.sssr.edu.kg';
@@ -108,11 +109,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   exportStartDate: '',
   exportEndDate: '',
   isFirstRun: true,
-  version: '7.6.5',
+  version: '7.6.6',
   debugMode: typeof localStorage !== 'undefined' ? localStorage.getItem('debugMode') === 'true' : false,
   defaultLedgerId: '',
   homeQuickActions: [],
   autoRecords: [],
+  aiConfig: createDefaultAiConfig(),
 };
 
 export const INITIAL_LEDGERS: Ledger[] = [

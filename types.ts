@@ -146,6 +146,55 @@ export interface Transaction {
   isDeleted?: boolean; // Soft delete
 }
 
+export type AiProvider = 'deepseek';
+export type AiModel = 'deepseek-v4-flash' | 'deepseek-v4-pro';
+export type AiMessageRole = 'user' | 'assistant';
+export type AiMessageStatus = 'complete' | 'streaming' | 'cancelled' | 'error';
+export type AiToolName =
+  | 'get_ledger_catalog'
+  | 'find_transactions'
+  | 'aggregate_transactions'
+  | 'get_trading_summary';
+
+export interface AiConfig {
+  id: 'main';
+  provider: AiProvider;
+  model: AiModel;
+  apiKey: string;
+  dataConsentAt?: number;
+  updatedAt: number;
+}
+
+export interface AiConversation {
+  id: string;
+  title: string;
+  defaultLedgerId: string;
+  contextSummary?: string;
+  summarizedThroughMessageId?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AiQueryTrace {
+  tool: AiToolName;
+  label: string;
+  ledgerNames: string[];
+  dateRange?: string;
+  filters?: string[];
+  recordCount?: number;
+  truncated?: boolean;
+}
+
+export interface AiMessage {
+  id: string;
+  conversationId: string;
+  role: AiMessageRole;
+  content: string;
+  status: AiMessageStatus;
+  queryTraces?: AiQueryTrace[];
+  createdAt: number;
+}
+
 export type SyncEntityType = 'transaction' | 'ledger' | 'category' | 'categoryGroup' | 'settings';
 export type SyncOperation = 'upsert' | 'delete';
 
@@ -246,6 +295,9 @@ export interface AppSettings {
   defaultLedgerId?: string;
   homeQuickActions: HomeQuickAction[];
   autoRecords: AutoRecordRule[];
+  // DeepSeek configuration is stored with settings so account sync and WebDAV
+  // settings backups can restore it. Conversation history remains local-only.
+  aiConfig?: AiConfig;
   isFirstRun: boolean;
   exportStartDate?: string;
   exportEndDate?: string;

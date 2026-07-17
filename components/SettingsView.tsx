@@ -21,8 +21,9 @@ import { getSortedHomeQuickActions } from '../services/homeQuickActions';
 import { getAutoRecordScheduleLabel } from '../services/autoRecords';
 import { Keyboard } from '@capacitor/keyboard';
 import { Capacitor } from '@capacitor/core';
+import { AISettingsView } from './AISettingsView';
 
-type SettingsPage = 'main' | 'security' | 'ledgers' | 'categories' | 'autoRecords' | 'history' | 'layout' | 'theme' | 'shortcuts' | 'about' | 'storage';
+type SettingsPage = 'main' | 'security' | 'ai' | 'ledgers' | 'categories' | 'autoRecords' | 'history' | 'layout' | 'theme' | 'shortcuts' | 'about' | 'storage';
 
 type AutoRecordModalState = {
   isOpen: boolean;
@@ -1217,6 +1218,7 @@ export const SettingsView: React.FC = () => {
       </SettingsGroup>
 
       <SettingsGroup title="管理">
+        <SettingsItem icon="Sparkles" label="AI 助手" value="DeepSeek" onClick={() => setPage('ai')} />
         <SettingsItem icon="Book" label="多账本管理" value={`${state.ledgers.length}个`} onClick={() => setPage('ledgers')} />
         <SettingsItem
           icon="Bookmark"
@@ -3031,6 +3033,8 @@ export const SettingsView: React.FC = () => {
         return '设置';
       case 'security':
         return '云同步与备份';
+      case 'ai':
+        return 'AI 助手';
       case 'ledgers':
         return '账本管理';
       case 'categories':
@@ -3098,6 +3102,7 @@ export const SettingsView: React.FC = () => {
       >
         {page === 'main' && renderMainContent()}
         {page === 'security' && renderSecurity()}
+        {page === 'ai' && <AISettingsView />}
         {page === 'ledgers' && renderLedgers()}
         {page === 'categories' && renderCategories()}
         {page === 'autoRecords' && renderAutoRecords()}

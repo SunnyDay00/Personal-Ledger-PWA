@@ -24,12 +24,35 @@ type HomeJumpTarget = {
 };
 
 const ADD_LONG_PRESS_MS = 450;
+const STATS_LONG_PRESS_MS = 500;
+const STATS_MODE_STORAGE_KEY = 'personal-ledger-stats-mode';
+
+const readStoredStatsMode = (): 'stats' | 'ai' => {
+    if (typeof window === 'undefined') return 'stats';
+    try {
+        return window.localStorage.getItem(STATS_MODE_STORAGE_KEY) === 'ai' ? 'ai' : 'stats';
+    } catch {
+        return 'stats';
+    }
+};
+
+const persistStatsMode = (mode: 'stats' | 'ai') => {
+    if (typeof window === 'undefined') return;
+    try {
+        window.localStorage.setItem(STATS_MODE_STORAGE_KEY, mode);
+    } catch {
+        // Keep the in-memory mode even when persistent storage is unavailable.
+    }
+};
 
 const StatsView = React.lazy(() => import('./StatsView').then(module => ({ default: module.StatsView })));
+const AIView = React.lazy(() => import('./AIView').then(module => ({ default: module.AIView })));
 
 export const Layout: React.FC = () => {
     const { state, dispatch, canUndo, undo } = useApp();
     const [activeTab, setActiveTab] = useState<'home' | 'stats' | 'ledgers' | 'settings'>('home');
+    const [statsMode, setStatsMode] = useState<'stats' | 'ai'>(readStoredStatsMode);
+    const [hideTabBarForKeyboard, setHideTabBarForKeyboard] = useState(false);
     const [showAdd, setShowAdd] = useState(false);
     const [showSearch, setShowSearch] = useState(false);
     const [showBudget, setShowBudget] = useState(false);
@@ -40,8 +63,11 @@ export const Layout: React.FC = () => {
     const [clipboardImage, setClipboardImage] = useState<string | undefined>(undefined);
     const [homeJumpTarget, setHomeJumpTarget] = useState<HomeJumpTarget | null>(null);
     const [showAddQuickMenu, setShowAddQuickMenu] = useState(false);
+    const [showStatsQuickMenu, setShowStatsQuickMenu] = useState(false);
     const addLongPressTimerRef = useRef<number | null>(null);
     const suppressAddClickRef = useRef(false);
+    const statsLongPressTimerRef = useRef<number | null>(null);
+    const suppressStatsClickRef = useRef(false);
     const ledgersRef = useRef(state.ledgers);
     const categoriesRef = useRef(state.categories);
     const currentLedgerIdRef = useRef(state.currentLedgerId);
@@ -128,8 +154,62 @@ export const Layout: React.FC = () => {
         feedback.vibrate('medium');
     }, [clearAddLongPressTimer]);
 
+    const clearStatsLongPressTimer = useCallback(() => {
+        if (statsLongPressTimerRef.current !== null) {
+            window.clearTimeout(statsLongPressTimerRef.current);
+            statsLongPressTimerRef.current = null;
+        }
+    }, []);
+
+    const openStatsQuickMenu = useCallback(() => {
+        clearStatsLongPressTimer();
+        suppressStatsClickRef.current = true;
+        setShowAddQuickMenu(false);
+        setShowStatsQuickMenu(true);
+        feedback.play('switch');
+        feedback.vibrate('medium');
+    }, [clearStatsLongPressTimer]);
+
+    const handleStatsPointerDown = useCallback(() => {
+        clearStatsLongPressTimer();
+        suppressStatsClickRef.current = false;
+        statsLongPressTimerRef.current = window.setTimeout(openStatsQuickMenu, STATS_LONG_PRESS_MS);
+    }, [clearStatsLongPressTimer, openStatsQuickMenu]);
+
+    const handleStatsPointerEnd = useCallback(() => {
+        clearStatsLongPressTimer();
+    }, [clearStatsLongPressTimer]);
+
+    const handleStatsContextMenu = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+        event.preventDefault();
+        openStatsQuickMenu();
+    }, [openStatsQuickMenu]);
+
+    const selectStatsMode = useCallback((mode: 'stats' | 'ai') => {
+        clearStatsLongPressTimer();
+        suppressStatsClickRef.current = false;
+        setShowStatsQuickMenu(false);
+        setShowAddQuickMenu(false);
+        setStatsMode(mode);
+        persistStatsMode(mode);
+        setActiveTab('stats');
+    }, [clearStatsLongPressTimer]);
+
+    const handleStatsClick = useCallback(() => {
+        if (suppressStatsClickRef.current) {
+            suppressStatsClickRef.current = false;
+            return;
+        }
+        clearStatsLongPressTimer();
+        setShowStatsQuickMenu(false);
+        setShowAddQuickMenu(false);
+        setActiveTab('stats');
+    }, [clearStatsLongPressTimer]);
+
     const handleTabSelect = useCallback((tab: 'home' | 'stats' | 'ledgers' | 'settings') => {
         setShowAddQuickMenu(false);
+        setShowStatsQuickMenu(false);
+        setHideTabBarForKeyboard(false);
         setActiveTab(tab);
     }, []);
 
@@ -145,7 +225,8 @@ export const Layout: React.FC = () => {
 
     useEffect(() => () => {
         clearAddLongPressTimer();
-    }, [clearAddLongPressTimer]);
+        clearStatsLongPressTimer();
+    }, [clearAddLongPressTimer, clearStatsLongPressTimer]);
 
     const openAddFromUrl = useCallback((urlStr?: string) => {
         if (!urlStr || !urlStr.includes('add')) return;
@@ -285,13 +366,25 @@ export const Layout: React.FC = () => {
             {/* Main takes full height, navigation floats on top at bottom */}
             <main className="h-full w-full overflow-hidden relative">
                 {activeTab === 'home' && <HomeView onOpenSearch={() => setShowSearch(true)} onOpenBudget={() => setShowBudget(true)} jumpTarget={homeJumpTarget} onJumpTargetHandled={() => setHomeJumpTarget(null)} />}
-                {activeTab === 'stats' && (
+                {activeTab === 'stats' && statsMode === 'stats' && (
                     <React.Suspense fallback={
                         <div className="h-full w-full flex items-center justify-center text-ios-subtext">
                             <Icon name="Loader2" className="w-6 h-6 animate-spin" />
                         </div>
                     }>
                         <StatsView onOpenHomeTransaction={handleOpenHomeTransaction} />
+                    </React.Suspense>
+                )}
+                {activeTab === 'stats' && statsMode === 'ai' && (
+                    <React.Suspense fallback={
+                        <div className="h-full w-full flex items-center justify-center text-ios-subtext">
+                            <Icon name="Loader2" className="w-6 h-6 animate-spin" />
+                        </div>
+                    }>
+                        <AIView
+                            onOpenSettings={() => handleTabSelect('settings')}
+                            onComposerFocusChange={setHideTabBarForKeyboard}
+                        />
                     </React.Suspense>
                 )}
                 {activeTab === 'ledgers' && <LedgerManageView />}
@@ -310,11 +403,15 @@ export const Layout: React.FC = () => {
             }} />}
             {showAdd && <AddView onClose={() => { setShowAdd(false); setInitialAddData(undefined); setInitialAddType(undefined); setInitialAddLedgerId(undefined); setClipboardImage(undefined); }} initialTransaction={initialAddData} initialClipboardImage={clipboardImage} initialType={initialAddType} targetLedgerId={initialAddLedgerId} />}
             {showBudget && <BudgetModal onClose={() => setShowBudget(false)} />}
-            {showAddQuickMenu && (
+            {(showAddQuickMenu || showStatsQuickMenu) && (
                 <button
-                    aria-label="关闭快捷添加菜单"
+                    aria-label="关闭快捷菜单"
                     className="fixed inset-0 z-30 cursor-default bg-black/5 backdrop-blur-[1px] animate-fade-in dark:bg-black/20"
-                    onClick={() => setShowAddQuickMenu(false)}
+                    onClick={() => {
+                        suppressStatsClickRef.current = false;
+                        setShowAddQuickMenu(false);
+                        setShowStatsQuickMenu(false);
+                    }}
                 />
             )}
 
@@ -337,8 +434,46 @@ export const Layout: React.FC = () => {
 
             {/* Tab Bar - Floating Capsule Design */}
             <nav
-                className="absolute bottom-6 left-4 right-4 z-40 h-16"
+                className={clsx(
+                    'absolute bottom-6 left-4 right-4 z-40 h-16 transition-all duration-200',
+                    hideTabBarForKeyboard && 'pointer-events-none translate-y-24 opacity-0'
+                )}
             >
+                {showStatsQuickMenu && (
+                    <div className="animate-add-quick-menu absolute left-[30%] bottom-[4.75rem] z-50 flex -translate-x-1/2 items-center gap-2 rounded-full bg-white/35 p-1 shadow-[0_14px_38px_rgba(0,0,0,0.16)] backdrop-blur-xl dark:bg-zinc-950/30">
+                        {[
+                            { mode: 'stats' as const, label: '统计', icon: 'BarChart3' },
+                            { mode: 'ai' as const, label: 'AI 助手', icon: 'Sparkles' },
+                        ].map((action, index) => (
+                            <button
+                                key={action.mode}
+                                onClick={() => selectStatsMode(action.mode)}
+                                className={clsx(
+                                    'animate-add-quick-action h-11 whitespace-nowrap rounded-full border px-4 text-sm font-semibold shadow-[0_10px_30px_rgba(0,0,0,0.18)] backdrop-blur-md active:scale-95',
+                                    statsMode === action.mode
+                                        ? 'border-ios-primary/30 bg-ios-primary text-white'
+                                        : 'border-white/70 bg-white/95 text-ios-text dark:border-white/10 dark:bg-zinc-900/95'
+                                )}
+                                style={{ animationDelay: `${index * 45}ms` }}
+                            >
+                                <span className="flex items-center gap-2">
+                                    <Icon
+                                        name={action.icon}
+                                        className={clsx(
+                                            'h-4 w-4',
+                                            statsMode === action.mode
+                                                ? 'text-white'
+                                                : action.mode === 'ai'
+                                                    ? 'text-ios-primary'
+                                                    : 'text-ios-subtext'
+                                        )}
+                                    />
+                                    {action.label}
+                                </span>
+                            </button>
+                        ))}
+                    </div>
+                )}
                 {showAddQuickMenu && (
                     <div className="animate-add-quick-menu absolute left-1/2 bottom-[4.75rem] z-50 flex -translate-x-1/2 items-center gap-2 rounded-full bg-white/35 p-1 shadow-[0_14px_38px_rgba(0,0,0,0.16)] backdrop-blur-xl dark:bg-zinc-950/30">
                         {addQuickActions.map((action, index) => (
@@ -381,9 +516,15 @@ export const Layout: React.FC = () => {
                     {/* 2. Stats */}
                     <TabButton
                         active={activeTab === 'stats'}
-                        onClick={() => handleTabSelect('stats')}
-                        icon="BarChart3"
-                        label="统计"
+                        onClick={handleStatsClick}
+                        onPointerDown={handleStatsPointerDown}
+                        onPointerUp={handleStatsPointerEnd}
+                        onPointerLeave={handleStatsPointerEnd}
+                        onPointerCancel={handleStatsPointerEnd}
+                        onContextMenu={handleStatsContextMenu}
+                        ariaExpanded={showStatsQuickMenu}
+                        icon={statsMode === 'ai' ? 'Sparkles' : 'BarChart3'}
+                        label={statsMode === 'ai' ? 'AI' : '统计'}
                         position="second"
                     />
 
@@ -441,14 +582,47 @@ export const Layout: React.FC = () => {
     );
 };
 
-const TabButton: React.FC<{ active: boolean; onClick: () => void; icon: string; label: string; position?: 'first' | 'second' | 'middle' | 'fourth' | 'last' }> = ({ active, onClick, icon, label, position = 'middle' }) => (
-    <button onClick={() => {
-        if (!active) {
-            feedback.play('click');
-            feedback.vibrate('light');
-        }
-        onClick();
-    }} className="flex flex-col items-center justify-center w-[20%] h-full group relative p-0.5">
+const TabButton: React.FC<{
+    active: boolean;
+    onClick: () => void;
+    icon: string;
+    label: string;
+    position?: 'first' | 'second' | 'middle' | 'fourth' | 'last';
+    onPointerDown?: React.PointerEventHandler<HTMLButtonElement>;
+    onPointerUp?: React.PointerEventHandler<HTMLButtonElement>;
+    onPointerLeave?: React.PointerEventHandler<HTMLButtonElement>;
+    onPointerCancel?: React.PointerEventHandler<HTMLButtonElement>;
+    onContextMenu?: React.MouseEventHandler<HTMLButtonElement>;
+    ariaExpanded?: boolean;
+}> = ({
+    active,
+    onClick,
+    icon,
+    label,
+    position = 'middle',
+    onPointerDown,
+    onPointerUp,
+    onPointerLeave,
+    onPointerCancel,
+    onContextMenu,
+    ariaExpanded,
+}) => (
+    <button
+        onPointerDown={onPointerDown}
+        onPointerUp={onPointerUp}
+        onPointerLeave={onPointerLeave}
+        onPointerCancel={onPointerCancel}
+        onContextMenu={onContextMenu}
+        aria-expanded={ariaExpanded}
+        onClick={() => {
+            if (!active) {
+                feedback.play('click');
+                feedback.vibrate('light');
+            }
+            onClick();
+        }}
+        className="flex flex-col items-center justify-center w-[20%] h-full group relative p-0.5"
+    >
         <div className={clsx(
             "relative z-10 flex flex-col items-center justify-center gap-0.5 transition-all duration-300 w-full h-full",
             active ? "bg-gray-200 dark:bg-zinc-700 shadow-sm" : "bg-transparent",

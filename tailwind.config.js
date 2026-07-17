@@ -31,12 +31,17 @@ export default {
       },
       animation: {
         'slide-up': 'slideUp 0.3s ease-out forwards',
+        'history-slide-in': 'historySlideIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) forwards',
         'fade-in': 'fadeIn 0.2s ease-out forwards',
       },
       keyframes: {
         slideUp: {
           '0%': { transform: 'translateY(100%)' },
           '100%': { transform: 'translateY(0)' },
+        },
+        historySlideIn: {
+          '0%': { transform: 'translateX(-100%)' },
+          '100%': { transform: 'translateX(0)' },
         },
         fadeIn: {
           '0%': { opacity: '0' },
