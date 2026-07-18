@@ -95,6 +95,24 @@ describe('AI ledger intent routing', () => {
     status: 'complete',
     createdAt,
   });
+  const assistantMessage = (
+    content: string,
+    createdAt: number,
+    withQueryTrace = false
+  ): AiMessage => ({
+    id: String(createdAt),
+    conversationId: conversation.id,
+    role: 'assistant',
+    content,
+    status: 'complete',
+    queryTraces: withQueryTrace ? [{
+      tool: 'aggregate_transactions',
+      label: '聚合统计',
+      ledgerNames: ['日常账本'],
+      recordCount: 9,
+    }] : undefined,
+    createdAt,
+  });
 
   it('uses local tools for explicit data questions', () => {
     expect(shouldUseLedgerTools([userMessage('分析近半年的支出', 1)])).toBe(true);
@@ -104,13 +122,34 @@ describe('AI ledger intent routing', () => {
   it('uses local tools for short follow-ups to a data question', () => {
     expect(shouldUseLedgerTools([
       userMessage('分析近一年的消费', 1),
+      assistantMessage('今年的支出偏高。', 2, true),
       userMessage('为什么这么高？', 2),
+    ])).toBe(true);
+  });
+
+  it('continues a data query when the user confirms the assistant suggestion', () => {
+    expect(shouldUseLedgerTools([
+      userMessage('今年我买数码产品花了多少钱？', 1),
+      assistantMessage('需要我把这 9 笔明细列出来吗？', 2, true),
+      userMessage('要', 3),
+    ])).toBe(true);
+    expect(shouldUseLedgerTools([
+      userMessage('今年我买数码产品花了多少钱？', 1),
+      assistantMessage('需要我把这 9 笔明细列出来吗？', 2, true),
+      userMessage('继续', 3),
     ])).toBe(true);
   });
 
   it('does not force ordinary conversation through ledger tools', () => {
     expect(shouldUseLedgerTools([userMessage('你怎么傻乎乎的？', 1)])).toBe(false);
     expect(shouldUseLedgerTools([userMessage('你能做什么？', 1)])).toBe(false);
+    expect(shouldUseLedgerTools([
+      userMessage('分析近一年的消费', 1),
+      assistantMessage('今年支出偏高。', 2, true),
+      userMessage('你能做什么？', 3),
+      assistantMessage('我可以陪你聊聊，也可以查询账本。', 4),
+      userMessage('好', 5),
+    ])).toBe(false);
   });
 });
 

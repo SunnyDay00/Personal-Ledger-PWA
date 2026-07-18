@@ -9,7 +9,7 @@ import { generateId } from '../utils';
 import { aiStorage } from '../services/aiStorage';
 import { getDeepSeekModelName } from '../services/aiConfig';
 import { maybeSummarizeConversation, runAiTurn } from '../services/aiAssistant';
-import { resolveAiKeyboardLayout } from '../services/aiKeyboardLayout';
+import { coalesceAiViewportReduction, resolveAiKeyboardLayout } from '../services/aiKeyboardLayout';
 import { feedback } from '../services/feedback';
 import { Icon } from './ui/Icon';
 import { clsx } from 'clsx';
@@ -72,6 +72,90 @@ const formatConversationTime = (timestamp: number) => {
   return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
 };
 
+interface AiMessageBubbleProps {
+  message: AiMessage;
+  copied: boolean;
+  regenerateDisabled: boolean;
+  onCopy: (message: AiMessage) => void;
+  onRegenerate: (message: AiMessage) => void;
+}
+
+const AiMessageBubble = React.memo<AiMessageBubbleProps>(({
+  message,
+  copied,
+  regenerateDisabled,
+  onCopy,
+  onRegenerate,
+}) => (
+  <div className={clsx('flex', message.role === 'user' ? 'justify-end' : 'justify-start')}>
+    {message.role === 'user' ? (
+      <div className="max-w-[86%] whitespace-pre-wrap rounded-[1.25rem] rounded-br-md bg-ios-primary px-4 py-3 text-sm leading-6 text-white shadow-sm">
+        {message.content}
+      </div>
+    ) : (
+      <div className="w-full max-w-[94%]">
+        <div className={clsx(
+          'rounded-[1.25rem] rounded-bl-md border border-ios-border bg-white px-4 py-3 text-sm leading-6 shadow-sm dark:bg-zinc-900',
+          message.status === 'error' && 'border-red-200 text-red-600 dark:border-red-900',
+          message.status === 'cancelled' && 'text-ios-subtext'
+        )}>
+          {message.status === 'streaming' && !message.content ? (
+            <div className="flex items-center gap-2 py-1 text-ios-subtext">
+              <Icon name="Loader2" className="h-4 w-4 animate-spin" />
+              正在查询账本…
+            </div>
+          ) : (
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+                ul: ({ children }) => <ul className="mb-2 list-disc space-y-1 pl-5">{children}</ul>,
+                ol: ({ children }) => <ol className="mb-2 list-decimal space-y-1 pl-5">{children}</ol>,
+                table: ({ children }) => (
+                  <div className="my-3 overflow-x-auto rounded-xl border border-ios-border">
+                    <table className="min-w-full text-left text-xs">{children}</table>
+                  </div>
+                ),
+                th: ({ children }) => <th className="whitespace-nowrap bg-gray-50 px-3 py-2 font-semibold dark:bg-zinc-800">{children}</th>,
+                td: ({ children }) => <td className="border-t border-ios-border px-3 py-2 align-top">{children}</td>,
+                code: ({ children }) => <code className="rounded bg-gray-100 px-1 py-0.5 text-xs dark:bg-zinc-800">{children}</code>,
+              }}
+            >
+              {message.content}
+            </ReactMarkdown>
+          )}
+        </div>
+        {message.queryTraces && message.queryTraces.length > 0 && (
+          <details className="mx-2 mt-2 rounded-xl bg-black/[0.025] px-3 py-2 text-[11px] text-ios-subtext dark:bg-white/[0.04]">
+            <summary className="cursor-pointer select-none font-medium text-ios-text">查询依据</summary>
+            <div className="mt-2 space-y-2">
+              {message.queryTraces.map((trace, index) => (
+                <div key={`${trace.tool}-${index}`}>
+                  <div className="font-medium text-ios-text">{trace.label}</div>
+                  <div>{trace.ledgerNames.join('、') || '未指定账本'}{trace.dateRange ? ` · ${trace.dateRange}` : ''}</div>
+                  {trace.filters?.length ? <div>{trace.filters.join('；')}</div> : null}
+                  {trace.recordCount !== undefined && <div>{trace.recordCount} 条{trace.truncated ? ' · 结果已截断' : ''}</div>}
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+        {message.status !== 'streaming' && (
+          <div className="mt-1.5 flex items-center gap-1 px-2 text-ios-subtext">
+            <button type="button" onClick={() => onCopy(message)} className="rounded-lg p-1.5 active:bg-black/5 dark:active:bg-white/5" aria-label="复制回复">
+              <Icon name={copied ? 'Check' : 'Copy'} className="h-3.5 w-3.5" />
+            </button>
+            <button type="button" onClick={() => onRegenerate(message)} disabled={regenerateDisabled} className="rounded-lg p-1.5 active:bg-black/5 disabled:opacity-40 dark:active:bg-white/5" aria-label="重新生成">
+              <Icon name="RefreshCw" className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+      </div>
+    )}
+  </div>
+));
+AiMessageBubble.displayName = 'AiMessageBubble';
+
 export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusChange }) => {
   const { state, dispatch } = useApp();
   const [config, setConfig] = useState<AiConfig | null>(null);
@@ -87,10 +171,12 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
   const [textareaFocused, setTextareaFocused] = useState(false);
   const [nativeKeyboardHeight, setNativeKeyboardHeight] = useState(0);
   const [visualViewportReduction, setVisualViewportReduction] = useState(0);
-  const [viewport, setViewport] = useState({
+  const viewportRootRef = useRef<HTMLDivElement>(null);
+  const appliedViewportRef = useRef({
     height: typeof window !== 'undefined' ? window.innerHeight : 0,
     offsetTop: 0,
   });
+  const viewportFrameRef = useRef<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -98,6 +184,10 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
   const positionLoadedConversationRef = useRef(true);
   const isNearBottomRef = useRef(true);
   const fullViewportHeightRef = useRef(typeof window !== 'undefined' ? window.innerHeight : 0);
+  const regenerateActionRef = useRef<(message: AiMessage) => Promise<void>>(async () => undefined);
+  const handleRegenerateMessage = useCallback((message: AiMessage) => {
+    void regenerateActionRef.current(message);
+  }, []);
   const keyboardLayout = useMemo(() => resolveAiKeyboardLayout({
     nativeKeyboardHeight,
     visualViewportReduction,
@@ -193,10 +283,12 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
 
   useEffect(() => {
     const visualViewport = window.visualViewport;
-    const update = () => {
+    const applyViewport = () => {
+      viewportFrameRef.current = null;
       const currentHeight = visualViewport?.height || window.innerHeight;
-      const textareaFocused = document.activeElement === textareaRef.current;
-      if (textareaFocused) {
+      const currentOffsetTop = visualViewport?.offsetTop || 0;
+      const focused = document.activeElement === textareaRef.current;
+      if (focused) {
         fullViewportHeightRef.current = Math.max(
           fullViewportHeightRef.current,
           window.innerHeight,
@@ -206,20 +298,41 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
         fullViewportHeightRef.current = Math.max(window.innerHeight, currentHeight);
       }
       const nextViewportReduction = Math.max(0, fullViewportHeightRef.current - currentHeight);
-      setViewport({
-        height: currentHeight,
-        offsetTop: visualViewport?.offsetTop || 0,
-      });
-      setVisualViewportReduction(nextViewportReduction);
+      const applied = appliedViewportRef.current;
+      if (
+        Math.abs(applied.height - currentHeight) >= 0.5
+        || Math.abs(applied.offsetTop - currentOffsetTop) >= 0.5
+      ) {
+        appliedViewportRef.current = {
+          height: currentHeight,
+          offsetTop: currentOffsetTop,
+        };
+        const root = viewportRootRef.current;
+        if (root) {
+          root.style.height = `${currentHeight}px`;
+          root.style.top = `${currentOffsetTop}px`;
+        }
+      }
+      setVisualViewportReduction(current =>
+        coalesceAiViewportReduction(current, nextViewportReduction)
+      );
     };
-    update();
-    visualViewport?.addEventListener('resize', update);
-    visualViewport?.addEventListener('scroll', update);
-    window.addEventListener('resize', update);
+    const scheduleViewportUpdate = () => {
+      if (viewportFrameRef.current !== null) return;
+      viewportFrameRef.current = window.requestAnimationFrame(applyViewport);
+    };
+    applyViewport();
+    visualViewport?.addEventListener('resize', scheduleViewportUpdate);
+    visualViewport?.addEventListener('scroll', scheduleViewportUpdate);
+    window.addEventListener('resize', scheduleViewportUpdate);
     return () => {
-      visualViewport?.removeEventListener('resize', update);
-      visualViewport?.removeEventListener('scroll', update);
-      window.removeEventListener('resize', update);
+      visualViewport?.removeEventListener('resize', scheduleViewportUpdate);
+      visualViewport?.removeEventListener('scroll', scheduleViewportUpdate);
+      window.removeEventListener('resize', scheduleViewportUpdate);
+      if (viewportFrameRef.current !== null) {
+        window.cancelAnimationFrame(viewportFrameRef.current);
+        viewportFrameRef.current = null;
+      }
     };
   }, []);
 
@@ -228,7 +341,10 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
     let disposed = false;
     const handles: Array<{ remove: () => Promise<void> }> = [];
     const show = (info: { keyboardHeight: number }) => {
-      setNativeKeyboardHeight(Math.max(0, Number(info.keyboardHeight) || 0));
+      const nextHeight = Math.max(0, Number(info.keyboardHeight) || 0);
+      setNativeKeyboardHeight(current =>
+        Math.abs(current - nextHeight) < 0.5 ? current : nextHeight
+      );
     };
     const hide = () => setNativeKeyboardHeight(0);
     const register = async () => {
@@ -435,6 +551,7 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
     setMessages([...history, replacement]);
     await runWithHistory(activeConversation, history, replacement);
   };
+  regenerateActionRef.current = regenerate;
 
   const stop = () => abortRef.current?.abort();
 
@@ -460,7 +577,7 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
     await newConversation();
   };
 
-  const copy = async (message: AiMessage) => {
+  const copy = useCallback(async (message: AiMessage) => {
     try {
       await navigator.clipboard.writeText(message.content);
       setCopiedId(message.id);
@@ -469,7 +586,7 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
     } catch {
       window.alert('复制失败，请长按文字复制');
     }
-  };
+  }, []);
 
   if (loading) {
     return (
@@ -483,8 +600,12 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
 
   return (
     <div
+      ref={viewportRootRef}
       className="fixed left-0 right-0 z-20 flex flex-col overflow-hidden bg-ios-bg text-ios-text"
-      style={{ height: viewport.height, top: viewport.offsetTop }}
+      style={{
+        height: appliedViewportRef.current.height,
+        top: appliedViewportRef.current.offsetTop,
+      }}
     >
       <header className="relative z-20 flex h-[calc(env(safe-area-inset-top)+3.75rem)] shrink-0 items-end border-b border-black/5 bg-ios-bg/85 px-4 pb-2.5 backdrop-blur-xl dark:border-white/5">
         <button
@@ -566,72 +687,14 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
         ) : (
           <div className="mx-auto max-w-2xl space-y-4">
             {messages.map(message => (
-              <div key={message.id} className={clsx('flex', message.role === 'user' ? 'justify-end' : 'justify-start')}>
-                {message.role === 'user' ? (
-                  <div className="max-w-[86%] whitespace-pre-wrap rounded-[1.25rem] rounded-br-md bg-ios-primary px-4 py-3 text-sm leading-6 text-white shadow-sm">
-                    {message.content}
-                  </div>
-                ) : (
-                  <div className="w-full max-w-[94%]">
-                    <div className={clsx(
-                      'rounded-[1.25rem] rounded-bl-md border border-ios-border bg-white px-4 py-3 text-sm leading-6 shadow-sm dark:bg-zinc-900',
-                      message.status === 'error' && 'border-red-200 text-red-600 dark:border-red-900',
-                      message.status === 'cancelled' && 'text-ios-subtext'
-                    )}>
-                      {message.status === 'streaming' && !message.content ? (
-                        <div className="flex items-center gap-2 py-1 text-ios-subtext">
-                          <Icon name="Loader2" className="h-4 w-4 animate-spin" />
-                          正在查询账本…
-                        </div>
-                      ) : (
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          components={{
-                            p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
-                            ul: ({ children }) => <ul className="mb-2 list-disc space-y-1 pl-5">{children}</ul>,
-                            ol: ({ children }) => <ol className="mb-2 list-decimal space-y-1 pl-5">{children}</ol>,
-                            table: ({ children }) => (
-                              <div className="my-3 overflow-x-auto rounded-xl border border-ios-border">
-                                <table className="min-w-full text-left text-xs">{children}</table>
-                              </div>
-                            ),
-                            th: ({ children }) => <th className="whitespace-nowrap bg-gray-50 px-3 py-2 font-semibold dark:bg-zinc-800">{children}</th>,
-                            td: ({ children }) => <td className="border-t border-ios-border px-3 py-2 align-top">{children}</td>,
-                            code: ({ children }) => <code className="rounded bg-gray-100 px-1 py-0.5 text-xs dark:bg-zinc-800">{children}</code>,
-                          }}
-                        >
-                          {message.content}
-                        </ReactMarkdown>
-                      )}
-                    </div>
-                    {message.queryTraces && message.queryTraces.length > 0 && (
-                      <details className="mx-2 mt-2 rounded-xl bg-black/[0.025] px-3 py-2 text-[11px] text-ios-subtext dark:bg-white/[0.04]">
-                        <summary className="cursor-pointer select-none font-medium text-ios-text">查询依据</summary>
-                        <div className="mt-2 space-y-2">
-                          {message.queryTraces.map((trace, index) => (
-                            <div key={`${trace.tool}-${index}`}>
-                              <div className="font-medium text-ios-text">{trace.label}</div>
-                              <div>{trace.ledgerNames.join('、') || '未指定账本'}{trace.dateRange ? ` · ${trace.dateRange}` : ''}</div>
-                              {trace.filters?.length ? <div>{trace.filters.join('；')}</div> : null}
-                              {trace.recordCount !== undefined && <div>{trace.recordCount} 条{trace.truncated ? ' · 结果已截断' : ''}</div>}
-                            </div>
-                          ))}
-                        </div>
-                      </details>
-                    )}
-                    {message.status !== 'streaming' && (
-                      <div className="mt-1.5 flex items-center gap-1 px-2 text-ios-subtext">
-                        <button type="button" onClick={() => void copy(message)} className="rounded-lg p-1.5 active:bg-black/5 dark:active:bg-white/5" aria-label="复制回复">
-                          <Icon name={copiedId === message.id ? 'Check' : 'Copy'} className="h-3.5 w-3.5" />
-                        </button>
-                        <button type="button" onClick={() => void regenerate(message)} disabled={generating} className="rounded-lg p-1.5 active:bg-black/5 disabled:opacity-40 dark:active:bg-white/5" aria-label="重新生成">
-                          <Icon name="RefreshCw" className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+              <AiMessageBubble
+                key={message.id}
+                message={message}
+                copied={copiedId === message.id}
+                regenerateDisabled={generating}
+                onCopy={copy}
+                onRegenerate={handleRegenerateMessage}
+              />
             ))}
           </div>
         )}

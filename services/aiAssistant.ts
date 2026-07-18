@@ -31,14 +31,34 @@ const traceToMessageTrace = (trace: any): AiQueryTrace | undefined => {
 const LEDGER_INTENT_PATTERN = /账本|账单|记录|明细|交易|消费|花费|支出|收入|收支|金额|花了|多少钱|统计|分析|分类|备注|买入|卖出|买了|利润|成本|库存|最高|最低|平均|趋势|汇总|合计|总共|占比|比例|哪一笔|哪次|预算|余额|结余|半个月|半年|一年|全年|今年|去年|本月|上月|本周|最近|过去|全部账本/;
 const META_INTENT_PATTERN = /^(?:你好|谢谢|再见|你是谁|你能做什么|你会什么|怎么使用|如何使用|可以问什么|能聊聊吗|你怎么.*(?:傻|笨)|你怎么了|你没事吧)/;
 const CONTEXTUAL_FOLLOW_UP_PATTERN = /^(?:那|再|还|另外|然后|换成|改成|具体|其中|对吗|真的吗|确定吗|没算错吧|解释一下|为什么|怎么).{0,30}(?:呢|吗|[？?])?$/;
+const CONFIRMATION_FOLLOW_UP_PATTERN = /^(?:要|要的|好|好的|好啊|可以|行|继续|请继续|展开|列出|看看|看一下|需要|想看|麻烦了|麻烦你了|对|是|嗯+|ok)[。！!？?\s]*$/i;
 
 export const shouldUseLedgerTools = (history: AiMessage[]) => {
-  const userMessages = history.filter(message => message.role === 'user' && message.content.trim());
-  const latest = userMessages.at(-1)?.content.trim() || '';
+  let latestUserIndex = -1;
+  for (let index = history.length - 1; index >= 0; index--) {
+    if (history[index].role === 'user' && history[index].content.trim()) {
+      latestUserIndex = index;
+      break;
+    }
+  }
+  if (latestUserIndex < 0) return false;
+
+  const latest = history[latestUserIndex].content.trim();
   if (LEDGER_INTENT_PATTERN.test(latest)) return true;
   if (META_INTENT_PATTERN.test(latest)) return false;
-  if (!CONTEXTUAL_FOLLOW_UP_PATTERN.test(latest)) return false;
-  return userMessages.slice(0, -1).slice(-3).some(message => LEDGER_INTENT_PATTERN.test(message.content));
+  if (!CONTEXTUAL_FOLLOW_UP_PATTERN.test(latest) && !CONFIRMATION_FOLLOW_UP_PATTERN.test(latest)) {
+    return false;
+  }
+
+  const earlier = history.slice(0, latestUserIndex);
+  const previousAssistant = [...earlier].reverse().find(message =>
+    message.role === 'assistant' && message.status === 'complete' && message.content.trim()
+  );
+  const previousUser = [...earlier].reverse().find(message =>
+    message.role === 'user' && message.status === 'complete' && message.content.trim()
+  );
+  return !!previousAssistant?.queryTraces?.length
+    || !!previousUser && LEDGER_INTENT_PATTERN.test(previousUser.content);
 };
 
 const buildSystemPrompt = (state: AppState, defaultLedgerId: string, useLedgerTools: boolean) => {
@@ -52,7 +72,7 @@ const buildSystemPrompt = (state: AppState, defaultLedgerId: string, useLedgerTo
 
 对话与表达：
 1. 先直接回应用户真正想知道的内容，再按需要补充原因、趋势、建议或简短列表。不要每次都使用相同标题、固定模板或“以下结果由工具计算”开场。
-2. 用户使用“收入呢”“那半年呢”“为什么这么高”等短追问时，要结合对话理解意图；数据追问重新查询，普通聊天则正常交流。
+2. 用户使用“收入呢”“那半年呢”“为什么这么高”等短追问，或用“要”“好”“可以”“继续”确认你上一轮提出的数据查询建议时，要结合历史回复和查询轨迹理解意图；数据追问重新查询，普通聊天则正常交流。
 3. 用户质疑、纠正或表达不满时，先回应这句话本身，再决定是否需要重新查询，不要无视用户而重复上一轮数字。
 4. 可以基于工具返回的数字进行清楚的比较、占比和趋势解释，但要说明它是根据本轮结果得出的分析，不得引入工具结果无法支持的新账目事实。
 
@@ -112,7 +132,7 @@ export const buildAiContextMessages = (
     output.push({
       role: message.role,
       content: assistantWithEvidence
-        ? `${message.content}${traceSummary(message)}\n[历史回复仅用于理解对话；其中账本数字如需再次引用，必须重新查询。]`
+        ? `${message.content}${traceSummary(message)}\n[可使用这段历史回复和查询轨迹理解当前追问；其中账本数字如需在本轮继续引用，必须重新查询。]`
         : `${message.content}${message.role === 'assistant' ? traceSummary(message) : ''}`,
     });
   });

@@ -1,5 +1,17 @@
 const KEYBOARD_VISIBILITY_THRESHOLD = 100;
 
+const normalizeViewportReduction = (value: number) => (
+  Number.isFinite(value) ? Math.max(0, value) : 0
+);
+
+export const coalesceAiViewportReduction = (current: number, next: number) => {
+  const safeCurrent = normalizeViewportReduction(current);
+  const safeNext = normalizeViewportReduction(next);
+  const currentKeyboardVisible = safeCurrent > KEYBOARD_VISIBILITY_THRESHOLD;
+  const nextKeyboardVisible = safeNext > KEYBOARD_VISIBILITY_THRESHOLD;
+  return currentKeyboardVisible === nextKeyboardVisible ? safeCurrent : safeNext;
+};
+
 export interface AiKeyboardLayoutInput {
   nativeKeyboardHeight: number;
   visualViewportReduction: number;
@@ -19,9 +31,7 @@ export const resolveAiKeyboardLayout = ({
   const safeNativeHeight = Number.isFinite(nativeKeyboardHeight)
     ? Math.max(0, nativeKeyboardHeight)
     : 0;
-  const safeViewportReduction = Number.isFinite(visualViewportReduction)
-    ? Math.max(0, visualViewportReduction)
-    : 0;
+  const safeViewportReduction = normalizeViewportReduction(visualViewportReduction);
   const visualViewportResized = textareaFocused
     && safeViewportReduction > KEYBOARD_VISIBILITY_THRESHOLD;
   const nativeKeyboardVisible = safeNativeHeight > 0;
