@@ -10,6 +10,11 @@ import { aiStorage } from '../services/aiStorage';
 import { getDeepSeekModelName } from '../services/aiConfig';
 import { maybeSummarizeConversation, runAiTurn } from '../services/aiAssistant';
 import { coalesceAiViewportReduction, resolveAiKeyboardLayout } from '../services/aiKeyboardLayout';
+import {
+  DEFAULT_STARTER_QUESTIONS,
+  generateStarterQuestions,
+  pickLocalStarterQuestions,
+} from '../services/aiSuggestions';
 import { feedback } from '../services/feedback';
 import { Icon } from './ui/Icon';
 import { clsx } from 'clsx';
@@ -41,12 +46,21 @@ interface AIViewProps {
   onComposerFocusChange?: (focused: boolean) => void;
 }
 
-const STARTER_PROMPTS = [
-  '近一年最高一次消费是什么？',
-  '分析近半年的支出情况',
-  '统计最近15天的分类消费',
-  '汇总全部账本的收支记录',
-];
+const THINKING_MESSAGES = [
+  '正在思考中…',
+  '请稍等，我在整理思路…',
+  '让我仔细想一想…',
+  '我正在认真分析…',
+  '正在梳理你的问题…',
+] as const;
+
+const getThinkingMessage = (messageId: string) => {
+  const hash = Array.from(messageId).reduce(
+    (total, character) => ((total * 31) + character.charCodeAt(0)) >>> 0,
+    0
+  );
+  return THINKING_MESSAGES[hash % THINKING_MESSAGES.length];
+};
 
 const createConversation = (ledgerId: string): AiConversation => {
   const now = Date.now();
@@ -94,7 +108,11 @@ const AiMessageBubble = React.memo<AiMessageBubbleProps>(({
         {message.content}
       </div>
     ) : (
-      <div className="w-full max-w-[94%]">
+      <div className={clsx(
+        message.status === 'streaming' && !message.content
+          ? 'w-fit max-w-[86%]'
+          : 'w-full max-w-[94%]'
+      )}>
         <div className={clsx(
           'rounded-[1.25rem] rounded-bl-md border border-ios-border bg-white px-4 py-3 text-sm leading-6 shadow-sm dark:bg-zinc-900',
           message.status === 'error' && 'border-red-200 text-red-600 dark:border-red-900',
@@ -103,7 +121,7 @@ const AiMessageBubble = React.memo<AiMessageBubbleProps>(({
           {message.status === 'streaming' && !message.content ? (
             <div className="flex items-center gap-2 py-1 text-ios-subtext">
               <Icon name="Loader2" className="h-4 w-4 animate-spin" />
-              正在查询账本…
+              {getThinkingMessage(message.id)}
             </div>
           ) : (
             <ReactMarkdown
@@ -169,6 +187,8 @@ export const AIView: React.FC<AIViewProps> = ({ isActive, onOpenSettings, onComp
   const [showHistory, setShowHistory] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isNearBottom, setIsNearBottom] = useState(true);
+  const [starterQuestions, setStarterQuestions] = useState<string[]>(() => [...DEFAULT_STARTER_QUESTIONS]);
+  const [refreshingStarterQuestions, setRefreshingStarterQuestions] = useState(false);
   const [textareaFocused, setTextareaFocused] = useState(false);
   const [nativeKeyboardHeight, setNativeKeyboardHeight] = useState(0);
   const [visualViewportReduction, setVisualViewportReduction] = useState(0);
@@ -179,6 +199,7 @@ export const AIView: React.FC<AIViewProps> = ({ isActive, onOpenSettings, onComp
   });
   const viewportFrameRef = useRef<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const starterQuestionsAbortRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const activeConversationRef = useRef<AiConversation | null>(null);
@@ -273,6 +294,7 @@ export const AIView: React.FC<AIViewProps> = ({ isActive, onOpenSettings, onComp
     return () => {
       active = false;
       abortRef.current?.abort();
+      starterQuestionsAbortRef.current?.abort();
       onComposerFocusChange?.(false);
     };
   }, [loadConversation, onComposerFocusChange]);
@@ -347,7 +369,7 @@ export const AIView: React.FC<AIViewProps> = ({ isActive, onOpenSettings, onComp
   }, [isActive]);
 
   useEffect(() => {
-    if (!Capacitor.isNativePlatform()) return;
+    if (!Capacitor.isNativePlatform() || !isActive) return;
     let disposed = false;
     const handles: Array<{ remove: () => Promise<void> }> = [];
     const show = (info: { keyboardHeight: number }) => {
@@ -374,7 +396,17 @@ export const AIView: React.FC<AIViewProps> = ({ isActive, onOpenSettings, onComp
       disposed = true;
       handles.forEach(handle => { void handle.remove(); });
     };
-  }, []);
+  }, [isActive]);
+
+  useEffect(() => {
+    if (isActive) return;
+    const textarea = textareaRef.current;
+    if (textarea && document.activeElement === textarea) {
+      textarea.blur();
+    }
+    setTextareaFocused(false);
+    setNativeKeyboardHeight(0);
+  }, [isActive]);
 
   useEffect(() => {
     onComposerFocusChange?.(isActive && keyboardVisible);
@@ -412,6 +444,44 @@ export const AIView: React.FC<AIViewProps> = ({ isActive, onOpenSettings, onComp
     () => state.ledgers.find(ledger => ledger.id === activeConversation?.defaultLedgerId),
     [activeConversation?.defaultLedgerId, state.ledgers]
   );
+
+  const refreshStarterQuestions = useCallback(async () => {
+    if (refreshingStarterQuestions || !config?.apiKey.trim()) return;
+    const previous = [...starterQuestions];
+    const controller = new AbortController();
+    starterQuestionsAbortRef.current?.abort();
+    starterQuestionsAbortRef.current = controller;
+    setRefreshingStarterQuestions(true);
+    try {
+      const nextQuestions = state.isOnline
+        ? await generateStarterQuestions({
+            apiKey: config.apiKey,
+            model: config.model,
+            previous,
+            signal: controller.signal,
+          })
+        : pickLocalStarterQuestions(previous);
+      if (!controller.signal.aborted) {
+        setStarterQuestions(nextQuestions);
+        feedback.play('click');
+        feedback.vibrate('light');
+      }
+    } catch (error: any) {
+      if (controller.signal.aborted || error?.name === 'AbortError') return;
+      setStarterQuestions(pickLocalStarterQuestions(previous));
+    } finally {
+      if (starterQuestionsAbortRef.current === controller) {
+        starterQuestionsAbortRef.current = null;
+        setRefreshingStarterQuestions(false);
+      }
+    }
+  }, [
+    config?.apiKey,
+    config?.model,
+    refreshingStarterQuestions,
+    starterQuestions,
+    state.isOnline,
+  ]);
 
   const persistAssistantResult = async (
     conversation: AiConversation,
@@ -677,12 +747,29 @@ export const AIView: React.FC<AIViewProps> = ({ isActive, onOpenSettings, onComp
                 只读查询，按需发送聚合结果或匹配明细，不会上传附件。
               </p>
             </div>
+            <div className="mb-2 flex items-center justify-between px-1">
+              <span className="text-xs font-medium text-ios-subtext">试试这样问</span>
+              <button
+                type="button"
+                onClick={() => void refreshStarterQuestions()}
+                disabled={refreshingStarterQuestions}
+                className="flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-medium text-ios-primary active:bg-ios-primary/10 disabled:opacity-50"
+                aria-label="换一批推荐问题"
+              >
+                <Icon
+                  name="RefreshCw"
+                  className={clsx('h-3.5 w-3.5', refreshingStarterQuestions && 'animate-spin')}
+                />
+                {refreshingStarterQuestions ? '生成中' : '换一批'}
+              </button>
+            </div>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              {STARTER_PROMPTS.map(prompt => (
+              {starterQuestions.map(prompt => (
                 <button
                   key={prompt}
                   type="button"
                   onClick={() => void send(prompt)}
+                  disabled={refreshingStarterQuestions}
                   className="rounded-2xl border border-ios-border bg-white p-4 text-left text-sm leading-5 text-ios-text shadow-sm active:scale-[0.98] dark:bg-zinc-900"
                 >
                   {prompt}
@@ -728,7 +815,7 @@ export const AIView: React.FC<AIViewProps> = ({ isActive, onOpenSettings, onComp
           'relative z-30 shrink-0 px-3',
           keyboardVisible
             ? 'pb-[calc(env(safe-area-inset-bottom)+0.5rem)]'
-            : 'pb-[calc(env(safe-area-inset-bottom)+5.75rem)]'
+            : 'pb-[5.75rem]'
         )} style={nativeOverlayInset > 0 ? {
           marginBottom: nativeOverlayInset,
           paddingBottom: 8,
@@ -739,6 +826,15 @@ export const AIView: React.FC<AIViewProps> = ({ isActive, onOpenSettings, onComp
               value={input}
               rows={1}
               onChange={event => setInput(event.target.value)}
+              onPointerDown={event => {
+                if (
+                  Capacitor.isNativePlatform()
+                  && !keyboardVisible
+                  && document.activeElement === event.currentTarget
+                ) {
+                  event.currentTarget.blur();
+                }
+              }}
               onFocus={() => setTextareaFocused(true)}
               onBlur={() => setTextareaFocused(false)}
               onKeyDown={event => {
@@ -747,7 +843,7 @@ export const AIView: React.FC<AIViewProps> = ({ isActive, onOpenSettings, onComp
                   void send();
                 }
               }}
-              placeholder={state.isOnline ? '询问账本数据…' : '当前离线，只能查看历史'}
+              placeholder={state.isOnline ? '你有什么问题吗？' : '当前离线，只能查看历史'}
               disabled={!state.isOnline || generating}
               className="max-h-[120px] min-h-10 min-w-0 flex-1 resize-none bg-transparent px-2 py-2.5 text-sm leading-5 text-ios-text outline-none placeholder:text-ios-subtext disabled:opacity-50"
             />
