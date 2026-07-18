@@ -193,17 +193,40 @@ describe('AI answer grounding', () => {
 
   it('allows aggregate rows to be presented naturally without a detail query', () => {
     const validation = validateGroundedAnswer(
-      '| 日期 | 分类 | 金额 |\n|---|---|---:|\n| 2026-01 | 餐饮 | ¥100.00 |',
+      '| 分类 | 金额 | 占比 |\n|---|---:|---:|\n| 餐饮（主要支出） | ¥100.00 | 50% |',
       [{
         tool: 'aggregate_transactions',
         result: {
           trace,
-          groups: [{ key: '2026-01', label: '2026-01', category: '餐饮', amount_cny: 100 }],
+          groups: [{ label: '餐饮', amount_cny: 100 }],
           total: { count: 2, amount_cny: 100, expense_cny: 100, income_cny: 0, net_cny: -100 },
         },
       }]
     );
     expect(validation.valid).toBe(true);
+  });
+
+  it('preserves aggregate groups in the grounded fallback answer', () => {
+    const fallback = buildGroundedFallback([{
+      tool: 'aggregate_transactions',
+      result: {
+        trace: {
+          ...trace,
+          label: '聚合统计（category）',
+          date_range: '最近15天（2026-07-04 至 2026-07-18）',
+          record_count: 3,
+        },
+        groups: [
+          { label: '餐饮', count: 2, amount_cny: 80, income_cny: 0, expense_cny: 80, net_cny: -80 },
+          { label: '交通', count: 1, amount_cny: 20, income_cny: 0, expense_cny: 20, net_cny: -20 },
+        ],
+        total: { count: 3, amount_cny: 100, expense_cny: 100, income_cny: 0, net_cny: -100 },
+      },
+    }]);
+    expect(fallback).toContain('按分类统计');
+    expect(fallback).toContain('| 餐饮 | 2 | ¥80.00 |');
+    expect(fallback).toContain('支出合计：¥100.00');
+    expect(fallback).not.toContain('如果你愿意');
   });
 
   it('requires a zero-result detail search to be reported as not found', () => {

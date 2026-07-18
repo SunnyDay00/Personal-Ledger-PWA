@@ -52,6 +52,7 @@ export const Layout: React.FC = () => {
     const { state, dispatch, canUndo, undo } = useApp();
     const [activeTab, setActiveTab] = useState<'home' | 'stats' | 'ledgers' | 'settings'>('home');
     const [statsMode, setStatsMode] = useState<'stats' | 'ai'>(readStoredStatsMode);
+    const [aiViewMounted, setAiViewMounted] = useState(false);
     const [hideTabBarForKeyboard, setHideTabBarForKeyboard] = useState(false);
     const [showAdd, setShowAdd] = useState(false);
     const [showSearch, setShowSearch] = useState(false);
@@ -212,6 +213,14 @@ export const Layout: React.FC = () => {
         setHideTabBarForKeyboard(false);
         setActiveTab(tab);
     }, []);
+
+    useEffect(() => {
+        if (activeTab === 'stats' && statsMode === 'ai') {
+            setAiViewMounted(true);
+        } else if (statsMode === 'stats') {
+            setAiViewMounted(false);
+        }
+    }, [activeTab, statsMode]);
 
     useEffect(() => {
         ledgersRef.current = state.ledgers;
@@ -375,17 +384,23 @@ export const Layout: React.FC = () => {
                         <StatsView onOpenHomeTransaction={handleOpenHomeTransaction} />
                     </React.Suspense>
                 )}
-                {activeTab === 'stats' && statsMode === 'ai' && (
-                    <React.Suspense fallback={
-                        <div className="h-full w-full flex items-center justify-center text-ios-subtext">
-                            <Icon name="Loader2" className="w-6 h-6 animate-spin" />
-                        </div>
-                    }>
-                        <AIView
-                            onOpenSettings={() => handleTabSelect('settings')}
-                            onComposerFocusChange={setHideTabBarForKeyboard}
-                        />
-                    </React.Suspense>
+                {statsMode === 'ai' && (aiViewMounted || activeTab === 'stats') && (
+                    <div
+                        className={clsx('h-full w-full', activeTab === 'stats' ? 'block' : 'hidden')}
+                        aria-hidden={activeTab !== 'stats'}
+                    >
+                        <React.Suspense fallback={
+                            <div className="h-full w-full flex items-center justify-center text-ios-subtext">
+                                <Icon name="Loader2" className="w-6 h-6 animate-spin" />
+                            </div>
+                        }>
+                            <AIView
+                                isActive={activeTab === 'stats'}
+                                onOpenSettings={() => handleTabSelect('settings')}
+                                onComposerFocusChange={setHideTabBarForKeyboard}
+                            />
+                        </React.Suspense>
+                    </div>
                 )}
                 {activeTab === 'ledgers' && <LedgerManageView />}
                 {activeTab === 'settings' && <SettingsView />}
@@ -435,7 +450,7 @@ export const Layout: React.FC = () => {
             {/* Tab Bar - Floating Capsule Design */}
             <nav
                 className={clsx(
-                    'absolute bottom-6 left-4 right-4 z-40 h-16 transition-all duration-200',
+                    'absolute bottom-6 left-4 right-4 z-40 h-16 transform-gpu transition-[transform,opacity] duration-150 will-change-transform',
                     hideTabBarForKeyboard && 'pointer-events-none translate-y-24 opacity-0'
                 )}
             >

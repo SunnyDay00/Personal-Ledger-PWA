@@ -36,6 +36,7 @@ const persistConversationId = (conversationId: string) => {
 };
 
 interface AIViewProps {
+  isActive: boolean;
   onOpenSettings: () => void;
   onComposerFocusChange?: (focused: boolean) => void;
 }
@@ -156,7 +157,7 @@ const AiMessageBubble = React.memo<AiMessageBubbleProps>(({
 ));
 AiMessageBubble.displayName = 'AiMessageBubble';
 
-export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusChange }) => {
+export const AIView: React.FC<AIViewProps> = ({ isActive, onOpenSettings, onComposerFocusChange }) => {
   const { state, dispatch } = useApp();
   const [config, setConfig] = useState<AiConfig | null>(null);
   const [conversations, setConversations] = useState<AiConversation[]>([]);
@@ -181,6 +182,7 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const activeConversationRef = useRef<AiConversation | null>(null);
+  const initialLedgerIdRef = useRef(state.currentLedgerId);
   const positionLoadedConversationRef = useRef(true);
   const isNearBottomRef = useRef(true);
   const fullViewportHeightRef = useRef(typeof window !== 'undefined' ? window.innerHeight : 0);
@@ -258,7 +260,7 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
         const storedConversationId = readStoredConversationId();
         const initial = rows.find(conversation => conversation.id === storedConversationId)
           || rows[0]
-          || createConversation(state.currentLedgerId);
+          || createConversation(initialLedgerIdRef.current);
         if (rows.length === 0) await aiStorage.saveConversation(initial);
         if (!active) return;
         await loadConversation(initial);
@@ -273,7 +275,7 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
       abortRef.current?.abort();
       onComposerFocusChange?.(false);
     };
-  }, [loadConversation, onComposerFocusChange, state.currentLedgerId]);
+  }, [loadConversation, onComposerFocusChange]);
 
   useEffect(() => {
     if (state.settings.aiConfig) {
@@ -282,7 +284,9 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
   }, [state.settings.aiConfig]);
 
   useEffect(() => {
-    const visualViewport = window.visualViewport;
+    if (!isActive) return;
+    const nativePlatform = Capacitor.isNativePlatform();
+    const visualViewport = nativePlatform ? undefined : window.visualViewport;
     const applyViewport = () => {
       viewportFrameRef.current = null;
       const currentHeight = visualViewport?.height || window.innerHeight;
@@ -297,7 +301,9 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
       } else {
         fullViewportHeightRef.current = Math.max(window.innerHeight, currentHeight);
       }
-      const nextViewportReduction = Math.max(0, fullViewportHeightRef.current - currentHeight);
+      const nextViewportReduction = nativePlatform
+        ? 0
+        : Math.max(0, fullViewportHeightRef.current - currentHeight);
       const applied = appliedViewportRef.current;
       if (
         Math.abs(applied.height - currentHeight) >= 0.5
@@ -322,19 +328,23 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
       viewportFrameRef.current = window.requestAnimationFrame(applyViewport);
     };
     applyViewport();
-    visualViewport?.addEventListener('resize', scheduleViewportUpdate);
-    visualViewport?.addEventListener('scroll', scheduleViewportUpdate);
+    if (!nativePlatform) {
+      visualViewport?.addEventListener('resize', scheduleViewportUpdate);
+      visualViewport?.addEventListener('scroll', scheduleViewportUpdate);
+    }
     window.addEventListener('resize', scheduleViewportUpdate);
     return () => {
-      visualViewport?.removeEventListener('resize', scheduleViewportUpdate);
-      visualViewport?.removeEventListener('scroll', scheduleViewportUpdate);
+      if (!nativePlatform) {
+        visualViewport?.removeEventListener('resize', scheduleViewportUpdate);
+        visualViewport?.removeEventListener('scroll', scheduleViewportUpdate);
+      }
       window.removeEventListener('resize', scheduleViewportUpdate);
       if (viewportFrameRef.current !== null) {
         window.cancelAnimationFrame(viewportFrameRef.current);
         viewportFrameRef.current = null;
       }
     };
-  }, []);
+  }, [isActive]);
 
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
@@ -367,16 +377,17 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
   }, []);
 
   useEffect(() => {
-    onComposerFocusChange?.(keyboardVisible);
-  }, [keyboardVisible, onComposerFocusChange]);
+    onComposerFocusChange?.(isActive && keyboardVisible);
+  }, [isActive, keyboardVisible, onComposerFocusChange]);
 
   useEffect(() => {
-    if (!keyboardVisible || !isNearBottomRef.current) return;
+    if (!isActive || !keyboardVisible || !isNearBottomRef.current) return;
     const frame = window.requestAnimationFrame(() => scrollToBottom('auto'));
     return () => window.cancelAnimationFrame(frame);
-  }, [keyboardVisible, nativeOverlayInset, scrollToBottom]);
+  }, [isActive, keyboardVisible, nativeOverlayInset, scrollToBottom]);
 
   useLayoutEffect(() => {
+    if (!isActive) return;
     const element = scrollRef.current;
     if (!element) return;
     const forcePosition = positionLoadedConversationRef.current;
@@ -388,7 +399,7 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
     positionLoadedConversationRef.current = false;
     isNearBottomRef.current = true;
     setIsNearBottom(true);
-  }, [messages, generating]);
+  }, [isActive, messages, generating]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -635,13 +646,8 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
       <div
         ref={scrollRef}
         onScroll={updateNearBottom}
-        className="min-h-0 flex-1 overflow-y-auto px-4 pb-[calc(env(safe-area-inset-bottom)+10.5rem)] pt-4 no-scrollbar"
-        style={{
-          WebkitOverflowScrolling: 'touch',
-          paddingBottom: nativeOverlayInset > 0
-            ? `${nativeOverlayInset + 88}px`
-            : undefined,
-        }}
+        className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-4 no-scrollbar"
+        style={{ WebkitOverflowScrolling: 'touch' }}
       >
         {!keyReady ? (
           <div className="mx-auto mt-12 max-w-sm rounded-3xl border border-ios-border bg-white p-6 text-center shadow-sm dark:bg-zinc-900">
@@ -719,11 +725,14 @@ export const AIView: React.FC<AIViewProps> = ({ onOpenSettings, onComposerFocusC
 
       {keyReady && (
         <div className={clsx(
-          'absolute left-0 right-0 z-30 px-3 transition-[bottom] duration-200',
+          'relative z-30 shrink-0 px-3',
           keyboardVisible
-            ? 'bottom-[calc(env(safe-area-inset-bottom)+0.5rem)]'
-            : 'bottom-[calc(env(safe-area-inset-bottom)+5.75rem)]'
-        )} style={nativeOverlayInset > 0 ? { bottom: nativeOverlayInset + 8 } : undefined}>
+            ? 'pb-[calc(env(safe-area-inset-bottom)+0.5rem)]'
+            : 'pb-[calc(env(safe-area-inset-bottom)+5.75rem)]'
+        )} style={nativeOverlayInset > 0 ? {
+          marginBottom: nativeOverlayInset,
+          paddingBottom: 8,
+        } : undefined}>
           <div className="mx-auto flex max-w-2xl items-end gap-2 rounded-[1.4rem] border border-white/60 bg-white/85 p-2 shadow-[0_10px_35px_rgba(0,0,0,0.15)] backdrop-blur-xl dark:border-white/10 dark:bg-zinc-900/90">
             <textarea
               ref={textareaRef}
