@@ -49,6 +49,7 @@ const StatsView = React.lazy(() => import('./StatsView').then(module => ({ defau
 const AIView = React.lazy(() => import('./AIView').then(module => ({ default: module.AIView })));
 
 export const Layout: React.FC = () => {
+    const liquidSurfaceRef = useRef<HTMLDivElement>(null);
     const { state, dispatch, canUndo, undo } = useApp();
     const [activeTab, setActiveTab] = useState<'home' | 'stats' | 'ledgers' | 'settings'>('home');
     const [statsMode, setStatsMode] = useState<'stats' | 'ai'>(readStoredStatsMode);
@@ -369,7 +370,7 @@ export const Layout: React.FC = () => {
 
     return (
         <div className="h-full w-full flex flex-col bg-ios-bg text-ios-text overflow-hidden font-sans relative">
-            <LiquidFilter />
+            <LiquidFilter targetRef={liquidSurfaceRef} />
 
             {/* Main Content Area */}
             {/* Main takes full height, navigation floats on top at bottom */}
@@ -507,15 +508,7 @@ export const Layout: React.FC = () => {
                     </div>
                 )}
                 {/* Floating Capsule Background */}
-                <div className="absolute inset-0 overflow-hidden rounded-full bg-white/60 dark:bg-[#1c1c1e]/60 backdrop-blur-md border border-white/20 dark:border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.12)]">
-                    {/* Glossy Reflection Overlay */}
-                    <div
-                        className="absolute inset-0 pointer-events-none opacity-40 mix-blend-overlay"
-                        style={{
-                            background: 'linear-gradient(180deg, rgba(255,255,255,0.4) 0%, rgba(255,255,255,0.05) 50%, rgba(255,255,255,0) 100%)'
-                        }}
-                    />
-                </div>
+                <div ref={liquidSurfaceRef} aria-hidden="true" className="ledger-liquid-surface absolute inset-0 overflow-hidden rounded-full pointer-events-none" />
 
                 <div className="flex items-center justify-between h-full px-1.5 relative z-10 text-[10px] font-bold">
 
@@ -640,7 +633,7 @@ const TabButton: React.FC<{
     >
         <div className={clsx(
             "relative z-10 flex flex-col items-center justify-center gap-0.5 transition-all duration-300 w-full h-full",
-            active ? "bg-gray-200 dark:bg-zinc-700 shadow-sm" : "bg-transparent",
+            active ? "ledger-liquid-active" : "bg-transparent",
             // Shape & Position Logic for "Outward Pop" effect:
             // Highlighting amplitude is now consistent (1 unit) across all tabs.
             // 1. Home (First): mr-1 pulls background Left
