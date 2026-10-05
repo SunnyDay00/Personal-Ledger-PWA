@@ -7,10 +7,10 @@ import { THEME_PRESETS, AVAILABLE_ICONS, DEFAULT_CATEGORIES, DEFAULT_TRADE_CATEG
 import { UPDATE_LOGS } from '../changelog';
 import { generateId, exportToJson, exportToCsv, cn, readCsvFileWithEncoding, formatCurrency } from '../utils';
 import { WebDAVService } from '../services/webdav';
-import { db } from '../services/db';
+import { db, dbAPI } from '../services/db';
 import { format } from 'date-fns';
 import { SyncLogModal } from './SyncLogModal';
-import { Ledger, Category, CategoryType, CurrencyCode, LedgerType, TradeItemType, HomeQuickAction, TransactionType, AutoRecordRule, AutoRecordScheduleKind } from '../types';
+import { Ledger, Category, CategoryGroup, CategoryType, CurrencyCode, LedgerType, TradeItemType, HomeQuickAction, TransactionType, AutoRecordRule, AutoRecordScheduleKind, LogoutAfter } from '../types';
 import { feedback } from '../services/feedback';
 import { imageService } from '../services/imageService';
 import { normalizeAppSettings, normalizeBackupAutoEnabled, normalizeBackupIntervalDays, normalizeBackupReminderDays } from '../services/settingsUtils';
@@ -19,6 +19,8 @@ import { getCloudVersion } from '../services/d1Sync';
 import { getLedgerTypeLabel, isTradingLedger, normalizeLedgerType } from '../services/ledgerUtils';
 import { getSortedHomeQuickActions } from '../services/homeQuickActions';
 import { getAutoRecordScheduleLabel } from '../services/autoRecords';
+import { getCategoryGroupOwners, getLedgerGroupCategories, getValidGroupCategoryIds, replaceVisibleCategoryOrder } from '../services/categoryGroups';
+import { canTransferCategoryTo } from '../services/categoryTransfer';
 import { Keyboard } from '@capacitor/keyboard';
 import { Capacitor } from '@capacitor/core';
 import { AISettingsView } from './AISettingsView';
@@ -126,7 +128,8 @@ const getSystemPrefersDark = () =>
   && window.matchMedia('(prefers-color-scheme: dark)').matches;
 
 export const SettingsView: React.FC = () => {
-  const { state, dispatch, manualBackup, restoreFromCloud, smartImportCsv, manualCloudSync, resetApp, addLedger, logoutAccount } = useApp();
+  const { state, dispatch, manualBackup, restoreFromCloud, smartImportCsv, manualCloudSync, resetApp, addLedger, logoutAccount, setLogoutAfter, transferCategory, saveCategoryGroup } = useApp();
+  const [isSavingLogoutPolicy, setIsSavingLogoutPolicy] = useState(false);
   const [page, setPage] = useState<SettingsPage>('main');
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -182,8 +185,12 @@ export const SettingsView: React.FC = () => {
   const [showAutoRecordBulkMenu, setShowAutoRecordBulkMenu] = useState(false);
   const [selectedLedgerId, setSelectedLedgerId] = useState(state.currentLedgerId || state.ledgers[0]?.id || '');
   const [catType, setCatType] = useState<CategoryType>('expense');
+  const [onlyUngroupedCategories, setOnlyUngroupedCategories] = useState(false);
   const [isAddingCat, setIsAddingCat] = useState(false);
   const [editingCat, setEditingCat] = useState<Category | null>(null);
+  const [categoryTransferModal, setCategoryTransferModal] = useState<{ ledgerId: string; sourceId: string; targetId: string } | null>(null);
+  const [isTransferringCategory, setIsTransferringCategory] = useState(false);
+  const [categoryTransferError, setCategoryTransferError] = useState('');
   const [newCatName, setNewCatName] = useState('');
   const [newCatIcon, setNewCatIcon] = useState('Circle');
   const [newCatBuyFeeRate, setNewCatBuyFeeRate] = useState('0');
@@ -191,17 +198,21 @@ export const SettingsView: React.FC = () => {
   const [newCatBuyCurrency, setNewCatBuyCurrency] = useState<CurrencyCode>(DEFAULT_CURRENCY);
   const [newCatSellCurrency, setNewCatSellCurrency] = useState<CurrencyCode>(DEFAULT_CURRENCY);
   const [newCatTradeItemType, setNewCatTradeItemType] = useState<TradeItemType>('normal');
-  const [isReordering, setIsReordering] = useState(false);
+  const [isReordering, setIsReordering] = useState(true);
+  const [deleteGroupsConfirmation, setDeleteGroupsConfirmation] = useState<{ ledgerId: string; ledgerName: string; groupIds: string[] } | null>(null);
   const [dragCategoryId, setDragCategoryId] = useState<string | null>(null);
   const [dragOverCategoryId, setDragOverCategoryId] = useState<string | null>(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const dragStartRef = useRef<{ pointerId: number; startX: number; startY: number; startScrollTop: number } | null>(null);
-  const [groupModal, setGroupModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; name: string; categoryIds: string[] }>({
+  const [groupModal, setGroupModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; id?: string; ledgerId?: string; name: string; categoryIds: string[] }>({
     isOpen: false,
     mode: 'create',
     name: '',
     categoryIds: [],
   });
+  const [groupCategoryType, setGroupCategoryType] = useState<'expense' | 'income'>('expense');
+  const [isSavingGroup, setIsSavingGroup] = useState(false);
+  const [groupSaveError, setGroupSaveError] = useState('');
 
   const [cacheStats, setCacheStats] = useState({ count: 0, size: 0 });
   const [systemPrefersDark, setSystemPrefersDark] = useState(getSystemPrefersDark);
@@ -234,6 +245,14 @@ export const SettingsView: React.FC = () => {
     [state.ledgers]
   );
   const selectedLedger = state.ledgers.find(ledger => ledger.id === selectedLedgerId);
+  const transferSourceCategory = state.categories.find(category => category.id === categoryTransferModal?.sourceId);
+  const transferTargetCategories = state.categories.filter(category => transferSourceCategory
+    && category.ledgerId === categoryTransferModal?.ledgerId && canTransferCategoryTo(transferSourceCategory, category))
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const transferRecordCount = state.transactions.filter(record => !record.isDeleted
+    && record.ledgerId === categoryTransferModal?.ledgerId && record.categoryId === categoryTransferModal?.sourceId).length;
+  const transferRuleCount = autoRecords.filter(rule => rule.ledgerId === categoryTransferModal?.ledgerId
+    && rule.categoryId === categoryTransferModal?.sourceId).length;
   const isSelectedTradingLedger = isTradingLedger(selectedLedger);
   const quickActionModalLedger = state.ledgers.find(ledger => ledger.id === quickActionModal.ledgerId);
   const autoRecordModalLedger = state.ledgers.find(ledger => ledger.id === autoRecordModal.ledgerId);
@@ -349,6 +368,10 @@ export const SettingsView: React.FC = () => {
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    if (page === 'categories') {
+      setIsReordering(true);
+      setDeleteGroupsConfirmation(null);
+    }
   }, [page]);
 
   useEffect(() => {
@@ -387,6 +410,24 @@ export const SettingsView: React.FC = () => {
       .sort((a, b) => a.order - b.order);
   }, [state.categories, selectedLedgerId, catType]);
 
+  const groupCategories = useMemo(
+    () => getLedgerGroupCategories(state.categories, selectedLedgerId),
+    [state.categories, selectedLedgerId]
+  );
+  const categoryGroupOwners = useMemo(
+    () => getCategoryGroupOwners(state.categories, state.categoryGroups, selectedLedgerId),
+    [state.categories, state.categoryGroups, selectedLedgerId]
+  );
+  const visibleCategories = useMemo(
+    () => onlyUngroupedCategories ? sortedCategories.filter(category => !categoryGroupOwners.has(category.id)) : sortedCategories,
+    [onlyUngroupedCategories, sortedCategories, categoryGroupOwners]
+  );
+  const selectedGroupCategoryIds = useMemo(
+    () => getValidGroupCategoryIds(groupModal.categoryIds, groupCategories).filter(id =>
+      !categoryGroupOwners.has(id) || categoryGroupOwners.get(id)?.id === groupModal.id),
+    [groupModal.categoryIds, groupCategories, categoryGroupOwners, groupModal.id]
+  );
+
   useEffect(() => {
     if (page !== 'categories') return;
     const currentLedgerId = state.currentLedgerId || state.ledgers[0]?.id || '';
@@ -399,6 +440,11 @@ export const SettingsView: React.FC = () => {
     setCatType(isSelectedTradingLedger ? 'trade' : 'expense');
     setIsAddingCat(false);
     setEditingCat(null);
+    setGroupModal({ isOpen: false, mode: 'create', name: '', categoryIds: [] });
+    setIsReordering(true);
+    setDeleteGroupsConfirmation(null);
+    setCategoryTransferModal(null);
+    setOnlyUngroupedCategories(false);
   }, [selectedLedgerId, isSelectedTradingLedger]);
 
   const sortedGroups = useMemo(() => {
@@ -410,7 +456,7 @@ export const SettingsView: React.FC = () => {
   // 如果本地 DB 已有分组但 state 为空，尝试从 DB 刷新到 state（避免界面不显示）
   useEffect(() => {
     if (sortedGroups.length > 0) return;
-    db.categoryGroups.orderBy('order').toArray().then(groups => {
+    dbAPI.getCategoryGroups().then(groups => {
       if (groups && groups.length > 0) {
         dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups: groups } });
       }
@@ -1000,44 +1046,89 @@ export const SettingsView: React.FC = () => {
   };
 
   const handleDeleteCategory = (id: string) => {
-    if (!window.confirm('确定删除该分类吗？已有账目会保留分类引用。')) return;
+    const category = state.categories.find(item => item.id === id && item.ledgerId === selectedLedgerId && !item.isDeleted);
+    if (!category) return;
+    const recordCount = state.transactions.filter(record => !record.isDeleted && record.ledgerId === selectedLedgerId && record.categoryId === id).length;
+    const hasRules = autoRecords.some(rule => rule.ledgerId === selectedLedgerId && rule.categoryId === id);
+    if (recordCount > 0 || hasRules) {
+      setCategoryTransferError('');
+      setCategoryTransferModal({ ledgerId: selectedLedgerId, sourceId: id, targetId: '' });
+      return;
+    }
+    if (!window.confirm(`确定删除“${category.name}”分类吗？\n当前有 ${recordCount} 个账目使用该分类。`)) return;
     dispatch({ type: 'DELETE_CATEGORY', payload: id });
     feedback.play('delete');
     feedback.vibrate('medium');
   };
 
-  const openCreateGroup = () => setGroupModal({ isOpen: true, mode: 'create', name: '', categoryIds: [] });
-  const openEditGroup = (g: any) => setGroupModal({ isOpen: true, mode: 'edit', id: g.id, name: g.name, categoryIds: g.categoryIds || [] });
-  const handleSaveGroup = () => {
+  const handleConfirmCategoryTransfer = async () => {
+    if (!categoryTransferModal || isTransferringCategory) return;
+    if (categoryTransferModal.ledgerId !== selectedLedgerId
+      || !transferTargetCategories.some(category => category.id === categoryTransferModal.targetId)) {
+      setCategoryTransferError('请选择当前账本中有效的目标分类');
+      return;
+    }
+    setIsTransferringCategory(true);
+    setCategoryTransferError('');
+    try {
+      await transferCategory(categoryTransferModal.sourceId, categoryTransferModal.targetId);
+      setCategoryTransferModal(null);
+      feedback.play('success');
+      feedback.vibrate('success');
+    } catch (error: any) {
+      setCategoryTransferError(error?.message || '转移失败，请重试');
+    } finally {
+      setIsTransferringCategory(false);
+    }
+  };
+
+  const openCreateGroup = () => {
+    setGroupSaveError('');
+    setGroupCategoryType('expense');
+    setGroupModal({ isOpen: true, mode: 'create', ledgerId: selectedLedgerId, name: '', categoryIds: [] });
+  };
+  const openEditGroup = (g: CategoryGroup) => {
+    setGroupSaveError('');
+    const categoryIds = getValidGroupCategoryIds(g.categoryIds, groupCategories).filter(id =>
+      !categoryGroupOwners.has(id) || categoryGroupOwners.get(id)?.id === g.id);
+    const selected = groupCategories.filter(category => categoryIds.includes(category.id));
+    setGroupCategoryType(selected.some(category => category.type === 'income') && !selected.some(category => category.type === 'expense') ? 'income' : 'expense');
+    setGroupModal({ isOpen: true, mode: 'edit', id: g.id, ledgerId: selectedLedgerId, name: g.name, categoryIds });
+  };
+  const closeGroupModal = () => {
+    if (!isSavingGroup) setGroupModal({ isOpen: false, mode: 'create', name: '', categoryIds: [] });
+  };
+  const handleSaveGroup = async () => {
+    if (isSavingGroup) return;
+    if (groupModal.ledgerId !== selectedLedgerId || !selectedLedger || selectedLedger.isDeleted) {
+      window.alert('当前账本已变化，请重新打开分类组后保存');
+      return;
+    }
     if (!groupModal.name.trim()) {
       window.alert('请输入分组名称');
       return;
     }
-    if (groupModal.mode === 'create') {
-      dispatch({
-        type: 'ADD_CATEGORY_GROUP',
-        payload: {
-          id: generateId(),
-          ledgerId: selectedLedgerId,
-          name: groupModal.name.trim(),
-          categoryIds: groupModal.categoryIds,
-          order: sortedGroups.length,
-          updatedAt: Date.now(),
-          isDeleted: false,
-        },
-      });
-    } else if (groupModal.mode === 'edit' && groupModal.id) {
-      const original = sortedGroups.find(g => g.id === groupModal.id);
-      if (original) {
-        dispatch({
-          type: 'UPDATE_CATEGORY_GROUP',
-          payload: { ...original, name: groupModal.name.trim(), categoryIds: groupModal.categoryIds, updatedAt: Date.now() },
-        });
-      }
+    const original = groupModal.mode === 'edit' ? sortedGroups.find(group => group.id === groupModal.id) : undefined;
+    if (groupModal.mode === 'edit' && !original) {
+      setGroupSaveError('分类组已变化，请重新打开后编辑');
+      return;
     }
-    setGroupModal({ isOpen: false, mode: 'create', name: '', categoryIds: [] });
-    feedback.play('success');
-    feedback.vibrate('success');
+    setIsSavingGroup(true);
+    setGroupSaveError('');
+    try {
+      await saveCategoryGroup({
+        ...original, id: original?.id || generateId(), ledgerId: selectedLedgerId,
+        name: groupModal.name.trim(), categoryIds: selectedGroupCategoryIds,
+        order: original?.order ?? sortedGroups.length, updatedAt: Date.now(), isDeleted: false,
+      }, groupModal.mode);
+      setGroupModal({ isOpen: false, mode: 'create', name: '', categoryIds: [] });
+      feedback.play('success');
+      feedback.vibrate('success');
+    } catch (error: any) {
+      setGroupSaveError(error?.message || '保存失败，请重试');
+    } finally {
+      setIsSavingGroup(false);
+    }
   };
   const handleDeleteGroup = (id: string) => {
     if (!window.confirm('确定删除该分类组吗？')) return;
@@ -1054,6 +1145,8 @@ export const SettingsView: React.FC = () => {
     dispatch({ type: 'REORDER_CATEGORY_GROUPS', payload: normalized });
   };
   const toggleCategoryInGroup = (catId: string) => {
+    const owner = categoryGroupOwners.get(catId);
+    if (isSavingGroup || (owner && owner.id !== groupModal.id)) return;
     setGroupModal(prev => {
       const exists = prev.categoryIds.includes(catId);
       return { ...prev, categoryIds: exists ? prev.categoryIds.filter(id => id !== catId) : [...prev.categoryIds, catId] };
@@ -1064,7 +1157,7 @@ export const SettingsView: React.FC = () => {
     setDragOverCategoryId(null);
     setDragOffset({ x: 0, y: 0 });
     dragStartRef.current = null;
-  }, [catType, selectedLedgerId, isReordering]);
+  }, [catType, selectedLedgerId, isReordering, onlyUngroupedCategories]);
 
   const reorderCategoriesById = (list: Category[], activeId: string, overId: string) => {
     const activeIndex = list.findIndex(category => category.id === activeId);
@@ -1159,7 +1252,8 @@ export const SettingsView: React.FC = () => {
     }
 
     if (dragCategoryId && dragOverCategoryId && dragCategoryId !== dragOverCategoryId) {
-      commitCategoryOrder(reorderCategoriesById(sortedCategories, dragCategoryId, dragOverCategoryId));
+            const reordered = reorderCategoriesById(visibleCategories, dragCategoryId, dragOverCategoryId);
+            commitCategoryOrder(replaceVisibleCategoryOrder(sortedCategories, reordered));
     }
 
     resetCategoryDrag();
@@ -1456,18 +1550,50 @@ export const SettingsView: React.FC = () => {
             <div className="rounded-xl bg-gray-50 dark:bg-zinc-800 p-3 flex items-center justify-between">
               <div>
                 <p className="text-sm font-medium text-ios-text">{authSession?.user.username}</p>
-                <p className="text-xs text-ios-subtext">到期：{authSession?.expiresAt ? format(authSession.expiresAt, 'yyyy/MM/dd HH:mm') : '-'}</p>
+                <p className="text-xs text-ios-subtext">{!authSession?.logoutAfter || authSession.logoutAfter === 'permanent' ? '长期登录' : `自动退出：${format(authSession.expiresAt, 'yyyy/MM/dd HH:mm')}`}</p>
               </div>
               <button
                 type="button"
                 onClick={async () => {
-                  if (!window.confirm('退出登录后不会删除本地账本数据，确认退出？')) return;
-                  await logoutAccount();
+                  if (!window.confirm('退出后将清空本机账本、流水、图片缓存、AI 对话及所有设置，回到首次使用状态。云端数据保留，未同步数据会丢失。确认退出？')) return;
+                  try {
+                    await logoutAccount();
+                  } catch (e: any) {
+                    alert(e?.message || '退出失败，请重新打开应用继续清理');
+                  }
                 }}
                 className="px-3 py-2 rounded-xl bg-red-500/10 text-red-500 text-xs font-medium active:scale-95 transition-transform"
               >
                 退出登录
               </button>
+            </div>
+
+            <div>
+              <label htmlFor="logout-after" className="text-xs font-medium text-ios-subtext ml-1 mb-1 block">自动退出</label>
+              <select
+                id="logout-after"
+                className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
+                value={authSession?.logoutAfter || 'permanent'}
+                disabled={isSavingLogoutPolicy}
+                onChange={async (e) => {
+                  const period = e.target.value as LogoutAfter;
+                  if (period !== 'permanent' && !window.confirm('到期后将自动退出并清空本机数据，未同步数据会丢失；云端数据保留。确认设置？')) return;
+                  setIsSavingLogoutPolicy(true);
+                  try {
+                    await setLogoutAfter(period);
+                  } catch (error: any) {
+                    alert(error?.message || '保存自动退出设置失败，请稍后重试');
+                  } finally {
+                    setIsSavingLogoutPolicy(false);
+                  }
+                }}
+              >
+                <option value="permanent">从不（默认）</option>
+                <option value="week">一周</option>
+                <option value="month">一个月</option>
+                <option value="year">一年</option>
+              </select>
+              <p className="text-xs text-ios-subtext mt-2">{isSavingLogoutPolicy ? '正在保存…' : '从设置成功时开始计时（一周 7 天、一个月 30 天、一年 365 天）。退出时会清空本机数据并重置；离线或后台到期后，在再次打开时执行。'}</p>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -2123,12 +2249,22 @@ export const SettingsView: React.FC = () => {
   };
 
   const handleDeleteAllGroups = () => {
-    if (!window.confirm('确定要删除当前账本的所有分类组吗？此操作不可恢复。')) return;
+    if (!selectedLedger || selectedLedger.isDeleted) return;
     const groups = state.categoryGroups.filter(g => g.ledgerId === selectedLedgerId && !g.isDeleted);
+    if (groups.length === 0) return;
+    setDeleteGroupsConfirmation({ ledgerId: selectedLedgerId, ledgerName: selectedLedger.name, groupIds: groups.map(group => group.id) });
+  };
+  const confirmDeleteAllGroups = () => {
+    const confirmation = deleteGroupsConfirmation;
+    setDeleteGroupsConfirmation(null);
+    if (!confirmation || confirmation.ledgerId !== selectedLedgerId) return;
+    const confirmedIds = new Set(confirmation.groupIds);
+    const groups = state.categoryGroups.filter(group => group.ledgerId === confirmation.ledgerId && !group.isDeleted && confirmedIds.has(group.id));
     groups.forEach(g => {
       dispatch({ type: 'DELETE_CATEGORY_GROUP', payload: g.id });
     });
-    window.alert(`已删除 ${groups.length} 个分类组`);
+    feedback.play('delete');
+    feedback.vibrate('medium');
   };
 
   const renderCategories = () => (
@@ -2205,7 +2341,7 @@ export const SettingsView: React.FC = () => {
         {sortedGroups.length === 0 && <p className="text-xs text-ios-subtext">暂无分组</p>}
         <div className="space-y-2">
           {sortedGroups.map((g, idx) => {
-            const count = (g.categoryIds || []).length;
+            const count = [...categoryGroupOwners.values()].filter(owner => owner.id === g.id).length;
             return (
               <div key={g.id} className="flex items-center justify-between bg-gray-50 dark:bg-zinc-800 rounded-xl px-3 py-2">
                 <div>
@@ -2216,6 +2352,18 @@ export const SettingsView: React.FC = () => {
                   <button onClick={() => moveGroup(idx, 'up')} disabled={idx === 0} className="p-1 text-ios-subtext disabled:opacity-30"><Icon name="ChevronUp" className="w-4 h-4" /></button>
                   <button onClick={() => moveGroup(idx, 'down')} disabled={idx === sortedGroups.length - 1} className="p-1 text-ios-subtext disabled:opacity-30"><Icon name="ChevronDown" className="w-4 h-4" /></button>
                   <button onClick={() => openEditGroup(g)} className="p-1 text-ios-primary"><Icon name="Edit2" className="w-4 h-4" /></button>
+                  <button
+                    type="button"
+                    aria-label={`${state.settings.categoryGroupVisibility?.[g.id] !== false ? '关闭' : '开启'}“${g.name}”在添加账目中的分组显示`}
+                    aria-pressed={state.settings.categoryGroupVisibility?.[g.id] !== false}
+                    title={state.settings.categoryGroupVisibility?.[g.id] !== false ? '添加账目时显示此分组' : '添加账目时分类平铺显示'}
+                    onClick={() => dispatch({ type: 'UPDATE_SETTINGS', payload: {
+                      categoryGroupVisibility: { ...state.settings.categoryGroupVisibility, [g.id]: state.settings.categoryGroupVisibility?.[g.id] === false },
+                    } })}
+                    className={cn('p-1', state.settings.categoryGroupVisibility?.[g.id] !== false ? 'text-ios-primary' : 'text-ios-subtext')}
+                  >
+                    <Icon name={state.settings.categoryGroupVisibility?.[g.id] !== false ? 'Eye' : 'EyeOff'} className="w-4 h-4" />
+                  </button>
                   <button onClick={() => handleDeleteGroup(g.id)} className="p-1 text-red-500"><Icon name="Trash2" className="w-4 h-4" /></button>
                 </div>
               </div>
@@ -2224,11 +2372,11 @@ export const SettingsView: React.FC = () => {
         </div>
       </div>}
 
-      <div className="flex items-center justify-between mx-4 mb-4">
+      <div className="flex items-center justify-between gap-2 mx-4 mb-4">
         {isSelectedTradingLedger ? (
-          <div className="flex-1 mr-4 py-2 px-3 rounded-xl bg-gray-100 dark:bg-zinc-800 text-sm font-medium text-ios-text text-center">类目</div>
+          <div className="flex-1 py-2 px-3 rounded-xl bg-gray-100 dark:bg-zinc-800 text-sm font-medium text-ios-text text-center">类目</div>
         ) : (
-          <div className="flex p-1 bg-gray-200 dark:bg-zinc-800 rounded-xl flex-1 mr-4">
+          <div className="flex p-1 bg-gray-200 dark:bg-zinc-800 rounded-xl flex-1 min-w-0">
             <button onClick={() => setCatType('expense')} className={cn('flex-1 py-1.5 rounded-lg text-sm font-medium transition-all', catType === 'expense' ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext')}>
               支出
             </button>
@@ -2237,20 +2385,42 @@ export const SettingsView: React.FC = () => {
             </button>
           </div>
         )}
+        {!isSelectedTradingLedger && (
+          <button type="button" aria-label="只显示未归属分类组的分类" aria-pressed={onlyUngroupedCategories}
+            title={onlyUngroupedCategories ? '显示全部分类' : '只显示未归属分类组的分类'}
+            onClick={() => setOnlyUngroupedCategories(value => !value)}
+            className={cn('p-2 rounded-xl border shrink-0', onlyUngroupedCategories ? 'bg-ios-primary text-white border-ios-primary' : 'bg-white dark:bg-zinc-900 text-ios-subtext border-ios-border')}>
+            <Icon name="Filter" className="w-4 h-4" />
+          </button>
+        )}
         <button
           onClick={() => setIsReordering(!isReordering)}
           className={cn(
             'px-4 py-1.5 rounded-xl text-sm font-medium transition-colors border',
-            isReordering ? 'bg-ios-primary text-white border-ios-primary' : 'bg-white dark:bg-zinc-900 text-ios-primary border-gray-200 dark:border-zinc-700'
+            isReordering ? 'bg-red-500/10 text-red-500 border-red-500/20' : 'bg-ios-primary text-white border-ios-primary'
           )}
         >
-          {isReordering ? '完成' : '排序'}
+          {isReordering ? '删除模式' : '排序模式'}
         </button>
       </div>
-      {isReordering && <p className="text-[11px] text-ios-subtext px-4 -mt-2 mb-2">按住分类卡片拖动排序</p>}
+      {onlyUngroupedCategories && <p className="text-xs text-ios-primary px-4 mb-3">仅显示未归属分类组的分类 · {visibleCategories.length} 个</p>}
+      <p className="text-[11px] text-ios-subtext px-4 -mt-2 mb-2">{isReordering ? '排序模式：按住分类卡片拖动排序' : '删除模式：点击红色 × 删除，点击分类可编辑'}</p>
       <div className="px-4">
-        <div className="grid grid-cols-4 gap-3">
-          {sortedCategories.map((c, index) => {
+        <div className="grid grid-cols-4 auto-rows-fr items-stretch gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              setNewCatBuyCurrency(DEFAULT_CURRENCY);
+              setNewCatSellCurrency(DEFAULT_CURRENCY);
+              setNewCatTradeItemType('normal');
+              setIsAddingCat(true);
+            }}
+            className="bg-emerald-50 dark:bg-emerald-950/40 rounded-xl p-3 min-h-28 h-full w-full min-w-0 flex flex-col items-center justify-center gap-2 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400 shadow-sm active:bg-emerald-100 dark:active:bg-emerald-900/40 transition-colors"
+          >
+            <span className="w-8 h-8 rounded-full bg-emerald-500 text-white flex items-center justify-center"><Icon name="Plus" className="w-5 h-5" /></span>
+            <span className="text-xs font-medium">添加</span>
+          </button>
+          {visibleCategories.map((c, index) => {
             const isDraggingCard = dragCategoryId === c.id;
             const isDropTarget = dragOverCategoryId === c.id && dragCategoryId !== c.id;
             const dragStyle = isDraggingCard
@@ -2267,7 +2437,7 @@ export const SettingsView: React.FC = () => {
                 onPointerUp={isReordering ? finishCategoryDrag : undefined}
                 onPointerCancel={isReordering ? cancelCategoryDrag : undefined}
                 className={cn(
-                  'relative group bg-white dark:bg-zinc-900 rounded-xl p-3 flex flex-col items-center justify-center gap-2 shadow-sm border border-ios-border aspect-square animate-fade-in transition-transform duration-150',
+                  'relative group bg-white dark:bg-zinc-900 rounded-xl p-3 min-h-28 h-full w-full min-w-0 flex flex-col items-center justify-center gap-2 shadow-sm border border-ios-border animate-fade-in transition-transform duration-150',
                   isReordering && 'cursor-grab select-none touch-none',
                   isDraggingCard && 'z-20 opacity-95 shadow-xl ring-2 ring-ios-primary/60 pointer-events-none transition-none',
                   isDropTarget && 'ring-2 ring-ios-primary/40 bg-ios-primary/5'
@@ -2325,22 +2495,70 @@ export const SettingsView: React.FC = () => {
             );
           })}
 
-          {!isReordering && (
-            <button
-              onClick={() => {
-                setNewCatBuyCurrency(DEFAULT_CURRENCY);
-                setNewCatSellCurrency(DEFAULT_CURRENCY);
-                setNewCatTradeItemType('normal');
-                setIsAddingCat(true);
-              }}
-              className="bg-gray-50 dark:bg-zinc-800/50 rounded-xl p-3 flex flex-col items-center justify-center gap-2 border border-dashed border-gray-300 dark:border-zinc-700 aspect-square text-ios-subtext hover:text-ios-primary hover:bg-gray-100 dark:hover:bg-zinc-800 transition-colors"
-            >
-              <Icon name="Plus" className="w-6 h-6" />
-              <span className="text-xs">添加</span>
-            </button>
-          )}
         </div>
+        {onlyUngroupedCategories && visibleCategories.length === 0 && <p className="text-sm text-ios-subtext text-center py-6">当前类型的分类均已归属分类组</p>}
       </div>
+
+      {categoryTransferModal && (
+        <div
+          className="fixed left-0 z-[60] flex w-full flex-col justify-end bg-black/40 backdrop-blur-sm"
+          style={{ height: visualViewport.height, top: visualViewport.offsetTop }}
+          onClick={event => {
+            if (event.target === event.currentTarget && !isTransferringCategory) setCategoryTransferModal(null);
+          }}
+        >
+          <div role="dialog" aria-modal="true" aria-labelledby="category-transfer-title" className="bg-white dark:bg-zinc-900 rounded-t-3xl p-5 flex flex-col overflow-hidden animate-slide-up" style={{ height: Math.min(visualViewport.height * 0.78, 680), paddingBottom: 'max(1.25rem, env(safe-area-inset-bottom))' }}>
+            <div className="flex items-center justify-between gap-3 mb-4 shrink-0">
+              <button type="button" disabled={isTransferringCategory} onClick={() => setCategoryTransferModal(null)} className="text-ios-subtext disabled:opacity-50">取消</button>
+              <h3 id="category-transfer-title" className="font-bold text-lg">转移分类</h3>
+              <button type="button" disabled={isTransferringCategory || !transferTargetCategories.some(category => category.id === categoryTransferModal.targetId)} onClick={handleConfirmCategoryTransfer} className="text-ios-primary text-sm font-bold disabled:opacity-40">{isTransferringCategory ? '转移中…' : '转移并删除'}</button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar space-y-4">
+              <div className="rounded-xl bg-gray-50 dark:bg-zinc-800 p-3 text-sm leading-6">
+                <p>当前有 <span className="font-semibold text-ios-primary">{transferRecordCount}</span> 个账目使用“{transferSourceCategory?.name || '原分类'}”分类。</p>
+                {transferRuleCount > 0 && <p className="text-xs text-ios-subtext">另有 {transferRuleCount} 条自动记录规则使用该分类。</p>}
+                <p className="text-xs text-ios-subtext mt-1">选择目标分类后，账目、分类组及自动记录规则会转移到目标分类，随后删除原分类。金额、日期和附件保持原样。</p>
+              </div>
+              <div>
+                <p className="text-xs text-ios-subtext mb-2">{selectedLedger?.name} · 选择同类型的目标分类</p>
+                <div className="space-y-2">
+                  {transferTargetCategories.map(category => (
+                    <label key={category.id} className={cn('flex items-center gap-3 p-3 border rounded-xl', categoryTransferModal.targetId === category.id ? 'border-ios-primary bg-ios-primary/5' : 'border-ios-border')}>
+                      <input type="radio" name="category-transfer-target" value={category.id} disabled={isTransferringCategory} checked={categoryTransferModal.targetId === category.id} onChange={() => { setCategoryTransferModal(prev => prev ? { ...prev, targetId: category.id } : null); setCategoryTransferError(''); }} />
+                      <Icon name={category.icon} className="w-5 h-5 text-ios-primary" />
+                      <span className="text-sm">{category.name}</span>
+                    </label>
+                  ))}
+                  {transferTargetCategories.length === 0 && <p className="text-sm text-ios-subtext py-4">当前账本没有其他可转移的同类型分类，请取消后先添加目标分类。</p>}
+                </div>
+              </div>
+              {categoryTransferError && <p role="alert" className="text-sm text-red-500">{categoryTransferError}</p>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteGroupsConfirmation && (
+        <div
+          className="fixed left-0 z-[60] flex w-full items-center justify-center bg-black/40 backdrop-blur-sm p-6"
+          style={{ height: visualViewport.height, top: visualViewport.offsetTop }}
+          onClick={event => {
+            if (event.target === event.currentTarget) setDeleteGroupsConfirmation(null);
+          }}
+          onKeyDown={event => {
+            if (event.key === 'Escape') setDeleteGroupsConfirmation(null);
+          }}
+        >
+          <div role="alertdialog" aria-modal="true" aria-labelledby="delete-all-groups-title" aria-describedby="delete-all-groups-description" className="w-full max-w-sm rounded-2xl bg-white dark:bg-zinc-900 p-5 shadow-xl">
+            <h3 id="delete-all-groups-title" className="font-semibold text-base text-ios-text">删除所有分类组？</h3>
+            <p id="delete-all-groups-description" className="mt-3 text-sm text-ios-subtext leading-6">将删除“{deleteGroupsConfirmation.ledgerName}”的 {deleteGroupsConfirmation.groupIds.length} 个分类组，无法撤销。分类和账目会保留。</p>
+            <div className="mt-5 grid grid-cols-2 gap-3">
+              <button type="button" autoFocus onClick={() => setDeleteGroupsConfirmation(null)} className="rounded-xl bg-gray-100 dark:bg-zinc-800 py-3 text-sm font-medium text-ios-text">取消</button>
+              <button type="button" onClick={confirmDeleteAllGroups} className="rounded-xl bg-red-500 py-3 text-sm font-medium text-white">确认删除</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {isAddingCat && (
         <div
@@ -2625,28 +2843,35 @@ export const SettingsView: React.FC = () => {
         </div>
       )}
 
-      {groupModal.isOpen && (
+      {groupModal.isOpen && groupModal.ledgerId === selectedLedgerId && (
         <div
           className="fixed left-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm w-full"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) closeGroupModal();
+          }}
           style={{
             height: visualViewport.height,
             top: visualViewport.offsetTop
           }}
         >
-          <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-5 animate-slide-up h-[78%] max-h-[680px] flex flex-col overflow-hidden">
-            <div className="flex justify-between items-center mb-4">
-              <button onClick={() => setGroupModal({ isOpen: false, mode: 'create', name: '', categoryIds: [] })} className="text-ios-subtext">取消</button>
+          <div
+            className="bg-white dark:bg-zinc-900 rounded-t-3xl p-5 animate-slide-up flex flex-col overflow-hidden"
+            style={{ height: Math.min(visualViewport.height * 0.78, 680), paddingBottom: 'max(1.25rem, env(safe-area-inset-bottom))' }}
+          >
+            <div className="flex justify-between items-center mb-4 shrink-0">
+              <button onClick={closeGroupModal} disabled={isSavingGroup} className="text-ios-subtext disabled:opacity-40">取消</button>
               <h3 className="font-bold text-lg">{groupModal.mode === 'create' ? '新建分类组' : '编辑分类组'}</h3>
-              <button onClick={handleSaveGroup} className="text-ios-primary font-bold">保存</button>
+              <button onClick={handleSaveGroup} disabled={isSavingGroup} className="text-ios-primary font-bold disabled:opacity-40">{isSavingGroup ? '保存中…' : '保存'}</button>
             </div>
 
-            <div className="space-y-4 flex-1 overflow-y-auto no-scrollbar">
+            <div className="space-y-4 flex-1 min-h-0 overflow-y-auto no-scrollbar">
               <div>
                 <label className="text-xs text-ios-subtext ml-1 mb-1 block">分组名称</label>
                 <input
                   type="text"
                   className="w-full bg-gray-100 dark:bg-zinc-800 p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-ios-primary/20"
                   value={groupModal.name}
+                  disabled={isSavingGroup}
                   onChange={(e) => setGroupModal(prev => ({ ...prev, name: e.target.value }))}
                   placeholder="如：吃喝、交通"
                   autoComplete="off"
@@ -2654,23 +2879,51 @@ export const SettingsView: React.FC = () => {
                 />
               </div>
               <div>
-                <div className="text-xs text-ios-subtext mb-2">选择包含的分类</div>
-                <div className="grid grid-cols-2 gap-2 max-h-80 overflow-y-auto no-scrollbar">
-                  {state.categories.filter(c => !c.isDeleted && c.ledgerId === selectedLedgerId).sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map(cat => {
-                    const checked = groupModal.categoryIds.includes(cat.id);
+                <div className="text-xs text-ios-subtext mb-2">选择包含的分类 · 已选 {selectedGroupCategoryIds.length} 个</div>
+                <div role="tablist" aria-label="分类类型" className="flex p-1 mb-3 bg-gray-200 dark:bg-zinc-800 rounded-xl">
+                  {(['expense', 'income'] as const).map(type => {
+                    const selectedCount = groupCategories.filter(category => category.type === type && selectedGroupCategoryIds.includes(category.id)).length;
                     return (
-                      <label key={cat.id} className={cn("flex items-center gap-2 p-2 rounded-xl border", checked ? "border-ios-primary bg-ios-primary/5" : "border-gray-200 dark:border-zinc-800")}>
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleCategoryInGroup(cat.id)}
-                        />
-                        <span className="text-sm">{cat.name}</span>
-                        <span className="text-[10px] text-ios-subtext">{cat.type === 'trade' ? '类目' : cat.type === 'expense' ? '支出' : '收入'}</span>
-                      </label>
+                      <button
+                        key={type}
+                        id={`group-category-tab-${type}`}
+                        type="button"
+                        role="tab"
+                        aria-selected={groupCategoryType === type}
+                        aria-controls="group-category-panel"
+                        onClick={() => setGroupCategoryType(type)}
+                        className={cn('flex-1 py-1.5 rounded-lg text-sm font-medium transition-all', groupCategoryType === type ? 'bg-white dark:bg-zinc-700 text-ios-text shadow-sm' : 'text-ios-subtext')}
+                      >
+                        {type === 'expense' ? '支出' : '收入'}{selectedCount > 0 ? `（${selectedCount}）` : ''}
+                      </button>
                     );
                   })}
                 </div>
+                <div id="group-category-panel" role="tabpanel" aria-labelledby={`group-category-tab-${groupCategoryType}`} className="grid grid-cols-2 gap-2">
+                  {groupCategories.filter(category => category.type === groupCategoryType).map(cat => {
+                    const checked = selectedGroupCategoryIds.includes(cat.id);
+                    const owner = categoryGroupOwners.get(cat.id);
+                    const assignedElsewhere = !!owner && owner.id !== groupModal.id;
+                    return (
+                      <label key={cat.id} className={cn("flex items-center gap-2 p-2 rounded-xl border", assignedElsewhere ? 'border-gray-200 dark:border-zinc-800 bg-gray-100 dark:bg-zinc-800/60 text-ios-subtext cursor-not-allowed' : checked ? "border-ios-primary bg-ios-primary/5" : "border-gray-200 dark:border-zinc-800")}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={isSavingGroup || assignedElsewhere}
+                          onChange={() => toggleCategoryInGroup(cat.id)}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-center gap-1"><span className="text-sm truncate">{cat.name}</span><span className="text-[10px] text-ios-subtext">{cat.type === 'trade' ? '类目' : cat.type === 'expense' ? '支出' : '收入'}</span></span>
+                          {assignedElsewhere && <span className="block text-[10px] text-ios-subtext mt-1 break-words">所属：{owner.name}</span>}
+                        </span>
+                      </label>
+                    );
+                  })}
+                  {!groupCategories.some(category => category.type === groupCategoryType) && (
+                    <p className="col-span-2 py-6 text-center text-xs text-ios-subtext">暂无{groupCategoryType === 'expense' ? '支出' : '收入'}分类</p>
+                  )}
+                </div>
+                {groupSaveError && <p role="alert" className="text-sm text-red-500 mt-3">{groupSaveError}</p>}
               </div>
             </div>
           </div>

@@ -3,6 +3,12 @@ import { DEFAULT_SETTINGS } from '../constants';
 import { getSyncableSettings, normalizeAppSettings } from './settingsUtils';
 
 describe('synchronized settings boundary', () => {
+  it('preserves eye preferences in normalized and synchronized settings with an empty legacy default', () => {
+    expect(normalizeAppSettings({}).categoryGroupVisibility).toEqual({});
+    const settings = normalizeAppSettings({ categoryGroupVisibility: { food: false, home: true } });
+    expect(getSyncableSettings(settings).categoryGroupVisibility).toEqual({ food: false, home: true });
+    expect(JSON.parse(JSON.stringify(getSyncableSettings(settings))).categoryGroupVisibility.food).toBe(false);
+  });
   it('includes the DeepSeek API key in D1 settings while excluding local auth and Cloudflare secrets', () => {
     const settings = normalizeAppSettings({
       ...DEFAULT_SETTINGS,

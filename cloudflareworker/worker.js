@@ -3,7 +3,18 @@ const ALLOW_ORIGINS = [
   '*',
 ];
 const PASSWORD_ITERATIONS = 100000;
-const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+// A finite far-future timestamp keeps older clients compatible with permanent
+// sessions; permanent policies are never rejected based on this timestamp.
+const PERMANENT_SESSION_EXPIRES_AT = 253402300799999;
+const SESSION_DURATIONS = {
+  week: 7 * 24 * 60 * 60 * 1000,
+  month: 30 * 24 * 60 * 60 * 1000,
+  year: 365 * 24 * 60 * 60 * 1000,
+};
+
+function sessionExpiresAt(logoutAfter, now = Date.now()) {
+  return logoutAfter === 'permanent' ? PERMANENT_SESSION_EXPIRES_AT : now + SESSION_DURATIONS[logoutAfter];
+}
 const USERNAME_RE = /^[a-z0-9_.-]{3,40}$/;
 const INVITE_CODE_RE = /^\d{6}$/;
 const DEFAULT_ALLOW_ORIGIN = '*'; // 不在白名单时用这个，测试可暂设为 '*'
@@ -176,6 +187,7 @@ async function getSessionUser(request, env) {
       sessions.id AS session_id,
       sessions.user_id AS session_user_id,
       sessions.expires_at AS expires_at,
+      sessions.logout_after AS logout_after,
       sessions.revoked_at AS revoked_at,
       users.id AS user_id,
       users.username AS username,
@@ -187,7 +199,7 @@ async function getSessionUser(request, env) {
 
   if (!row) return null;
   if (row.revoked_at !== null && row.revoked_at !== undefined) return null;
-  if (Number(row.expires_at) <= Date.now()) return null;
+  if (row.logout_after !== 'permanent' && Number(row.expires_at) <= Date.now()) return null;
   if (Number(row.disabled) === 1) return null;
 
   return {
@@ -198,6 +210,7 @@ async function getSessionUser(request, env) {
     session: {
       id: row.session_id,
       expiresAt: Number(row.expires_at),
+      logoutAfter: row.logout_after,
     },
     tokenHash,
   };
@@ -223,16 +236,17 @@ async function createSessionForUser(userId, request, env) {
   const token = createSessionToken();
   const tokenHash = await sha256Hex(token);
   const now = Date.now();
-  const expiresAt = now + SESSION_TTL_MS;
+  const logoutAfter = 'permanent';
+  const expiresAt = sessionExpiresAt(logoutAfter, now);
   const sessionId = crypto.randomUUID();
   const userAgent = request.headers.get('User-Agent') || '';
 
   await env.DB.prepare(`
-    INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at, revoked_at, user_agent)
-    VALUES (?, ?, ?, ?, ?, NULL, ?)
-  `).bind(sessionId, userId, tokenHash, now, expiresAt, userAgent).run();
+    INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at, revoked_at, user_agent, logout_after)
+    VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
+  `).bind(sessionId, userId, tokenHash, now, expiresAt, userAgent, logoutAfter).run();
 
-  return { token, expiresAt, sessionId };
+  return { token, expiresAt, sessionId, logoutAfter };
 }
 
 function authUserPayload(user) {
@@ -308,6 +322,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at INTEGER NOT NULL,
   revoked_at INTEGER,
   user_agent TEXT,
+  logout_after TEXT NOT NULL DEFAULT 'legacy',
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
@@ -444,6 +459,10 @@ export default {
       await ensureTables(env);
       return meHandler(request, env, origin);
     }
+    if (url.pathname === '/auth/session' && request.method === 'POST') {
+      await ensureTables(env);
+      return sessionPolicyHandler(request, env, origin);
+    }
 
     // Normal cloud data routes trust only the authenticated session user.
     if (url.pathname === '/sync/version' && request.method === 'GET') {
@@ -577,9 +596,25 @@ async function ensureTables(env) {
 async function initializeTables(env) {
     const stmts = CREATE_SQL.split(';').map(s => s.trim()).filter(Boolean);
     for (const sql of stmts) await env.DB.prepare(sql).run();
+    await ensureSessionPolicy(env);
     await ensureStructuredCompatibilityColumns(env);
     await ensureServerUpdatedAtColumns(env);
     await ensureServerUpdatedAtIndexes(env);
+}
+
+async function ensureSessionPolicy(env) {
+  if (!await tableHasColumn(env, 'sessions', 'logout_after')) {
+    try {
+      await env.DB.prepare("ALTER TABLE sessions ADD COLUMN logout_after TEXT NOT NULL DEFAULT 'legacy'").run();
+    } catch (error) {
+      if (!await tableHasColumn(env, 'sessions', 'logout_after')) throw error;
+    }
+  }
+  // Preserve live logins without reviving expired or explicitly revoked tokens.
+  await env.DB.prepare(`
+    UPDATE sessions SET logout_after = 'permanent', expires_at = ?
+    WHERE logout_after = 'legacy' AND expires_at > ? AND revoked_at IS NULL
+  `).bind(PERMANENT_SESSION_EXPIRES_AT, Date.now()).run();
 }
 
 async function tableHasColumn(env, tableName, columnName) {
@@ -721,6 +756,7 @@ async function registerHandler(request, env, origin) {
     user: authUserPayload(user),
     token: session.token,
     expiresAt: session.expiresAt,
+    logoutAfter: session.logoutAfter,
   }, 201, origin);
 }
 
@@ -766,6 +802,7 @@ async function loginHandler(request, env, origin) {
     user: authUserPayload(user),
     token: session.token,
     expiresAt: session.expiresAt,
+    logoutAfter: session.logoutAfter,
   }, 200, origin);
 }
 
@@ -790,7 +827,25 @@ async function meHandler(request, env, origin) {
   return json({
     user: authUserPayload(sessionUser.user),
     expiresAt: sessionUser.session.expiresAt,
+    logoutAfter: sessionUser.session.logoutAfter,
   }, 200, origin);
+}
+
+async function sessionPolicyHandler(request, env, origin) {
+  const sessionUser = await requireSessionUser(request, env, origin);
+  if (sessionUser.response) return sessionUser.response;
+  const body = await parseJsonBody(request);
+  const logoutAfter = body?.logoutAfter;
+  if (!['week', 'month', 'year', 'permanent'].includes(logoutAfter)) {
+    return json({ error: 'Invalid logout period' }, 400, origin);
+  }
+  const expiresAt = sessionExpiresAt(logoutAfter);
+  const result = await env.DB.prepare(`
+    UPDATE sessions SET logout_after = ?, expires_at = ?
+    WHERE id = ? AND revoked_at IS NULL
+  `).bind(logoutAfter, expiresAt, sessionUser.session.id).run();
+  if (d1Changes(result) !== 1) return json({ error: 'Unauthorized' }, 401, origin);
+  return json({ user: authUserPayload(sessionUser.user), expiresAt, logoutAfter }, 200, origin);
 }
 
 // ---- 辅助：分批执行，避免超过 D1 50 查询限制 ----

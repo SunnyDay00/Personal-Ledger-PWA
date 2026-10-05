@@ -24,6 +24,33 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
     const [previewKeys, setPreviewKeys] = useState<string[]>([]);
 
     const history = state.settings.searchHistory;
+    const queryRef = useRef('');
+    const historyRef = useRef(history);
+    const dispatchRef = useRef(dispatch);
+    const [isComposing, setIsComposing] = useState(false);
+    historyRef.current = history;
+    dispatchRef.current = dispatch;
+
+    const rememberSearch = (term: string) => {
+        const trimmed = term.trim();
+        if (trimmed && historyRef.current[0] !== trimmed) {
+            dispatchRef.current({ type: 'ADD_SEARCH_HISTORY', payload: trimmed });
+        }
+    };
+    const changeQuery = (term: string) => {
+        queryRef.current = term;
+        setQuery(term);
+    };
+
+    // Live search does not require Return, especially on mobile keyboards.
+    useEffect(() => {
+        if (isComposing || !query.trim()) return;
+        const timer = setTimeout(() => rememberSearch(query), 650);
+        return () => clearTimeout(timer);
+    }, [query, isComposing]);
+
+    // Persist the last term even when the dialog closes before debounce fires.
+    useEffect(() => () => rememberSearch(queryRef.current), []);
     const currentLedger = state.ledgers.find(ledger => ledger.id === state.currentLedgerId);
     const expenseLabel = getTransactionTypeLabel(currentLedger, 'expense');
     const incomeLabel = getTransactionTypeLabel(currentLedger, 'income');
@@ -150,10 +177,8 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
     }, [query, state.transactions, state.categories, state.categoryGroups, state.currentLedgerId, dateRange, selectedType, selectedCategoryId, selectedGroupId, amountFilter, imageFilter, ledgerScope]);
 
     const handleSearch = (term: string) => {
-        setQuery(term);
-        if (term.trim()) {
-            dispatch({ type: 'ADD_SEARCH_HISTORY', payload: term });
-        }
+        changeQuery(term);
+        rememberSearch(term);
     };
 
     const clearFilters = () => {
@@ -185,11 +210,13 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
                             placeholder="搜索金额、分类、备注"
                             className="w-full bg-gray-100 dark:bg-zinc-800 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none"
                             value={query}
-                            onChange={(e) => setQuery(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && handleSearch(query)}
+                            onChange={(e) => changeQuery(e.target.value)}
+                            onCompositionStart={() => setIsComposing(true)}
+                            onCompositionEnd={() => setIsComposing(false)}
+                            onKeyDown={(e) => !e.nativeEvent.isComposing && e.key === 'Enter' && handleSearch(query)}
                         />
                         {query && (
-                            <button onClick={() => setQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2">
+                            <button onClick={() => { rememberSearch(queryRef.current); changeQuery(''); }} className="absolute right-2 top-1/2 -translate-y-1/2">
                                 <Icon name="XCircle" className="w-4 h-4 text-ios-subtext fill-gray-200" />
                             </button>
                         )}
@@ -460,7 +487,7 @@ export const SearchModal: React.FC<{ onClose: () => void; onEdit?: (t: Transacti
                             {history.map((term, i) => (
                                 <button
                                     key={i}
-                                    onClick={() => setQuery(term)}
+                                    onClick={() => handleSearch(term)}
                                     className="bg-white dark:bg-zinc-800 px-3 py-1.5 rounded-full text-xs text-ios-text shadow-sm"
                                 >
                                     {term}

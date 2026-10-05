@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { feedback } from '../services/feedback';
-import { TransactionType, Transaction, TradeAllocation, TradeKeyAllocation, TradeKey } from '../types';
+import { Category, TransactionType, Transaction, TradeAllocation, TradeKeyAllocation, TradeKey } from '../types';
 import { DEFAULT_CURRENCY } from '../constants';
 import { fetchLatestExchangeRates } from '../services/currency';
 import { generateId, getCurrencyName, getExchangeRateToCny, normalizeCurrencyCode } from '../utils';
@@ -13,6 +13,7 @@ import { Capacitor } from '@capacitor/core';
 import { Clipboard } from '@capacitor/clipboard';
 import { imageService } from '../services/imageService';
 import { ImagePreview } from './ImagePreview';
+import { buildAddCategorySections } from '../services/categoryGroups';
 import { getAvailableTradeBuyLots, getAvailableTradeCardKeys, getSuggestedTradeAllocations, getSuggestedTradeKeyAllocations, getTradingAllocationCost, getTradingBuyUnitCost, isTradingLedger, normalizeTradeAllocations, normalizeTradeKeyAllocations, normalizeTradeKeys, tradeKeyAllocationsToTradeAllocations } from '../services/ledgerUtils';
 
 interface AddViewProps {
@@ -241,6 +242,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         isTrading && !initialTransaction?.categoryId
     );
     const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(() => initialTransaction?.categoryId || null);
+    const [expandedCategoryGroupIds, setExpandedCategoryGroupIds] = useState<Set<string>>(() => new Set());
     const [note, setNote] = useState(() => initialTransaction?.note || '');
     const [date, setDate] = useState(() => initialTransaction?.date ? new Date(initialTransaction.date) : new Date());
     const [isNoteFocused, setIsNoteFocused] = useState(false);
@@ -287,8 +289,16 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     const cols = state.settings.categoryRows || 5;
 
     const categories = useMemo(() => state.categories
-        .filter(c => (isTrading ? c.type === 'trade' : c.type === type) && c.ledgerId === effectiveLedgerId)
+        .filter(c => !c.isDeleted && (isTrading ? c.type === 'trade' : c.type === type) && c.ledgerId === effectiveLedgerId)
         .sort((a, b) => a.order - b.order), [state.categories, type, effectiveLedgerId, isTrading]);
+
+    const categorySections = useMemo(
+        () => buildAddCategorySections(categories, state.categoryGroups, effectiveLedgerId, type, state.settings.categoryGroupVisibility || {}),
+        [categories, state.categoryGroups, effectiveLedgerId, type, state.settings.categoryGroupVisibility]
+    );
+    useEffect(() => {
+        setExpandedCategoryGroupIds(new Set());
+    }, [effectiveLedgerId, type]);
 
     const selectedCategory = useMemo(
         () => categories.find(category => category.id === selectedCategoryId),
@@ -1271,6 +1281,26 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         return `原币种 ${selectedCurrency} · 入账汇率 1 ${selectedCurrency} = ${formatResultNumber(rate)} CNY${updatedAtText}`;
     }, [isTrading, initialTransaction?.id, initialTransaction?.exchangeRateUpdatedAt, selectedCurrency, shouldUseSavedExchangeRate, savedExchangeRateToCny, previewExchangeRateToCny]);
 
+    const renderCategoryOption = (cat: Category) => (
+        <button key={cat.id} type="button" onClick={() => handleCategorySelect(cat.id)} className="flex flex-col items-center gap-2 group">
+            <div className={clsx(
+                'w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200',
+                selectedCategoryId === cat.id
+                    ? 'bg-ios-primary text-white shadow-lg shadow-blue-500/30 scale-110'
+                    : state.settings.fontContrast === 'high'
+                        ? 'bg-gray-200 dark:bg-zinc-700 text-gray-900 dark:text-gray-100 group-active:scale-95'
+                        : 'bg-gray-100 dark:bg-zinc-800 text-ios-subtext group-active:scale-95'
+            )}>
+                <Icon name={cat.icon} className="w-5 h-5" />
+            </div>
+            <span className={clsx(
+                'text-[10px] transition-colors truncate w-full text-center',
+                selectedCategoryId === cat.id ? 'text-ios-primary font-medium'
+                    : state.settings.fontContrast === 'high' ? 'text-gray-900 dark:text-gray-100 font-medium' : 'text-ios-subtext'
+            )}>{cat.name}</span>
+        </button>
+    );
+
     return (
         <div
             className={clsx(
@@ -1636,35 +1666,43 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                         ) : null}
                     </div>
                 ) : (
-                    <div className="grid gap-y-6 p-4" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
-                        {categories.map(cat => (
-                            <button
-                                key={cat.id}
-                                onClick={() => handleCategorySelect(cat.id)}
-                                className="flex flex-col items-center gap-2 group"
-                            >
-                                <div className={clsx(
-                                    'w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200',
-                                    selectedCategoryId === cat.id
-                                        ? 'bg-ios-primary text-white shadow-lg shadow-blue-500/30 scale-110'
-                                        : state.settings.fontContrast === 'high'
-                                            ? 'bg-gray-200 dark:bg-zinc-700 text-gray-900 dark:text-gray-100 group-active:scale-95'
-                                            : 'bg-gray-100 dark:bg-zinc-800 text-ios-subtext group-active:scale-95'
-                                )}>
-                                    <Icon name={cat.icon} className="w-5 h-5" />
+                    <div className="p-4 space-y-3">
+                        {categorySections.groups.map(({ group, categories: members }) => {
+                            const expanded = expandedCategoryGroupIds.has(group.id);
+                            const selectedMember = members.find(category => category.id === selectedCategoryId);
+                            return (
+                                <section key={group.id} className={clsx('rounded-2xl border bg-white dark:bg-zinc-900 overflow-hidden', selectedMember ? 'border-ios-primary/30' : 'border-ios-border')}>
+                                    <button
+                                        type="button"
+                                        aria-expanded={expanded}
+                                        aria-controls={`add-category-group-${group.id}`}
+                                        onClick={() => setExpandedCategoryGroupIds(previous => {
+                                            const next = new Set(previous);
+                                            if (next.has(group.id)) next.delete(group.id); else next.add(group.id);
+                                            return next;
+                                        })}
+                                        className="w-full flex items-center justify-between gap-3 p-3 text-left"
+                                    >
+                                        <span className="font-medium text-sm text-ios-text truncate">{group.name}</span>
+                                        <span className="ml-auto text-xs text-ios-subtext truncate">{selectedMember ? `已选 ${selectedMember.name}` : `${members.length} 个分类`}</span>
+                                        <Icon name={expanded ? 'ChevronUp' : 'ChevronDown'} className="w-4 h-4 shrink-0 text-ios-subtext" />
+                                    </button>
+                                    {expanded && (
+                                        <div id={`add-category-group-${group.id}`} className="grid gap-x-2 gap-y-4 p-3 border-t border-ios-border" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+                                            {members.map(renderCategoryOption)}
+                                        </div>
+                                    )}
+                                </section>
+                            );
+                        })}
+                        {categorySections.ungrouped.length > 0 && (
+                            <div>
+                                {categorySections.groups.length > 0 && <p className="text-xs text-ios-subtext mb-3">其他分类</p>}
+                                <div className="grid gap-y-6" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+                                    {categorySections.ungrouped.map(renderCategoryOption)}
                                 </div>
-                                <span className={clsx(
-                                    'text-[10px] transition-colors truncate w-full text-center',
-                                    selectedCategoryId === cat.id
-                                        ? 'text-ios-primary font-medium'
-                                        : state.settings.fontContrast === 'high'
-                                            ? 'text-gray-900 dark:text-gray-100 font-medium'
-                                            : 'text-ios-subtext'
-                                )}>
-                                    {cat.name}
-                                </span>
-                            </button>
-                        ))}
+                            </div>
+                        )}
                     </div>
                 )}
             </div>

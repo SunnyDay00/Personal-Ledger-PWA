@@ -28,9 +28,9 @@ export const SYNCABLE_SETTINGS_KEYS: (keyof AppSettings)[] = [
   'budget',
   'keypadHeight',
   'categoryRows',
+  'categoryGroupVisibility',
   'imageCacheLimit',
   'categoryNotes',
-  'searchHistory',
   'exportStartDate',
   'exportEndDate',
   'defaultLedgerId',
@@ -172,8 +172,8 @@ export const normalizeAppSettings = (
   baseSettings: AppSettings = DEFAULT_SETTINGS
 ): AppSettings => {
   const merged = { ...baseSettings, ...(settings || {}) };
-  const now = Date.now();
-  const authSession = merged.authSession && merged.authSession.token && merged.authSession.expiresAt > now
+  // Expiry is handled by the account reset flow, never by dropping just auth.
+  const authSession = merged.authSession && merged.authSession.token
     ? merged.authSession
     : undefined;
 

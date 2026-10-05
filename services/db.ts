@@ -2,6 +2,8 @@ import Dexie, { Table } from 'dexie';
 import { Transaction, Ledger, Category, CategoryGroup, AppSettings, OperationLog, BackupLog, SyncEntityType, SyncOperation, SyncQueueItem, AiConfig, AiConversation, AiMessage } from '../types';
 import { loadState } from './storage';
 import { normalizeCategory, normalizeLedger, normalizeTransaction } from './ledgerUtils';
+import { readDeviceSearchHistory } from './searchHistory';
+import { normalizeExclusiveCategoryGroups } from './categoryGroups';
 
 // 再次 bump DB 名称，彻底规避旧 schema 残留导致 objectStore not found。
 export const DB_NAME = 'FinanceDB_v9';
@@ -54,11 +56,28 @@ export class FinanceDB extends Dexie {
 }
 
 export let db = new FinanceDB();
+let accountResetStarted = false;
 
 // 显式打开数据库，确保建库流程执行；失败时抛出错误，不自动删库
 async function openDB() {
+  if (accountResetStarted) throw new Error('正在退出并清空本地数据');
   if (db.isOpen()) return;
   await db.open();
+}
+
+// Stop writes before deleting every current/legacy store. Old databases and
+// localStorage must also go, otherwise startup migration can resurrect data.
+export async function clearLocalAccountData() {
+  if (typeof window !== 'undefined') window.localStorage.setItem('ledger-account-reset-pending', '1');
+  accountResetStarted = true;
+  db.close();
+  for (const name of [DB_NAME, ...LEGACY_DB_NAMES]) {
+    await Dexie.delete(name);
+  }
+  if (typeof window !== 'undefined') {
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+  }
 }
 
 // 便于浏览器 Console 调试（只在浏览器环境挂载）
@@ -409,10 +428,10 @@ export async function initAndMigrateDB() {
 export const dbAPI = {
   async getSettings(): Promise<AppSettings | undefined> {
     const row = await db.settings.get('main');
-    return row?.value;
+    return row?.value ? { ...row.value, searchHistory: readDeviceSearchHistory(row.value.searchHistory) } : undefined;
   },
   async saveSettings(settings: AppSettings) {
-    await db.settings.put({ key: 'main', value: settings });
+    await db.settings.put({ key: 'main', value: { ...settings, searchHistory: readDeviceSearchHistory(settings.searchHistory) } });
   },
   async getLedgers() {
     return (await db.ledgers.toArray()).map(normalizeLedger).filter(l => !l.isDeleted);
@@ -421,7 +440,8 @@ export const dbAPI = {
     return (await db.categories.orderBy('order').toArray()).map(normalizeCategory).filter(c => !c.isDeleted);
   },
   async getCategoryGroups() {
-    return (await db.categoryGroups.orderBy('order').toArray()).filter(g => !g.isDeleted);
+    const [groups, categories] = await Promise.all([db.categoryGroups.orderBy('order').toArray(), db.categories.toArray()]);
+    return normalizeExclusiveCategoryGroups(categories, groups.filter(group => !group.isDeleted));
   },
   async getTransactions() {
     return (await db.transactions.orderBy('date').reverse().toArray()).map(normalizeTransaction).filter(t => !t.isDeleted);

@@ -1,11 +1,12 @@
 ﻿import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef, useCallback } from 'react';
-import { AppState, AppAction, Transaction, Ledger, OperationLog, BackupLog, Category, CategoryGroup, AppSettings, SyncQueueItem, AuthSession } from '../types';
+import { AppState, AppAction, Transaction, Ledger, OperationLog, BackupLog, Category, CategoryGroup, AppSettings, SyncQueueItem, AuthSession, LogoutAfter } from '../types';
+import { App as CapacitorApp } from '@capacitor/app';
 import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, DEFAULT_TRADE_CATEGORIES, INITIAL_LEDGERS } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
 import { generateId, extractCategoriesFromCsv, parseCsvToTransactions } from '../utils';
-import { db, initAndMigrateDB, dbAPI, ensureStoresReady, createSyncQueueItem, queueSyncItem, markAllLocalDataForSync, queueCachedImagesForUpload } from '../services/db';
+import { db, initAndMigrateDB, dbAPI, ensureStoresReady, createSyncQueueItem, queueSyncItem, markAllLocalDataForSync, queueCachedImagesForUpload, clearLocalAccountData } from '../services/db';
 import { pushToCloud, pullFromCloud, getCloudVersion, D1PullResponse, D1PushResponse, D1SyncPayload } from '../services/d1Sync';
-import { login as authLogin, register as authRegister, logout as authLogout, getMe, AuthApiError } from '../services/auth';
+import { login as authLogin, register as authRegister, logout as authLogout, getMe, AuthApiError, hasSessionExpired, updateSessionPolicy } from '../services/auth';
 import { SyncService } from '../services/sync';
 import { feedback } from '../services/feedback';
 import { imageService } from '../services/imageService';
@@ -13,6 +14,11 @@ import { CNY_EXCHANGE_RATES, fetchLatestExchangeRates, getDisplayExchangeRates }
 import { getSyncableSettings, normalizeAppSettings, normalizeBackupReminderDays } from '../services/settingsUtils';
 import { normalizeAiConfig } from '../services/aiConfig';
 import { checkSystemTimeSkew } from '../services/timeSkew';
+import { syncIosHomeQuickActions } from '../services/homeQuickActions';
+import { prependSearchHistory, readDeviceSearchHistory, saveDeviceSearchHistory } from '../services/searchHistory';
+import { transferCategoryData } from '../services/categoryTransfer';
+import { saveCategoryGroupExclusive } from '../services/categoryGroupStorage';
+import { normalizeExclusiveCategoryGroups } from '../services/categoryGroups';
 import { createAutoRecordTransaction, createAutoRecordTransactionId, getDueAutoRecordOccurrences, isAutoRecordRunnable } from '../services/autoRecords';
 import { getAvailableTradeBuyLots, getAvailableTradeCardKeys, getTradeInventory, getTransactionTypeLabel, isTradingLedger, normalizeCategory, normalizeLedger, normalizeLedgerType, normalizeTradeAllocations, normalizeTradeKeyAllocations, normalizeTradeKeys, normalizeTransaction, tradeKeyAllocationsToTradeAllocations } from '../services/ledgerUtils';
 
@@ -42,6 +48,8 @@ interface AppContextType {
     deleteTransaction: (id: string) => Promise<void>;
     batchDeleteTransactions: (ids: string[]) => Promise<void>;
     batchUpdateTransactions: (ids: string[], updates: Partial<Transaction>) => Promise<void>;
+    transferCategory: (sourceId: string, targetId: string) => Promise<number>;
+    saveCategoryGroup: (group: CategoryGroup, mode: 'create' | 'edit') => Promise<void>;
     undo: () => Promise<void>;
     canUndo: boolean;
     manualBackup: () => Promise<void>;
@@ -56,6 +64,7 @@ interface AppContextType {
     loginAccount: (username: string, password: string) => Promise<AuthSession>;
     registerAccount: (username: string, password: string, inviteCode: string) => Promise<AuthSession>;
     logoutAccount: () => Promise<void>;
+    setLogoutAfter: (period: LogoutAfter) => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType>({
@@ -66,6 +75,8 @@ const AppContext = createContext<AppContextType>({
     deleteTransaction: async () => { },
     batchDeleteTransactions: async () => { },
     batchUpdateTransactions: async () => { },
+    transferCategory: async () => { throw new Error('AppContext not ready'); },
+    saveCategoryGroup: async () => { throw new Error('AppContext not ready'); },
     undo: async () => { },
     canUndo: false,
     manualBackup: async () => { },
@@ -80,6 +91,7 @@ const AppContext = createContext<AppContextType>({
     loginAccount: async () => { throw new Error('AppContext not ready'); },
     registerAccount: async () => { throw new Error('AppContext not ready'); },
     logoutAccount: async () => { },
+    setLogoutAfter: async () => { },
 });
 
 function appReducer(state: AppState, action: AppAction): AppState {
@@ -149,14 +161,14 @@ function appReducer(state: AppState, action: AppAction): AppState {
             return {
                 ...state,
                 ...action.payload,
-                categoryGroups: action.payload.categoryGroups ?? state.categoryGroups,
+                categoryGroups: normalizeExclusiveCategoryGroups(action.payload.categories ?? state.categories, action.payload.categoryGroups ?? state.categoryGroups),
                 settings: newSettings,
                 exchangeRates: action.payload.exchangeRates ?? state.exchangeRates
             };
         case 'SET_THEME_MODE':
             return { ...state, settings: { ...state.settings, themeMode: action.payload } };
         case 'ADD_SEARCH_HISTORY':
-            const newHistory = [action.payload, ...state.settings.searchHistory.filter(h => h !== action.payload)].slice(0, 10);
+            const newHistory = prependSearchHistory(state.settings.searchHistory, action.payload);
             return { ...state, settings: { ...state.settings, searchHistory: newHistory } };
         case 'CLEAR_SEARCH_HISTORY':
             return { ...state, settings: { ...state.settings, searchHistory: [] } };
@@ -182,7 +194,9 @@ function appReducer(state: AppState, action: AppAction): AppState {
         case 'DELETE_CATEGORY_GROUP':
             return { ...state, categoryGroups: state.categoryGroups.filter(g => g.id !== action.payload) };
         case 'REORDER_CATEGORY_GROUPS':
-            return { ...state, categoryGroups: action.payload };
+            const reorderedGroups = new Map(action.payload.map(group => [group.id, group]));
+            return { ...state, categoryGroups: normalizeExclusiveCategoryGroups(state.categories,
+                state.categoryGroups.map(group => reorderedGroups.get(group.id) ?? group)) };
         case 'SAVE_NOTE_HISTORY': {
             const { categoryId, note } = action.payload;
             if (!note || !note.trim()) return state;
@@ -312,7 +326,7 @@ const shouldApplyRemoteEntity = (
 
 const restoreStoredAuthSettings = (settings: AppSettings): AppSettings => {
     const session = settings.authSession;
-    if (!session?.token || session.expiresAt <= Date.now()) {
+    if (!session?.token) {
         return normalizeAppSettings({ ...settings, authSession: undefined, authMode: 'guest' }, DEFAULT_SETTINGS);
     }
 
@@ -334,6 +348,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const versionCheckRunningRef = useRef(false);
     const cloudSyncPromiseRef = useRef<Promise<void> | null>(null);
     const authValidationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const accountResetRef = useRef(false);
+    const categoryTransferRunningRef = useRef(false);
+    const accountResetPromiseRef = useRef<Promise<void> | null>(null);
+    const expiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const timeSkewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const validatedAuthTokenRef = useRef<string | null>(null);
     const autoBackupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -408,6 +426,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     useEffect(() => {
         const init = async (retry = false) => {
             try {
+                if (localStorage.getItem('ledger-account-reset-pending') === '1') {
+                    await clearLocalAccountData();
+                    window.location.reload();
+                    return;
+                }
                 const ok = await ensureStoresReady();
                 if (!ok) {
                     throw new Error('本地数据库结构异常，已停止初始化以保护本地数据');
@@ -434,6 +457,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     dbAPI.getSyncQueueItems(),
                     db.aiConfig.get('main')
                 ]);
+
+                // Check the explicit device policy before exposing any account data.
+                if (hasSessionExpired(settings?.authSession)) {
+                    stateRef.current = { ...stateRef.current, settings: settings! };
+                    await clearAuthSession(settings?.authSession?.token);
+                    return;
+                }
 
                 const settingsHasAiConfig = !!settings
                     && Object.prototype.hasOwnProperty.call(settings, 'aiConfig')
@@ -517,7 +547,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // We use this useEffect to save Settings whenever they change
     const prevSettingsRef = useRef<string | null>(null);
     useEffect(() => {
-        if (isDBLoaded) {
+        if (isDBLoaded && !accountResetRef.current) {
             const currentHash = createSettingsSyncHash(state.settings);
             if (prevSettingsRef.current !== null && prevSettingsRef.current !== currentHash) {
                 if (skipNextSettingsQueueRef.current) {
@@ -552,13 +582,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const getActiveAuthSession = () => {
         const settings = stateRef.current.settings;
-        return settings.authMode === 'authenticated' && settings.authSession?.token
+        return !accountResetRef.current && !hasSessionExpired(settings.authSession)
+            && settings.authMode === 'authenticated' && settings.authSession?.token
             ? settings.authSession
             : undefined;
     };
 
     const persistAuthSettings = useCallback(async (payload: Partial<AppSettings>) => {
+        if (accountResetRef.current) return;
         const stored = await dbAPI.getSettings().catch(() => undefined);
+        if (accountResetRef.current) return;
         const base = normalizeAppSettings({ ...stateRef.current.settings, ...(stored || {}) }, DEFAULT_SETTINGS);
         const next = normalizeAppSettings({ ...base, ...payload }, DEFAULT_SETTINGS);
         stateRef.current = { ...stateRef.current, settings: next };
@@ -566,18 +599,70 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         await dbAPI.saveSettings(next);
     }, []);
 
-    const clearAuthSession = useCallback(async () => {
+    const clearAuthSession = useCallback(async (expectedToken?: string) => {
+        if (expectedToken && stateRef.current.settings.authSession?.token !== expectedToken) return;
+        if (accountResetPromiseRef.current) return accountResetPromiseRef.current;
+        const token = expectedToken || stateRef.current.settings.authSession?.token;
+        accountResetRef.current = true;
+        localStorage.setItem('ledger-account-reset-pending', '1');
+        isRestoringRef.current = true;
+        setIsDBLoaded(false);
+        setSyncDirty(false);
+        setUndoStack(null);
+        stateRef.current = { ...initialState, settings: { ...DEFAULT_SETTINGS, debugMode: false } };
         if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
         if (versionCheckTimerRef.current) clearInterval(versionCheckTimerRef.current);
         if (versionCheckDelayTimerRef.current) clearTimeout(versionCheckDelayTimerRef.current);
         if (versionVisibilityDebounceRef.current) clearTimeout(versionVisibilityDebounceRef.current);
         if (authValidationTimerRef.current) clearTimeout(authValidationTimerRef.current);
+        if (expiryTimerRef.current) clearTimeout(expiryTimerRef.current);
+        if (autoBackupTimerRef.current) clearTimeout(autoBackupTimerRef.current);
+        if (autoRecordTimerRef.current) clearInterval(autoRecordTimerRef.current);
         validatedAuthTokenRef.current = null;
-        await persistAuthSettings({
-            authSession: undefined,
-            authMode: 'guest',
+        const reset = (async () => {
+            await syncIosHomeQuickActions([], []);
+            // Remote revocation is best effort. Offline logout still clears this device.
+            if (token) await authLogout(token).catch(e => console.warn('Remote logout skipped', e));
+            await clearLocalAccountData();
+            window.location.reload();
+        })();
+        accountResetPromiseRef.current = reset;
+        try {
+            await reset;
+        } catch (e: any) {
+            setDbInitError('退出时清理本地数据失败，请重新打开应用继续清理：' + (e?.message || '未知错误'));
+            throw e;
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!isDBLoaded) return;
+        const session = state.settings.authSession;
+        if (!session?.token || !session.logoutAfter || session.logoutAfter === 'permanent') return;
+        let disposed = false;
+        const checkExpiry = () => {
+            if (disposed || accountResetRef.current) return;
+            if (expiryTimerRef.current) clearTimeout(expiryTimerRef.current);
+            if (hasSessionExpired(stateRef.current.settings.authSession)) {
+                void clearAuthSession(session.token).catch(e => console.error('Automatic logout failed', e));
+                return;
+            }
+            expiryTimerRef.current = setTimeout(checkExpiry, Math.min(60_000, Math.max(1, session.expiresAt - Date.now())));
+        };
+        checkExpiry();
+        document.addEventListener('visibilitychange', checkExpiry);
+        window.addEventListener('focus', checkExpiry);
+        const listener = CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+            if (isActive) checkExpiry();
         });
-    }, [persistAuthSettings]);
+        return () => {
+            disposed = true;
+            if (expiryTimerRef.current) clearTimeout(expiryTimerRef.current);
+            document.removeEventListener('visibilitychange', checkExpiry);
+            window.removeEventListener('focus', checkExpiry);
+            void listener.then(handle => handle.remove());
+        };
+    }, [isDBLoaded, state.settings.authSession?.token, state.settings.authSession?.expiresAt, state.settings.authSession?.logoutAfter, clearAuthSession]);
 
     useEffect(() => {
         if (!isDBLoaded) return;
@@ -594,25 +679,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         authValidationTimerRef.current = setTimeout(async () => {
             try {
                 const me = await getMe(session.token);
+                const current = stateRef.current.settings.authSession;
+                if (accountResetRef.current || current?.token !== session.token || current.expiresAt !== session.expiresAt) return;
                 validatedAuthTokenRef.current = session.token;
 
-                const current = stateRef.current.settings.authSession;
-                if (current?.token !== session.token) return;
-
-                if (current.user.id !== me.user.id || current.user.username !== me.user.username || current.expiresAt !== me.expiresAt) {
+                if (current.user.id !== me.user.id || current.user.username !== me.user.username || current.expiresAt !== me.expiresAt || current.logoutAfter !== me.logoutAfter) {
                     await persistAuthSettings({
                         authSession: {
                             user: me.user,
                             token: session.token,
                             expiresAt: me.expiresAt,
+                            logoutAfter: me.logoutAfter,
                         },
                         authMode: 'authenticated',
                     });
                 }
             } catch (e) {
                 if (isUnauthorizedError(e)) {
-                    await clearAuthSession();
-                    dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: '登录已失效，请重新登录' });
+                    await clearAuthSession(session.token);
                     return;
                 }
                 console.warn('Background auth validation skipped', e);
@@ -996,6 +1080,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // Wrapper for dispatching category/ledger actions to also sync to DB
     const originalDispatch = dispatch;
     const enhancedDispatch: React.Dispatch<AppAction> = (action) => {
+        if (accountResetRef.current) return;
+        if (action.type === 'ADD_SEARCH_HISTORY' || action.type === 'CLEAR_SEARCH_HISTORY') {
+            try {
+                const history = action.type === 'CLEAR_SEARCH_HISTORY' ? [] : prependSearchHistory(
+                    readDeviceSearchHistory(stateRef.current.settings.searchHistory), action.payload
+                );
+                const searchHistory = saveDeviceSearchHistory(history);
+                stateRef.current = { ...stateRef.current, settings: { ...stateRef.current.settings, searchHistory } };
+                originalDispatch({ type: 'UPDATE_SETTINGS', payload: { searchHistory } });
+            } catch (error) {
+                console.error('Search history persistence failed', error);
+                window.alert('搜索历史保存失败，请检查本机存储空间或浏览器存储权限');
+            }
+            return;
+        }
         originalDispatch(action);
         const markDirtyTypes: AppAction['type'][] = [
             'ADD_LEDGER', 'UPDATE_LEDGER', 'DELETE_LEDGER',
@@ -1224,6 +1323,46 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
 
+    const saveCategoryGroup = async (group: CategoryGroup, mode: 'create' | 'edit') => {
+        if (accountResetRef.current) throw new Error('正在退出，请稍后重试');
+        const updatedAt = await saveCategoryGroupExclusive(group, mode, nextMutationTime());
+        lastLocalMutationRef.current = Math.max(lastLocalMutationRef.current, updatedAt);
+        if (accountResetRef.current) return;
+        setSyncDirty(true);
+        const categoryGroups = await dbAPI.getCategoryGroups();
+        if (accountResetRef.current) return;
+        stateRef.current = { ...stateRef.current, categoryGroups };
+        dispatch({ type: 'RESTORE_DATA', payload: { categoryGroups } });
+        await refreshPendingSyncCount();
+        logOperation(mode === 'create' ? 'add' : 'edit', group.id, `${mode === 'create' ? '新增' : '编辑'}分类组：${group.name}`);
+    };
+
+    const transferCategory = async (sourceId: string, targetId: string) => {
+        if (accountResetRef.current || categoryTransferRunningRef.current) throw new Error('请等待当前操作完成');
+        if (autoRecordRunningRef.current) throw new Error('自动记录正在保存，请稍后重试转移');
+        categoryTransferRunningRef.current = true;
+        try {
+            const result = await transferCategoryData(stateRef.current.currentLedgerId, sourceId, targetId, nextMutationTime());
+            lastLocalMutationRef.current = Math.max(lastLocalMutationRef.current, result.updatedAt);
+            if (accountResetRef.current) return result.movedCount;
+            setSyncDirty(true);
+            setUndoStack(null);
+            const [transactions, categories, categoryGroups, settings] = await Promise.all([
+                dbAPI.getTransactions(), dbAPI.getCategories(), dbAPI.getCategoryGroups(), dbAPI.getSettings(),
+            ]);
+            if (accountResetRef.current) return result.movedCount;
+            const payload = { transactions, categories, categoryGroups, settings: settings || stateRef.current.settings };
+            stateRef.current = { ...stateRef.current, ...payload };
+            skipNextSettingsQueueRef.current = true;
+            dispatch({ type: 'RESTORE_DATA', payload });
+            await refreshPendingSyncCount();
+            logOperation('edit', sourceId, `分类转移：${result.sourceName} → ${result.targetName}，转移 ${result.movedCount} 条账目并删除原分类`);
+            return result.movedCount;
+        } finally {
+            categoryTransferRunningRef.current = false;
+        }
+    };
+
     // ================= SYNC LOGIC =================
 
     const performUpload = useCallback(async (isAuto = false) => {
@@ -1277,6 +1416,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }, []);
 
     const mergeFromCloud = useCallback(async (payload: { ledgers: any[]; categories: any[]; groups?: any[]; transactions: any[]; settings: any; version: number }) => {
+        if (accountResetRef.current) return;
         const { ledgers = [], categories = [], groups = [], transactions = [], settings, version } = payload;
         const hasGroupStore = hasGroupStoreNow();
 
@@ -1347,6 +1487,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                         cfConfig: localSettings.cfConfig,
                         authSession: localSettings.authSession,
                         authMode: localSettings.authSession ? 'authenticated' : 'guest',
+                        searchHistory: readDeviceSearchHistory(localSettings.searchHistory),
                         backupReminderDays: localReminderDays <= 0
                             ? 0
                             : normalizeBackupReminderDays(
@@ -1374,7 +1515,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             hasGroupStore ? dbAPI.getCategoryGroups() : Promise.resolve([]),
             db.settings.get('main')
         ]);
-        const nextSettings = normalizeAppSettings({ ...(settingsRow?.value || stateRef.current.settings), lastSyncVersion: version }, DEFAULT_SETTINGS);
+        const nextSettings = normalizeAppSettings({
+            ...(settingsRow?.value || stateRef.current.settings), lastSyncVersion: version,
+            searchHistory: readDeviceSearchHistory(stateRef.current.settings.searchHistory),
+        }, DEFAULT_SETTINGS);
         lastLocalMutationRef.current = Math.max(lastLocalMutationRef.current, maxNumeric([
             nextSettings.settingsUpdatedAt,
             ...ledgersNew.map(item => item.updatedAt),
@@ -1643,6 +1787,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
 
             const pulled = await pullFromCloud(authSession.token, sinceForPull);
+            if (accountResetRef.current || stateRef.current.settings.authSession?.token !== authSession.token) return;
             const pulledCount = countD1DataRows(pulled);
             await mergeFromCloud(pulled);
             if (uploadedCount > 0 && pushResult) {
@@ -1671,8 +1816,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         } catch (e: any) {
             console.error('Cloud sync failed', e);
             if (e?.status === 401) {
-                await clearAuthSession();
+                await clearAuthSession(authSession.token);
+                return;
             }
+            if (accountResetRef.current) return;
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
             dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: e?.status === 401 ? '登录已失效，请重新登录' : (e?.message || '同步失败') });
             logBackup({ id: generateId(), timestamp: Date.now(), type: mode === 'incremental' ? 'incremental' : 'full', action: 'upload', status: 'failure', file: 'D1 Sync', message: e?.message || '同步失败' });
@@ -1714,11 +1861,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             let accountHasData = false;
             try {
                 const accountPayload = await pullFromCloud(session.token, 0);
+                if (accountResetRef.current || stateRef.current.settings.authSession?.token !== session.token) return;
                 accountHasData = hasPulledRows(accountPayload);
                 await mergeFromCloud(accountPayload);
             } catch (e: any) {
                 if (e?.status === 401) {
-                    await clearAuthSession();
+                    await clearAuthSession(session.token);
                     throw new Error('登录已失效，请重新登录');
                 }
                 console.warn('Initial authenticated pull skipped during takeover', e);
@@ -1800,19 +1948,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return session;
     }, [runAccountTakeover]);
 
-    const logoutAccount = useCallback(async () => {
+    const logoutAccount = useCallback(async () => clearAuthSession(), [clearAuthSession]);
+
+    const setLogoutAfter = useCallback(async (period: LogoutAfter) => {
         const session = getActiveAuthSession();
-        if (session?.token) {
-            try {
-                await authLogout(session.token);
-            } catch (e) {
-                console.warn('Remote logout failed, clearing local session', e);
-            }
+        if (!session) throw new Error('请先登录账号');
+        try {
+            const updated = await updateSessionPolicy(session.token, period);
+            if (accountResetRef.current || stateRef.current.settings.authSession?.token !== session.token) return;
+            await persistAuthSettings({ authSession: { ...session, ...updated }, authMode: 'authenticated' });
+        } catch (e) {
+            if (isUnauthorizedError(e)) await clearAuthSession(session.token);
+            throw e;
         }
-        await clearAuthSession();
-        dispatch({ type: 'SET_LAST_SYNC_ERROR', payload: undefined });
-        setSyncDirty(false);
-    }, [clearAuthSession]);
+    }, [clearAuthSession, persistAuthSettings]);
 
     useEffect(() => {
         if (!syncDirty) return;
@@ -1850,7 +1999,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const getInterval = () => (document.visibilityState === 'visible' ? fg : bg) * 1000;
 
         const checkVersion = async () => {
-            if (versionCheckRunningRef.current) return;
+            if (accountResetRef.current || versionCheckRunningRef.current) return;
             versionCheckRunningRef.current = true;
             try {
                 // 1. Check Remote Version
@@ -1859,9 +2008,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                     remoteVersion = await getCloudVersion(authSession.token);
                 } catch (e: any) {
                     if (e?.status === 401) {
-                        await clearAuthSession();
+                        await clearAuthSession(authSession.token);
+                        return;
                     }
                 }
+                if (accountResetRef.current) return;
 
                 // 2. Check Local Unsynced Data
                 const localVersion = stateRef.current.settings.lastSyncVersion || 0;
@@ -1976,12 +2127,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     const logBackup = (log: BackupLog) => {
+        if (accountResetRef.current) return;
         dispatch({ type: 'ADD_BACKUP_LOG', payload: log });
         db.backupLogs.put(log);
     };
 
     const runAutoRecords = useCallback(async () => {
-        if (!isDBLoaded || autoRecordRunningRef.current) return;
+        if (!isDBLoaded || autoRecordRunningRef.current || categoryTransferRunningRef.current) return;
         autoRecordRunningRef.current = true;
 
         try {
@@ -2063,6 +2215,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         // Legacy import support
         const normalizedPayload: Partial<AppState> = {
             ...data,
+            settings: data.settings ? {
+                ...data.settings,
+                searchHistory: readDeviceSearchHistory(stateRef.current.settings.searchHistory),
+            } : undefined,
             ledgers: data.ledgers?.map(normalizeLedger),
             categories: data.categories?.map(normalizeCategory),
             transactions: data.transactions?.map(normalizeTransaction),
@@ -2075,7 +2231,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             if (data.ledgers) await db.ledgers.bulkPut(data.ledgers.map(l => ({ ...normalizeLedger(l), isDeleted: false, updatedAt: now })));
             if (data.categories) await db.categories.bulkPut(data.categories.map(c => ({ ...normalizeCategory(c), isDeleted: false, updatedAt: now })));
             if (data.categoryGroups) await db.categoryGroups.bulkPut(data.categoryGroups.map(g => ({ ...g, isDeleted: false, updatedAt: now })));
-            if (data.settings) await db.settings.put({ key: 'main', value: { ...DEFAULT_SETTINGS, ...data.settings } });
+            if (normalizedPayload.settings) await dbAPI.saveSettings({ ...DEFAULT_SETTINGS, ...normalizedPayload.settings });
             await markAllLocalDataForSync();
             await refreshPendingSyncCount();
         })().catch(e => reportQueueFailure('imported data', e));
@@ -2216,6 +2372,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         dispatch({ type: 'SET_SYNC_STATUS', payload: 'syncing' });
         try {
             const pulled = await pullFromCloud(authSession.token, 0);
+            if (accountResetRef.current || stateRef.current.settings.authSession?.token !== authSession.token) return;
             await mergeFromCloud(pulled);
             dispatch({ type: 'UPDATE_SETTINGS', payload: { lastSyncVersion: pulled.version } });
             logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'download', status: 'success', file: 'D1 Sync', message: '仅拉取恢复成功' });
@@ -2227,8 +2384,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         } catch (e: any) {
             isRestoringRef.current = false;
             if (e?.status === 401) {
-                await clearAuthSession();
+                await clearAuthSession(authSession.token);
+                return;
             }
+            if (accountResetRef.current) return;
             logBackup({ id: generateId(), timestamp: Date.now(), type: 'full', action: 'download', status: 'failure', file: 'D1 Sync', message: e?.message || '恢复失败' });
             dispatch({ type: 'SET_SYNC_STATUS', payload: 'error' });
             setSyncDirty(true);
@@ -2280,26 +2439,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setSyncDirty(true);
     };
 
-    // Reset app: completely delete the IndexedDB database and reload
+    // Account logout and reset share the same complete local cleanup.
     const resetApp = async () => {
         if (!window.confirm('确认要退出并清空本地数据吗？这将删除本地账本/分类/流水、清除云同步和 WebDAV 配置，恢复为首次启动状态。')) return;
 
         try {
-            // Stop any ongoing sync
-            if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
-
-            // Clear localStorage
-            if (typeof window !== 'undefined') {
-                localStorage.removeItem('lastLedgerId');
-                // Clear any other localStorage items if needed
-            }
-
-            // CRITICAL: Delete the entire database (not just clear tables)
-            // This ensures complete cleanup including schema/version info
-            await db.delete();
-
-            // Reload the page to reinitialize with a fresh database
-            window.location.reload();
+            await logoutAccount();
         } catch (e: any) {
             console.error('Reset failed:', e);
             alert('重置失败: ' + (e?.message || '未知错误'));
@@ -2310,13 +2455,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setSyncDirty(true);
     };
 
-    if (!isDBLoaded) {
+    if (!isDBLoaded || accountResetRef.current || hasSessionExpired(state.settings.authSession)) {
         if (dbInitError) {
             return (
                 <div className="min-h-screen bg-ios-bg text-ios-text flex items-center justify-center p-6">
                     <div className="max-w-sm rounded-2xl border border-ios-border bg-white dark:bg-zinc-900 p-5 shadow-sm">
-                        <h1 className="text-base font-semibold mb-2">本地数据库异常</h1>
-                        <p className="text-sm text-ios-subtext mb-3">为避免账目丢失，应用已停止自动重建数据库。请不要清理浏览器数据，可尝试关闭其他已打开的应用窗口后重新进入。</p>
+                        <h1 className="text-base font-semibold mb-2">{accountResetRef.current ? '退出清理未完成' : '本地数据库异常'}</h1>
+                        <p className="text-sm text-ios-subtext mb-3">{accountResetRef.current ? '账本已隐藏，请关闭其他已打开的应用窗口后重新打开，继续清理本地数据。' : '为避免账目丢失，应用已停止自动重建数据库。请不要清理浏览器数据，可尝试关闭其他已打开的应用窗口后重新进入。'}</p>
                         <p className="text-xs text-red-500 break-words">{dbInitError}</p>
                     </div>
                 </div>
@@ -2333,7 +2478,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
 
     return (
-        <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, batchDeleteTransactions, batchUpdateTransactions, undo, canUndo: !!undoStack, manualBackup, manualCloudSync, importData, smartImportCsv, restoreFromCloud, resetApp, restoreFromD1, addLedger, triggerCloudSync, loginAccount, registerAccount, logoutAccount }}>
+        <AppContext.Provider value={{ state, dispatch: enhancedDispatch, addTransaction, updateTransaction, deleteTransaction, batchDeleteTransactions, batchUpdateTransactions, transferCategory, saveCategoryGroup, undo, canUndo: !!undoStack, manualBackup, manualCloudSync, importData, smartImportCsv, restoreFromCloud, resetApp, restoreFromD1, addLedger, triggerCloudSync, loginAccount, registerAccount, logoutAccount, setLogoutAfter }}>
             {children}
         </AppContext.Provider>
     );

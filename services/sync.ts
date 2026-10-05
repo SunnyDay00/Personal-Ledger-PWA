@@ -4,6 +4,8 @@ import { WebDAVService } from './webdav';
 import { AppSettings, Ledger, Transaction, Category, CategoryGroup } from '../types';
 import { transactionsToCsv, parseCsvToTransactions } from '../utils';
 import { normalizeCategory, normalizeLedger, normalizeTransaction } from './ledgerUtils';
+import { normalizeAppSettings } from './settingsUtils';
+import { readDeviceSearchHistory } from './searchHistory';
 
 // Helper: Get Year from Timestamp
 const getYear = (ts: number) => new Date(ts).getFullYear();
@@ -113,7 +115,14 @@ export class SyncService {
 
                 // Sync Main Settings (WebDAV, Theme, etc.)
                 if (cloudSettingsData.settings) {
-                    await db.settings.put({ key: 'main', value: cloudSettingsData.settings });
+                    const localSettings = await db.settings.get('main');
+                    await db.settings.put({ key: 'main', value: normalizeAppSettings({
+                        ...cloudSettingsData.settings,
+                        authSession: localSettings?.value.authSession,
+                        authMode: localSettings?.value.authMode,
+                        searchHistory: readDeviceSearchHistory(localSettings?.value.searchHistory),
+                        categoryGroupVisibility: cloudSettingsData.settings.categoryGroupVisibility ?? localSettings?.value.categoryGroupVisibility,
+                    }) });
                 }
 
                 if (cloudSettingsData.categories) {
@@ -195,7 +204,12 @@ export class SyncService {
         const validGroups = allGroups.filter(g => !g.isDeleted).sort((a,b) => (a.order ?? 0) - (b.order ?? 0));
         
         const settingsPayload = {
-            settings: currentSettings?.value,
+            settings: currentSettings?.value ? {
+                ...currentSettings.value,
+                authSession: undefined,
+                authMode: undefined,
+                searchHistory: undefined,
+            } : undefined,
             cfConfig: cfConfig?.value, // Sync CF Config
             categories: validCats,
             categoryGroups: hasGroupStore ? validGroups : undefined,

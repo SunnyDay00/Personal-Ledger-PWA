@@ -1,5 +1,11 @@
 import { FIXED_SYNC_ENDPOINT } from '../constants';
-import { AuthSession, AuthUser } from '../types';
+import { AuthSession, AuthUser, LogoutAfter } from '../types';
+
+// A legacy deadline must first be validated by the upgraded Worker, which
+// migrates still-valid old sessions. Never silently discard its token.
+export const hasSessionExpired = (session?: AuthSession, now = Date.now()): boolean =>
+  !!session?.token && !!session.logoutAfter && session.logoutAfter !== 'permanent'
+    && session.expiresAt <= now;
 
 export class AuthApiError extends Error {
   status?: number;
@@ -15,11 +21,13 @@ type AuthResponse = {
   user: AuthUser;
   token: string;
   expiresAt: number;
+  logoutAfter: LogoutAfter;
 };
 
 type MeResponse = {
   user: AuthUser;
   expiresAt: number;
+  logoutAfter: LogoutAfter;
 };
 
 const endpoint = () => FIXED_SYNC_ENDPOINT.replace(/\/$/, '');
@@ -64,16 +72,25 @@ export const login = async (username: string, password: string): Promise<AuthSes
   return postJson<AuthResponse>('/auth/login', { username, password });
 };
 
+export const updateSessionPolicy = (token: string, logoutAfter: LogoutAfter): Promise<MeResponse> =>
+  postJson<MeResponse>('/auth/session', { logoutAfter }, token);
+
 export const logout = async (token: string): Promise<void> => {
   if (!token) return;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2500);
+  try {
+    const res = await fetch(`${endpoint()}/auth/logout`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    });
 
-  const res = await fetch(`${endpoint()}/auth/logout`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-  });
-
-  if (!res.ok && res.status !== 401) {
-    throw new AuthApiError(await parseError(res), res.status);
+    if (!res.ok && res.status !== 401) {
+      throw new AuthApiError(await parseError(res), res.status);
+    }
+  } finally {
+    clearTimeout(timeout);
   }
 };
 

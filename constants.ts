@@ -99,6 +99,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   keypadHeight: 40, // 40vh
   categoryRows: 5,
+  categoryGroupVisibility: {},
   categoryNotes: {}, // Init note history
   searchHistory: [],
   authMode: 'guest',

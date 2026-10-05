@@ -72,10 +72,13 @@ export interface AuthUser {
   username: string;
 }
 
+export type LogoutAfter = 'week' | 'month' | 'year' | 'permanent';
+
 export interface AuthSession {
   user: AuthUser;
   token: string;
   expiresAt: number;
+  logoutAfter?: LogoutAfter; // Local device session policy; absent on legacy sessions.
 }
 
 export type AuthMode = 'guest' | 'authenticated';
@@ -276,6 +279,7 @@ export interface AppSettings {
   // UI
   keypadHeight: number; // percentage (20-60)
   categoryRows: number; // items per row (4-6)
+  categoryGroupVisibility?: Record<string, boolean>; // Missing group IDs default to visible in AddView.
   
   // Image Cache
   imageCacheLimit?: number; // bytes, default 200MB
@@ -379,6 +383,8 @@ export interface AppContextType {
   deleteTransaction: (id: string) => Promise<void>;
   batchDeleteTransactions: (ids: string[]) => Promise<void>;
   batchUpdateTransactions: (ids: string[], updates: Partial<Transaction>) => Promise<void>;
+  transferCategory: (sourceId: string, targetId: string) => Promise<number>;
+  saveCategoryGroup: (group: CategoryGroup, mode: 'create' | 'edit') => Promise<void>;
   undo: () => Promise<void>;
   canUndo: boolean;
   manualBackup: () => Promise<void>;
@@ -392,4 +398,5 @@ export interface AppContextType {
   loginAccount: (username: string, password: string) => Promise<AuthSession>;
   registerAccount: (username: string, password: string, inviteCode: string) => Promise<AuthSession>;
   logoutAccount: () => Promise<void>;
+  setLogoutAfter: (period: LogoutAfter) => Promise<void>;
 }
