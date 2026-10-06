@@ -4,10 +4,10 @@
 
 /* Immediate Theme application to prevent white flash */
 body {
-  background-color: #f2f2f7;
+  background-color: var(--bg-primary, #f2f2f7);
 }
 @media (prefers-color-scheme: dark) {
-  body {
+  html:not([data-theme-resolved]) body {
     background-color: #000000;
   }
 }
@@ -80,6 +80,8 @@ select,
 /* Scrollbar hiding for clean UI */
 .no-scrollbar::-webkit-scrollbar {
   display: none;
+  width: 0;
+  height: 0;
 }
 .no-scrollbar {
   -ms-overflow-style: none;
@@ -92,6 +94,26 @@ select,
   font-feature-settings: "tnum";
   font-family: -apple-system, BlinkMacSystemFont, "San Francisco",
     "Helvetica Neue", sans-serif;
+}
+
+/* The group sheet is portaled out of the background momentum scroller on iOS. */
+.category-group-sheet {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  flex-shrink: 0;
+  width: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.category-group-sheet-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  overscroll-behavior-y: contain;
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 1.5rem);
+  scroll-padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 1.5rem);
 }
 
 /* Refractive glass with a soft-focus backdrop so underlying text stays subdued. */

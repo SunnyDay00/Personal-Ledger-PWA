@@ -241,12 +241,12 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     const [showTradeCategoryPicker, setShowTradeCategoryPicker] = useState(() =>
         isTrading && !initialTransaction?.categoryId
     );
-    const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(() => initialTransaction?.categoryId || null);
+    const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(() => initialTransaction?.id ? initialTransaction.categoryId || null : null);
     const [expandedCategoryGroupIds, setExpandedCategoryGroupIds] = useState<Set<string>>(() => new Set());
     const [note, setNote] = useState(() => initialTransaction?.note || '');
     const [date, setDate] = useState(() => initialTransaction?.date ? new Date(initialTransaction.date) : new Date());
     const [isNoteFocused, setIsNoteFocused] = useState(false);
-    const [isKeypadCollapsed, setIsKeypadCollapsed] = useState(false);
+    const [isKeypadCollapsed, setIsKeypadCollapsed] = useState(() => !Boolean(initialTransaction?.id && initialTransaction.categoryId));
     const noteInputRef = useRef<HTMLInputElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -390,7 +390,8 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
             setCardKeyBatchInputs(keyAllocationsToInputMap(normalizeTradeKeyAllocations(initialTransaction.tradeKeyAllocations)));
             setCardKeySellMode(normalizeTradeKeyAllocations(initialTransaction.tradeKeyAllocations)?.length ? 'batch' : 'auto');
             setShowTradeCategoryPicker(isTrading && !initialTransaction.categoryId);
-            setSelectedCategoryId(initialTransaction.categoryId || null);
+            setSelectedCategoryId(initialTransaction.id ? initialTransaction.categoryId || null : null);
+            setIsKeypadCollapsed(!Boolean(initialTransaction.id && initialTransaction.categoryId));
             setNote(initialTransaction.note || '');
             setDate(initialTransaction.date ? new Date(initialTransaction.date) : new Date());
             void loadInitialAttachments();
@@ -405,6 +406,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
             setCardKeySellMode('auto');
             setShowTradeCategoryPicker(isTrading);
             setSelectedCategoryId(null);
+            setIsKeypadCollapsed(true);
             setNote('');
             setDate(new Date());
             setAttachments([]);
@@ -416,21 +418,11 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     }, [initialTransaction, initialType, isTrading, effectiveLedgerId]);
 
     useEffect(() => {
-        if (categories.length === 0) {
+        if (selectedCategoryId && !categories.some(category => category.id === selectedCategoryId)) {
             setSelectedCategoryId(null);
-            return;
+            setIsKeypadCollapsed(true);
         }
-
-        const stillValid = selectedCategoryId && categories.some(c => c.id === selectedCategoryId);
-        if (isTrading) {
-            if (!stillValid && selectedCategoryId) setSelectedCategoryId(null);
-            return;
-        }
-
-        if (!stillValid) {
-            setSelectedCategoryId(categories[0].id);
-        }
-    }, [categories, selectedCategoryId, isTrading, type]);
+    }, [categories, selectedCategoryId]);
 
     useEffect(() => {
         if (isTrading && !selectedCategoryId) {
@@ -670,6 +662,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     };
 
     const activateKeypadField = (field: KeypadField) => {
+        if (!selectedCategory) return;
         noteInputRef.current?.blur();
         setIsNoteFocused(false);
         setIsKeypadCollapsed(false);
@@ -677,6 +670,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     };
 
     const handleToggleKeypad = () => {
+        if (!selectedCategory) return;
         noteInputRef.current?.blur();
         setIsNoteFocused(false);
         setIsKeypadCollapsed(prev => isNoteFocused ? false : !prev);
@@ -759,13 +753,19 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
     };
 
     const handleTypeSelect = (nextType: TransactionType) => {
+        if (nextType === type) return;
+        noteInputRef.current?.blur();
+        setIsNoteFocused(false);
+        if (!isTrading || !initialTransaction?.id) {
+            setSelectedCategoryId(null);
+            setIsKeypadCollapsed(true);
+        }
         setType(nextType);
         feedback.play('switch');
         feedback.vibrate('light');
 
         if (isTrading) {
             if (!initialTransaction?.id) {
-                setSelectedCategoryId(null);
                 setSellAllocationInputs({});
                 setTradeKeyInputs([]);
                 setActiveTradeKeyPasteIndex(null);
@@ -781,8 +781,13 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
 
     const handleTradeCategorySelect = (categoryId: string) => {
         const category = categories.find(item => item.id === categoryId);
+        if (!category) return;
         const categoryChanged = categoryId !== selectedCategoryId;
         setSelectedCategoryId(categoryId);
+        noteInputRef.current?.blur();
+        setIsNoteFocused(false);
+        setActiveKeypadField('amount');
+        setIsKeypadCollapsed(false);
         setFeeRateStr(String(getCategoryFeeRate(category, type)));
 
         if (type === 'income') {
@@ -863,7 +868,12 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
 
     const handleCategorySelect = (categoryId: string) => {
         const category = categories.find(item => item.id === categoryId);
+        if (!category) return;
         setSelectedCategoryId(categoryId);
+        noteInputRef.current?.blur();
+        setIsNoteFocused(false);
+        setActiveKeypadField('amount');
+        setIsKeypadCollapsed(false);
         if (isTrading) setFeeRateStr(String(getCategoryFeeRate(category, type)));
         feedback.play('click');
         feedback.vibrate('light');
@@ -1271,7 +1281,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
         ? isCardKeyCategory ? availableSellCardKeys.length : availableSellLots.reduce((sum, lot) => roundMoney(sum + lot.remainingQuantity), 0)
         : 0;
     const inputDateValue = useMemo(() => format(date, 'yyyy-MM-dd'), [date]);
-    const isKeypadHidden = isNoteFocused || isKeypadCollapsed;
+    const isKeypadHidden = !selectedCategory || isNoteFocused || isKeypadCollapsed || (isTrading && showTradeCategoryPicker);
     const exchangeRateSnapshotLabel = useMemo(() => {
         if (!isTrading || !initialTransaction?.id || selectedCurrency === DEFAULT_CURRENCY) return null;
         const rate = shouldUseSavedExchangeRate ? savedExchangeRateToCny : previewExchangeRateToCny;
@@ -1666,7 +1676,8 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                         ) : null}
                     </div>
                 ) : (
-                    <div className="p-4 space-y-3">
+                    <div className="p-4 pb-[calc(env(safe-area-inset-bottom)+1.5rem)] space-y-3">
+                        {!selectedCategory && <p className="text-sm text-ios-subtext">请选择分类，选择后输入金额</p>}
                         {categorySections.groups.map(({ group, categories: members }) => {
                             const expanded = expandedCategoryGroupIds.has(group.id);
                             const selectedMember = members.find(category => category.id === selectedCategoryId);
@@ -1707,6 +1718,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                 )}
             </div>
 
+            {selectedCategory && (
             <div className="bg-white dark:bg-zinc-900 rounded-t-3xl shadow-[0_-5px_20px_rgba(0,0,0,0.1)] border-t border-white/10 shrink-0">
                 {attachments.length > 0 && (
                     <div className="flex gap-3 overflow-x-auto no-scrollbar px-5 py-3 border-b border-ios-border bg-gray-50 dark:bg-zinc-900/50">
@@ -1943,6 +1955,7 @@ export const AddView: React.FC<AddViewProps> = ({ onClose, initialTransaction, i
                     </div>
                 </div>
             </div>
+            )}
 
             {isTrading && showTradeCategoryPicker && (
                 <div className="fixed inset-0 z-[85] bg-ios-bg dark:bg-zinc-950 flex flex-col">

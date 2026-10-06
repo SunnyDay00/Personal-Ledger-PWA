@@ -6,15 +6,32 @@ import worker from './worker.js';
 class TestD1 {
   database = new DatabaseSync(':memory:');
   prepare(sql) {
-    const statement = this.database.prepare(sql);
+    const database = this.database;
     let values = [];
     const query = {
       bind(...args) { values = args; return query; },
-      async first() { return statement.get(...values) || null; },
-      async all() { return { results: statement.all(...values) }; },
-      async run() { return { meta: { changes: Number(statement.run(...values).changes) } }; },
+      async first() { return database.prepare(sql).get(...values) || null; },
+      async all() { return { results: database.prepare(sql).all(...values) }; },
+      async run() {
+        const statement = database.prepare(sql);
+        return statement.columns().length
+          ? { results: statement.all(...values), meta: { changes: 0 } }
+          : { results: [], meta: { changes: Number(statement.run(...values).changes) } };
+      },
     };
     return query;
+  }
+  async batch(queries) {
+    this.database.exec('BEGIN');
+    try {
+      const results = [];
+      for (const query of queries) results.push(await query.run());
+      this.database.exec('COMMIT');
+      return results;
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
   }
 }
 
@@ -45,6 +62,53 @@ async function registerUser() {
 }
 
 describe('account session policy', () => {
+  it('retains D1 conflict checks for two device sessions without reading KV', async () => {
+    const first = await registerUser();
+    const second = await (await call('/auth/login', null, { username: 'tester', password: 'password123' })).json();
+    env.SYNC_KV = { get: vi.fn().mockRejectedValue(new Error('KV unavailable')), put: vi.fn().mockResolvedValue(undefined) };
+    const push = (token, updatedAt, name, isDeleted = false) => call('/sync/push', token, {
+      ledgers: [{ id: 'shared-ledger', name, updatedAt, isDeleted }],
+    });
+    expect((await push(first.token, 200, 'newer')).status).toBe(200);
+    const older = await (await push(second.token, 100, 'older')).json();
+    expect(older.accepted).toHaveLength(0);
+    expect(older.superseded).toHaveLength(1);
+    expect(env.DB.database.prepare('SELECT name FROM ledgers_v2 WHERE user_id = ? AND id = ?')
+      .get(first.user.id, 'shared-ledger').name).toBe('newer');
+    const deleted = await (await push(second.token, 200, 'newer', true)).json();
+    expect(deleted.accepted).toHaveLength(1);
+    expect(env.DB.database.prepare('SELECT is_deleted FROM ledgers_v2 WHERE user_id = ? AND id = ?')
+      .get(first.user.id, 'shared-ledger').is_deleted).toBe(1);
+    expect(env.SYNC_KV.get).not.toHaveBeenCalled();
+  });
+  it('does not let a stalled initialization in one request block later requests', async () => {
+    let rejectFirst;
+    const batch = vi.spyOn(env.DB, 'batch');
+    batch.mockImplementationOnce(() => new Promise((resolve, reject) => { rejectFirst = reject; }));
+    const stalled = call('/auth/me', 'first').catch(error => error);
+    const next = await call('/auth/me', 'second');
+    expect(next.status).toBe(401);
+    rejectFirst(new Error('original request canceled'));
+    expect((await stalled).message).toBe('original request canceled');
+    const completedCalls = batch.mock.calls.length;
+    expect((await call('/auth/me', 'third')).status).toBe(401);
+    expect(batch.mock.calls).toHaveLength(completedCalls);
+  });
+
+  it('serves versions and account data from D1 even when the KV cache is unavailable', async () => {
+    const session = await registerUser();
+    env.SYNC_KV = { get: vi.fn().mockRejectedValue(new Error('KV unavailable')) };
+    env.DB.database.prepare('INSERT INTO sync_versions (user_id, version) VALUES (?, ?)').run(session.user.id, 1000);
+    env.DB.database.prepare('INSERT INTO ledgers_v2 (id, user_id, name, server_updated_at) VALUES (?, ?, ?, ?)')
+      .run('fixture-ledger', session.user.id, 'fixture', 1000);
+    const version = await call('/sync/version', session.token);
+    expect(version.status).toBe(200);
+    expect((await version.json()).version).toBe(1000);
+    const pull = await call('/sync/pull?since=0', session.token);
+    expect(pull.status).toBe(200);
+    expect((await pull.json()).ledgers[0].id).toBe('fixture-ledger');
+    expect(env.SYNC_KV.get).not.toHaveBeenCalled();
+  });
   it('defaults registration and login to permanent and remains logged in years later', async () => {
     const registered = await registerUser();
     expect(registered.logoutAfter).toBe('permanent');

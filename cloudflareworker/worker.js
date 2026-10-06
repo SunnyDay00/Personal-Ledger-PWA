@@ -18,7 +18,9 @@ function sessionExpiresAt(logoutAfter, now = Date.now()) {
 const USERNAME_RE = /^[a-z0-9_.-]{3,40}$/;
 const INVITE_CODE_RE = /^\d{6}$/;
 const DEFAULT_ALLOW_ORIGIN = '*'; // 不在白名单时用这个，测试可暂设为 '*'
-const tableInitPromises = new WeakMap();
+// Never share in-flight I/O across Worker request lifetimes: a canceled request
+// can leave its promise pending and stall every later authenticated request.
+const initializedDatabases = new WeakSet();
 const DEFAULT_CURRENCY = 'CNY';
 const EXCHANGE_RATE_CACHE_PREFIX = 'exchange-rates:';
 const EXCHANGE_RATE_PROVIDER_URL = 'https://open.er-api.com/v6/latest';
@@ -582,34 +584,25 @@ async function exchangeRatesHandler(url, env, origin) {
 
 // ---- 辅助：确保表存在 ----
 async function ensureTables(env) {
-    let promise = tableInitPromises.get(env.DB);
-    if (!promise) {
-      promise = initializeTables(env).catch(error => {
-        tableInitPromises.delete(env.DB);
-        throw error;
-      });
-      tableInitPromises.set(env.DB, promise);
-    }
-    return promise;
+    if (initializedDatabases.has(env.DB)) return;
+    await initializeTables(env);
+    initializedDatabases.add(env.DB);
 }
 
 async function initializeTables(env) {
     const stmts = CREATE_SQL.split(';').map(s => s.trim()).filter(Boolean);
-    for (const sql of stmts) await env.DB.prepare(sql).run();
-    await ensureSessionPolicy(env);
-    await ensureStructuredCompatibilityColumns(env);
-    await ensureServerUpdatedAtColumns(env);
+    await env.DB.batch(stmts.map(sql => env.DB.prepare(sql)));
+    const tables = ['sessions', ...STRUCTURED_SYNC_TABLES];
+    const info = await env.DB.batch(tables.map(table => env.DB.prepare(`PRAGMA table_info(${table})`)));
+    const schema = new Map(tables.map((table, index) => [table, new Set((info[index].results || []).map(row => row.name))]));
+    await ensureSessionPolicy(env, schema);
+    await ensureStructuredCompatibilityColumns(env, schema);
+    await ensureServerUpdatedAtColumns(env, schema);
     await ensureServerUpdatedAtIndexes(env);
 }
 
-async function ensureSessionPolicy(env) {
-  if (!await tableHasColumn(env, 'sessions', 'logout_after')) {
-    try {
-      await env.DB.prepare("ALTER TABLE sessions ADD COLUMN logout_after TEXT NOT NULL DEFAULT 'legacy'").run();
-    } catch (error) {
-      if (!await tableHasColumn(env, 'sessions', 'logout_after')) throw error;
-    }
-  }
+async function ensureSessionPolicy(env, schema) {
+  await ensureColumn(env, schema, 'sessions', 'logout_after', "TEXT NOT NULL DEFAULT 'legacy'");
   // Preserve live logins without reviving expired or explicitly revoked tokens.
   await env.DB.prepare(`
     UPDATE sessions SET logout_after = 'permanent', expires_at = ?
@@ -622,20 +615,28 @@ async function tableHasColumn(env, tableName, columnName) {
   return (info.results || []).some(row => row.name === columnName);
 }
 
-async function ensureServerUpdatedAtColumns(env) {
-  const now = Date.now();
-  for (const tableName of STRUCTURED_SYNC_TABLES) {
-    const hasColumn = await tableHasColumn(env, tableName, 'server_updated_at');
-    if (!hasColumn) {
-      await env.DB.prepare(`ALTER TABLE ${tableName} ADD COLUMN server_updated_at INTEGER NOT NULL DEFAULT 0`).run();
-    }
-    await env.DB.prepare(
-      `UPDATE ${tableName} SET server_updated_at = ? WHERE server_updated_at IS NULL OR server_updated_at <= 0`
-    ).bind(now).run();
+async function ensureColumn(env, schema, tableName, columnName, ddl) {
+  if (schema.get(tableName)?.has(columnName)) return;
+  try {
+    await env.DB.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${ddl}`).run();
+  } catch (error) {
+    // Another request may have finished the same legacy migration meanwhile.
+    if (!await tableHasColumn(env, tableName, columnName)) throw error;
   }
+  schema.get(tableName)?.add(columnName);
 }
 
-async function ensureStructuredCompatibilityColumns(env) {
+async function ensureServerUpdatedAtColumns(env, schema) {
+  const now = Date.now();
+  for (const tableName of STRUCTURED_SYNC_TABLES) {
+    await ensureColumn(env, schema, tableName, 'server_updated_at', 'INTEGER NOT NULL DEFAULT 0');
+  }
+  await env.DB.batch(STRUCTURED_SYNC_TABLES.map(tableName => env.DB.prepare(
+    `UPDATE ${tableName} SET server_updated_at = ? WHERE server_updated_at IS NULL OR server_updated_at <= 0`
+  ).bind(now)));
+}
+
+async function ensureStructuredCompatibilityColumns(env, schema) {
   const columns = [
     { table: AUTH_SYNC_TABLES.ledgers, name: 'ledger_type', ddl: "TEXT DEFAULT 'accounting'" },
     { table: AUTH_SYNC_TABLES.ledgers, name: 'display_currency', ddl: "TEXT DEFAULT 'CNY'" },
@@ -661,30 +662,22 @@ async function ensureStructuredCompatibilityColumns(env) {
   ];
 
   for (const column of columns) {
-    const hasColumn = await tableHasColumn(env, column.table, column.name);
-    if (!hasColumn) {
-      await env.DB.prepare(`ALTER TABLE ${column.table} ADD COLUMN ${column.name} ${column.ddl}`).run();
-    }
+    await ensureColumn(env, schema, column.table, column.name, column.ddl);
   }
 
-  await env.DB.prepare(
+  await env.DB.batch([env.DB.prepare(
     `UPDATE ${AUTH_SYNC_TABLES.ledgers} SET ledger_type='accounting' WHERE ledger_type IS NULL OR ledger_type=''`
-  ).run();
-  await env.DB.prepare(
+  ), env.DB.prepare(
     `UPDATE ${AUTH_SYNC_TABLES.ledgers} SET display_currency='CNY' WHERE display_currency IS NULL OR display_currency=''`
-  ).run();
-  await env.DB.prepare(
+  ), env.DB.prepare(
     `UPDATE ${AUTH_SYNC_TABLES.categories} SET buy_currency='CNY' WHERE buy_currency IS NULL OR buy_currency=''`
-  ).run();
-  await env.DB.prepare(
+  ), env.DB.prepare(
     `UPDATE ${AUTH_SYNC_TABLES.categories} SET sell_currency='CNY' WHERE sell_currency IS NULL OR sell_currency=''`
-  ).run();
-  await env.DB.prepare(
+  ), env.DB.prepare(
     `UPDATE ${AUTH_SYNC_TABLES.transactions} SET currency_code='CNY' WHERE currency_code IS NULL OR currency_code=''`
-  ).run();
-  await env.DB.prepare(
+  ), env.DB.prepare(
     `UPDATE ${AUTH_SYNC_TABLES.transactions} SET exchange_rate_to_cny=1 WHERE exchange_rate_to_cny IS NULL OR exchange_rate_to_cny<=0`
-  ).run();
+  )]);
 }
 
 async function ensureServerUpdatedAtIndexes(env) {
@@ -695,7 +688,7 @@ async function ensureServerUpdatedAtIndexes(env) {
     `CREATE INDEX IF NOT EXISTS idx_transactions_v2_user_server_updated ON ${AUTH_SYNC_TABLES.transactions}(user_id, server_updated_at)`,
     `CREATE INDEX IF NOT EXISTS idx_settings_v2_user_server_updated ON ${AUTH_SYNC_TABLES.settings}(user_id, server_updated_at)`,
   ];
-  for (const sql of indexes) await env.DB.prepare(sql).run();
+  await env.DB.batch(indexes.map(sql => env.DB.prepare(sql)));
 }
 
 async function registerHandler(request, env, origin) {
@@ -882,11 +875,10 @@ async function scanServerVersion(userId, env, tables) {
 }
 
 async function getServerVersion(userId, env, tables) {
-  const [versionStr, versionRow] = await Promise.all([
-    env.SYNC_KV.get(`version:${userId}`),
-    env.DB.prepare(`SELECT version FROM ${tables.syncVersions} WHERE user_id=?`).bind(userId).first(),
-  ]);
-  const storedVersion = Math.max(Number(versionStr || 0), Number(versionRow?.version || 0));
+  // D1 stores the authoritative monotonic version. A slow KV cache must never
+  // block version checks or pulls; old accounts can recover it from D1 rows.
+  const versionRow = await env.DB.prepare(`SELECT version FROM ${tables.syncVersions} WHERE user_id=?`).bind(userId).first();
+  const storedVersion = Number(versionRow?.version || 0);
   if (storedVersion > 0) return storedVersion;
   return scanServerVersion(userId, env, tables);
 }

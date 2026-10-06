@@ -51,6 +51,30 @@ const httpError = async (prefix: string, res: Response) => {
   return error;
 };
 
+const readCloudJson = async <T>(path: string, token: string, prefix: string, timeoutMs: number): Promise<T> => {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${workerUrl()}${path}`, {
+        method: 'GET', headers: buildHeaders(token), signal: controller.signal,
+      });
+      if (!response.ok) throw await httpError(`${prefix} failed`, response);
+      // Keep the deadline active until the entire response has been decoded.
+      return await response.json();
+    } catch (error: any) {
+      if (error?.name === 'AbortError' || controller.signal.aborted) {
+        if (attempt === 0) continue; // Read-only retry; never retry writes here.
+        throw new Error(`${prefix} timed out after ${timeoutMs}ms (2 attempts)`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error(`${prefix} failed`);
+};
+
 export async function pushToCloud(token: string, payload: D1SyncPayload, timeoutMs: number = 15000): Promise<D1PushResponse> {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
@@ -76,51 +100,11 @@ export async function pushToCloud(token: string, payload: D1SyncPayload, timeout
   }
 }
 
-export async function pullFromCloud(token: string, since: number, timeoutMs: number = 15000): Promise<D1PullResponse> {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-      const res = await fetch(`${workerUrl()}/sync/pull?since=${since}`, {
-          method: 'GET',
-          headers: buildHeaders(token),
-          signal: controller.signal
-      });
-      clearTimeout(id);
-      if (!res.ok) {
-          throw await httpError('Pull failed', res);
-      }
-      return res.json();
-  } catch (e: any) {
-      clearTimeout(id);
-      if (e.name === 'AbortError') {
-          throw new Error(`Pull timed out after ${timeoutMs}ms`);
-      }
-      throw e;
-  }
+export async function pullFromCloud(token: string, since: number, timeoutMs: number = 45000): Promise<D1PullResponse> {
+  return readCloudJson<D1PullResponse>(`/sync/pull?since=${since}`, token, 'Pull', timeoutMs);
 }
 
-export async function getCloudVersion(token: string, timeoutMs: number = 10000): Promise<number> {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-      const res = await fetch(`${workerUrl()}/sync/version`, {
-          method: 'GET',
-          headers: buildHeaders(token),
-          signal: controller.signal
-      });
-      clearTimeout(id);
-      if (!res.ok) {
-          throw await httpError('Version check failed', res);
-      }
-      const data = await res.json();
-      return Number(data.version || 0);
-  } catch (e: any) {
-      clearTimeout(id);
-      if (e.name === 'AbortError') {
-          throw new Error(`Version check timed out after ${timeoutMs}ms`);
-      }
-      throw e;
-  }
+export async function getCloudVersion(token: string, timeoutMs: number = 25000): Promise<number> {
+  const data = await readCloudJson<{ version?: number }>('/sync/version', token, 'Version check', timeoutMs);
+  return Number(data.version || 0);
 }

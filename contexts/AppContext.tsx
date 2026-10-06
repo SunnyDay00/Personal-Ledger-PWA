@@ -1,6 +1,7 @@
 ﻿import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef, useCallback } from 'react';
 import { AppState, AppAction, Transaction, Ledger, OperationLog, BackupLog, Category, CategoryGroup, AppSettings, SyncQueueItem, AuthSession, LogoutAfter } from '../types';
 import { App as CapacitorApp } from '@capacitor/app';
+import { Capacitor } from '@capacitor/core';
 import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, DEFAULT_TRADE_CATEGORIES, INITIAL_LEDGERS } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
 import { generateId, extractCategoriesFromCsv, parseCsvToTransactions } from '../utils';
@@ -780,13 +781,48 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // Theme
     useEffect(() => {
         const root = window.document.documentElement;
-        const isDark = state.settings.themeMode === 'dark' || (state.settings.themeMode === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-        if (isDark) root.classList.add('dark');
-        else root.classList.remove('dark');
+        const mode = state.settings.themeMode;
+        const media = window.matchMedia('(prefers-color-scheme: dark)');
+        let disposed = false;
+        let refreshFrame: number | null = null;
+        const applyTheme = () => {
+            if (disposed) return;
+            const isDark = mode === 'dark' || (mode === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+            root.classList.toggle('dark', isDark);
+            root.style.colorScheme = isDark ? 'dark' : 'light';
+            root.dataset.themeResolved = isDark ? 'dark' : 'light';
+        };
+        const refreshTheme = () => {
+            applyTheme();
+            if (refreshFrame !== null) window.cancelAnimationFrame(refreshFrame);
+            // WKWebView can update system traits on the first foreground frame.
+            refreshFrame = window.requestAnimationFrame(applyTheme);
+        };
+        applyTheme();
         const currentLedger = state.ledgers.find(l => l.id === state.currentLedgerId);
         if (currentLedger) {
             root.style.setProperty('--color-primary', state.settings.customThemeColor || currentLedger.themeColor);
         }
+        if (mode !== 'auto') return;
+        const refreshOnVisible = () => {
+            if (document.visibilityState === 'visible') refreshTheme();
+        };
+        if (typeof media.addEventListener === 'function') media.addEventListener('change', refreshTheme);
+        else media.addListener(refreshTheme);
+        document.addEventListener('visibilitychange', refreshOnVisible);
+        window.addEventListener('focus', refreshTheme);
+        const nativeListener = Capacitor.isNativePlatform()
+            ? CapacitorApp.addListener('appStateChange', ({ isActive }) => { if (isActive) refreshTheme(); })
+            : null;
+        return () => {
+            disposed = true;
+            if (refreshFrame !== null) window.cancelAnimationFrame(refreshFrame);
+            if (typeof media.removeEventListener === 'function') media.removeEventListener('change', refreshTheme);
+            else media.removeListener(refreshTheme);
+            document.removeEventListener('visibilitychange', refreshOnVisible);
+            window.removeEventListener('focus', refreshTheme);
+            void nativeListener?.then(handle => handle.remove()).catch(error => console.warn('Theme listener cleanup failed', error));
+        };
     }, [state.settings.themeMode, state.currentLedgerId, state.ledgers, state.settings.customThemeColor]);
 
     // Backup reminder（仅提示一次）
@@ -2004,8 +2040,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             try {
                 // 1. Check Remote Version
                 let remoteVersion = 0;
+                let versionChecked = false;
                 try {
                     remoteVersion = await getCloudVersion(authSession.token);
+                    versionChecked = true;
                 } catch (e: any) {
                     if (e?.status === 401) {
                         await clearAuthSession(authSession.token);
@@ -2017,9 +2055,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 // 2. Check Local Unsynced Data
                 const localVersion = stateRef.current.settings.lastSyncVersion || 0;
                 const hasLocalChanges = await dbAPI.hasUnsyncedData(localVersion);
+                const latestCloudLog = stateRef.current.backupLogs.find(log => log.file === 'D1 Sync');
+                const recoverPreviousFailure = versionChecked
+                    && (!!stateRef.current.lastSyncError || latestCloudLog?.status === 'failure');
 
                 // 3. Trigger Sync if needed
-                if (remoteVersion > localVersion || hasLocalChanges) {
+                if (remoteVersion > localVersion || hasLocalChanges || recoverPreviousFailure) {
                     console.log(`[AutoSync] Triggering sync. Remote: ${remoteVersion}, Local: ${localVersion}, HasChanges: ${hasLocalChanges}`);
                     await performCloudSync('incremental', 'auto');
                 }

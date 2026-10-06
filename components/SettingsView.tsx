@@ -1,5 +1,6 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
 import { CloudSyncButton } from './CloudSyncButton';
@@ -301,9 +302,23 @@ export const SettingsView: React.FC = () => {
     offsetTop: 0
   });
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const nativeKeyboardHeightRef = useRef(0);
+  const groupLayoutViewportRef = useRef({
+    width: typeof window !== 'undefined' ? window.innerWidth : 0,
+    height: typeof window !== 'undefined' ? window.innerHeight : 0,
+  });
+  const groupViewportHeight = Math.max(1, Math.min(
+    visualViewport.height,
+    Capacitor.isNativePlatform()
+      ? groupLayoutViewportRef.current.height - keyboardHeight - Math.max(0, visualViewport.offsetTop)
+      : visualViewport.height
+  ));
 
   useEffect(() => {
     const handleResize = () => {
+      if (nativeKeyboardHeightRef.current === 0 || window.innerWidth !== groupLayoutViewportRef.current.width) {
+        groupLayoutViewportRef.current = { width: window.innerWidth, height: window.innerHeight };
+      }
       const vv = (window as any).visualViewport;
       if (vv) {
         setVisualViewport({
@@ -346,12 +361,15 @@ export const SettingsView: React.FC = () => {
     const setupListeners = async () => {
       showListener = await Keyboard.addListener('keyboardWillShow', info => {
         if (isMounted) {
+          nativeKeyboardHeightRef.current = Math.max(0, info.keyboardHeight || 0);
           setKeyboardHeight(Math.max(0, info.keyboardHeight || 0));
         }
       });
 
       hideListener = await Keyboard.addListener('keyboardWillHide', () => {
         if (isMounted) {
+          nativeKeyboardHeightRef.current = 0;
+          groupLayoutViewportRef.current = { width: window.innerWidth, height: window.innerHeight };
           setKeyboardHeight(0);
         }
       });
@@ -1083,11 +1101,13 @@ export const SettingsView: React.FC = () => {
   };
 
   const openCreateGroup = () => {
+    groupLayoutViewportRef.current = { width: window.innerWidth, height: window.innerHeight };
     setGroupSaveError('');
     setGroupCategoryType('expense');
     setGroupModal({ isOpen: true, mode: 'create', ledgerId: selectedLedgerId, name: '', categoryIds: [] });
   };
   const openEditGroup = (g: CategoryGroup) => {
+    groupLayoutViewportRef.current = { width: window.innerWidth, height: window.innerHeight };
     setGroupSaveError('');
     const categoryIds = getValidGroupCategoryIds(g.categoryIds, groupCategories).filter(id =>
       !categoryGroupOwners.has(id) || categoryGroupOwners.get(id)?.id === g.id);
@@ -2843,28 +2863,31 @@ export const SettingsView: React.FC = () => {
         </div>
       )}
 
-      {groupModal.isOpen && groupModal.ledgerId === selectedLedgerId && (
+      {groupModal.isOpen && groupModal.ledgerId === selectedLedgerId && typeof document !== 'undefined' && createPortal(
         <div
           className="fixed left-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm w-full"
           onClick={(event) => {
             if (event.target === event.currentTarget) closeGroupModal();
           }}
           style={{
-            height: visualViewport.height,
+            height: groupViewportHeight,
             top: visualViewport.offsetTop
           }}
         >
           <div
-            className="bg-white dark:bg-zinc-900 rounded-t-3xl p-5 animate-slide-up flex flex-col overflow-hidden"
-            style={{ height: Math.min(visualViewport.height * 0.78, 680), paddingBottom: 'max(1.25rem, env(safe-area-inset-bottom))' }}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="category-group-sheet-title"
+            className="category-group-sheet bg-white dark:bg-zinc-900 rounded-t-3xl p-5 animate-slide-up"
+            style={{ height: Math.min(groupViewportHeight * 0.78, 680), paddingBottom: 0 }}
           >
             <div className="flex justify-between items-center mb-4 shrink-0">
               <button onClick={closeGroupModal} disabled={isSavingGroup} className="text-ios-subtext disabled:opacity-40">取消</button>
-              <h3 className="font-bold text-lg">{groupModal.mode === 'create' ? '新建分类组' : '编辑分类组'}</h3>
+              <h3 id="category-group-sheet-title" className="font-bold text-lg">{groupModal.mode === 'create' ? '新建分类组' : '编辑分类组'}</h3>
               <button onClick={handleSaveGroup} disabled={isSavingGroup} className="text-ios-primary font-bold disabled:opacity-40">{isSavingGroup ? '保存中…' : '保存'}</button>
             </div>
 
-            <div className="space-y-4 flex-1 min-h-0 overflow-y-auto no-scrollbar">
+            <div className="category-group-sheet-scroll space-y-4 no-scrollbar">
               <div>
                 <label className="text-xs text-ios-subtext ml-1 mb-1 block">分组名称</label>
                 <input
@@ -2927,7 +2950,7 @@ export const SettingsView: React.FC = () => {
               </div>
             </div>
           </div>
-        </div>
+        </div>, document.body
       )}
     </>
   );

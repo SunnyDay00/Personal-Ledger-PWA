@@ -94,7 +94,7 @@ export const LedgerManageView: React.FC = () => {
             </div>
 
             {/* Content */}
-            <div className="flex-1 overflow-y-auto p-4 pb-32 space-y-4 pt-[calc(env(safe-area-inset-top)+4.5rem)]">
+            <div className="flex-1 overflow-y-auto no-scrollbar p-4 pb-32 space-y-4 pt-[calc(env(safe-area-inset-top)+4.5rem)]">
 
                 {/* Search / Add Bar */}
                 {isEditing && (
