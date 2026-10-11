@@ -41,6 +41,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
     const [previewKeys, setPreviewKeys] = useState<string[] | null>(null);
     const [highlightedTransactionId, setHighlightedTransactionId] = useState<string | null>(null);
     const [typeFilter, setTypeFilter] = useState<TransactionTypeFilter>('all');
+    const [dateSortOrder, setDateSortOrder] = useState<'newest' | 'oldest'>('newest');
+    const [amountSortOrder, setAmountSortOrder] = useState<'off' | 'largest' | 'smallest'>('off');
     const transactionRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
     useEffect(() => {
@@ -92,9 +94,15 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
     }, [transactions, currentLedgerId, startTime, endTime]);
 
     const filteredTransactions = useMemo(() => {
-        if (typeFilter === 'all') return periodTransactions;
-        return periodTransactions.filter(t => t.type === typeFilter);
-    }, [periodTransactions, typeFilter]);
+        const matching = typeFilter === 'all' ? periodTransactions : periodTransactions.filter(t => t.type === typeFilter);
+        return [...matching].sort((a, b) => {
+            if (amountSortOrder !== 'off') {
+                const difference = Math.abs(a.amount) - Math.abs(b.amount);
+                if (difference !== 0) return amountSortOrder === 'largest' ? -difference : difference;
+            }
+            return dateSortOrder === 'newest' ? b.date - a.date : a.date - b.date;
+        });
+    }, [periodTransactions, typeFilter, dateSortOrder, amountSortOrder]);
 
     useEffect(() => {
         if (!jumpTarget) return;
@@ -128,15 +136,19 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
         };
     }, [jumpTarget, filteredTransactions, onJumpTargetHandled]);
 
-    const groupedTransactions = useMemo(() => {
+    const transactionSections = useMemo<{ key: string; dateKey: string | null; records: Transaction[] }[]>(() => {
+        // Amount sorting spans the whole filtered period; regrouping by day would break that order.
+        if (amountSortOrder !== 'off') {
+            return filteredTransactions.length ? [{ key: 'amount', dateKey: null, records: filteredTransactions }] : [];
+        }
         const groups: { [key: string]: typeof transactions } = {};
         filteredTransactions.forEach(t => {
             const dateKey = format(t.date, 'yyyy-MM-dd');
             if (!groups[dateKey]) groups[dateKey] = [];
             groups[dateKey].push(t);
         });
-        return groups;
-    }, [filteredTransactions]);
+        return Object.entries(groups).map(([dateKey, records]) => ({ key: dateKey, dateKey, records }));
+    }, [filteredTransactions, amountSortOrder]);
 
     const { income, expense } = useMemo(() => {
         return periodTransactions.reduce(
@@ -317,7 +329,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                     </div>
                 )}
 
-                <div className="mb-1 flex justify-start">
+                <div className="mb-1 flex items-center justify-between gap-3">
                     <div className="inline-flex bg-gray-200/50 dark:bg-zinc-800/50 p-0.5 rounded-lg">
                         {([
                             { key: 'all', label: '全部' },
@@ -339,23 +351,53 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                             </button>
                         ))}
                     </div>
+                    <div className="inline-flex items-center gap-2 shrink-0">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setAmountSortOrder(order => order === 'off' ? 'largest' : order === 'largest' ? 'smallest' : 'off');
+                                feedback.play('switch');
+                            }}
+                            aria-pressed={amountSortOrder !== 'off'}
+                            aria-label={`金额排序：${amountSortOrder === 'off' ? '关闭，点击按金额从大到小' : amountSortOrder === 'largest' ? '从大到小，点击按金额从小到大' : '从小到大，点击关闭金额排序'}`}
+                            title={amountSortOrder === 'off' ? '开启金额排序' : amountSortOrder === 'largest' ? '金额从大到小，点击切换从小到大' : '金额从小到大，点击恢复日期排序'}
+                            className={clsx('inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium active:opacity-60',
+                                amountSortOrder === 'off' ? 'bg-gray-200/50 dark:bg-zinc-800/50 text-ios-subtext' : 'bg-ios-primary/10 text-ios-primary')}
+                        >
+                            <Icon name={amountSortOrder === 'off' ? 'Coins' : amountSortOrder === 'largest' ? 'ArrowDownCircle' : 'ArrowUpCircle'} className="w-3.5 h-3.5" />
+                            {amountSortOrder === 'off' ? '金额' : amountSortOrder === 'largest' ? '金额↓' : '金额↑'}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setDateSortOrder(order => order === 'newest' ? 'oldest' : 'newest');
+                                feedback.play('switch');
+                            }}
+                            aria-label={`账目排序：${dateSortOrder === 'newest' ? '正序，最新日期在上；点击切换倒序' : '倒序，最早日期在上；点击切换正序'}`}
+                            title={dateSortOrder === 'newest' ? '最新日期在上，点击切换倒序' : '最早日期在上，点击切换正序'}
+                            className="inline-flex items-center gap-1 rounded-lg bg-gray-200/50 dark:bg-zinc-800/50 px-2 py-1 text-xs font-medium text-ios-subtext active:opacity-60"
+                        >
+                            <Icon name={dateSortOrder === 'newest' ? 'ArrowDownCircle' : 'ArrowUpCircle'} className="w-3.5 h-3.5" />
+                            {dateSortOrder === 'newest' ? '正序' : '倒序'}
+                        </button>
+                    </div>
                 </div>
 
                 <div>
-                    {Object.keys(groupedTransactions).map(dateKey => {
-                        const dateObj = new Date(dateKey);
-                        const isToday = isSameDay(dateObj, new Date());
+                    {transactionSections.map(({ key, dateKey, records }) => {
+                        const dateObj = dateKey ? new Date(dateKey) : null;
+                        const isToday = dateObj && isSameDay(dateObj, new Date());
                         return (
-                            <div key={dateKey} className="mb-4">
-                                <div className="flex justify-between items-end mb-2 px-3">
+                            <div key={key} className="mb-4">
+                                {dateObj && <div className="flex justify-between items-end mb-2 px-3">
                                     <div className="flex items-center gap-2">
                                         <span className="text-sm font-bold text-ios-text">{format(dateObj, 'dd')}</span>
                                         <span className="text-xs text-ios-subtext">{isToday ? '今天' : `${format(dateObj, 'MM月')} / ${new Intl.DateTimeFormat('zh-CN', { weekday: 'long' }).format(dateObj)}`}</span>
                                     </div>
                                     <div className="flex gap-3 text-xs">
                                         {(() => {
-                                            const dayIncome = groupedTransactions[dateKey].reduce((acc, t) => t.type === 'income' ? acc + t.amount : acc, 0);
-                                            const dayExpense = groupedTransactions[dateKey].reduce((acc, t) => t.type === 'expense' ? acc + t.amount : acc, 0);
+                                            const dayIncome = records.reduce((acc, t) => t.type === 'income' ? acc + t.amount : acc, 0);
+                                            const dayExpense = records.reduce((acc, t) => t.type === 'expense' ? acc + t.amount : acc, 0);
                                             return (
                                                 <>
                                                     {dayIncome > 0 && <span className="text-green-500 font-medium">+{formatLedgerAmount(dayIncome, { hideCurrency: true })}</span>}
@@ -364,9 +406,9 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                                             )
                                         })()}
                                     </div>
-                                </div>
+                                </div>}
                                 <div className="bg-white/80 dark:bg-zinc-900/80 backdrop-blur-lg rounded-2xl overflow-hidden shadow-sm border border-white/40 dark:border-white/5">
-                                    {groupedTransactions[dateKey].map((t, index) => {
+                                    {records.map((t, index) => {
                                         const category = categories.find(c => c.id === t.categoryId);
                                         const isSelected = selectedIds.has(t.id);
                                         const isHighlighted = highlightedTransactionId === t.id;
@@ -392,7 +434,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                                                     'group relative flex items-center justify-between p-3.5 transition-[background-color,box-shadow,opacity] duration-300 scroll-mt-28 active:bg-gray-50 dark:active:bg-zinc-800',
                                                     isSoldOutTradingBuy && 'opacity-50',
                                                     isHighlighted && 'bg-ios-primary/10 ring-2 ring-ios-primary/20 ring-inset shadow-[0_0_0_1px_rgba(0,122,255,0.08)]',
-                                                    index !== groupedTransactions[dateKey].length - 1 && 'border-b border-gray-100 dark:border-zinc-800/50'
+                                                    index !== records.length - 1 && 'border-b border-gray-100 dark:border-zinc-800/50'
                                                 )}
                                             >
                                                 <div className="flex items-center gap-3 min-w-0">
@@ -429,7 +471,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                                                         </div>
                                                         {isTrading ? (
                                                             <div className="text-[10px] text-ios-subtext flex flex-wrap gap-x-1 gap-y-0.5">
-                                                                <span>{format(t.createdAt, 'HH:mm')}</span>
+                                                                <span>{amountSortOrder !== 'off' && `${format(t.date, 'MM.dd')} · `}{format(t.createdAt, 'HH:mm')}</span>
                                                                 <span>· {getTransactionTypeLabel(currentLedger, t.type)}</span>
                                                                 {t.type === 'expense' && tradingBuyUnitCost !== null && (
                                                                     <span>· 单个成本 {formatLedgerAmount(tradingBuyUnitCost, { hideCurrency: true })}</span>
@@ -447,7 +489,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenSearch, onOpenBudget, 
                                                             </div>
                                                         ) : (
                                                             <div className="text-[10px] text-ios-subtext flex gap-1">
-                                                                <span>{format(t.createdAt, 'HH:mm')}</span>
+                                                                <span>{amountSortOrder !== 'off' && `${format(t.date, 'MM.dd')} · `}{format(t.createdAt, 'HH:mm')}</span>
                                                                 {t.note && <span>· {t.note}</span>}
                                                             </div>
                                                         )}

@@ -8,6 +8,13 @@ It is an early-stage public repository under active maintenance. The app can run
 
 Online demo / 在线体验：<https://personal-ledger-pwa.pages.dev/>
 
+## 7.7.1 更新（2026/10/11）
+
+- 修复添加、编辑分类弹窗的滚动穿透，优化 iOS 边缘手势、键盘与安全区域适配。
+- 分类图标扩充至 176 个，新增 13 类标签和默认选中的“全部”标签。
+- 首页新增正序 / 倒序日期排序，以及关闭 / 金额从大到小 / 金额从小到大的三状态金额排序。
+- 网页、Android 与 iOS 版本统一为 7.7.1；iOS 构建号为 23，Android versionCode 为 24。完整更新日志见 `changelog.ts`。
+
 ## 7.7.0 更新（2026/10/06）
 
 - 默认长期登录，支持从不 / 一周 / 一个月 / 一年自动退出；退出时重置本机数据，云端数据保留。
@@ -47,10 +54,14 @@ The goal of a Codex Security review would be to improve data protection, authent
 
 - Local ledger creation and management.
 - Accounting ledgers for income and expense records.
+  - The home transaction filter row includes a date-sort toggle on its right. 正序 is the default (newest first); 倒序 shows oldest first. Both day groups and records within each day follow the selected direction, including filtered income/expense and trading records. Sorting changes only the displayed order, not totals or stored records.
+  - An amount-sort button sits immediately before the date toggle and cycles through off (default), largest first, smallest first, then off. Active amount sorting compares individual record amounts by magnitude across the entire selected period and current type filter, using the date direction to break ties. The list becomes a single card with dates on each record, so day grouping cannot interrupt the amount order. Turning it off restores day groups and the selected date direction. Income, expense, balance, stored records and selection remain unchanged.
 - New entries open on category selection with no default category and no amount/notes/keypad footer. Selecting a specific category (not just expanding a group) reveals the entry controls and numeric keypad. Switching income/expense while creating an entry clears the previous category and returns to category selection. Editing an existing transaction retains its valid saved category; missing/deleted categories require selection again rather than falling back to the first category. Trading category selection follows the same keypad gating.
 - Trading-style ledgers for buy/sell records, inventory-like quantity tracking, fees, realized profit, and card-key style items.
 - Trading categories can set separate buy and sell currencies. New foreign-currency buy/sell records keep the original currency amount plus an exchange-rate snapshot while storing CNY as the base amount for inventory, cost, and profit math.
 - Category and category group management per ledger.
+  - Add/edit category sheets render outside the background scroll container. While open, the settings scroller is locked and background controls are inert; a single keyboard-aware, safe-area-padded sheet scroller contains the form and icon picker. Overscroll containment plus an iOS boundary-gesture fallback prevents scrolling the page behind the sheet. Closing restores the background position and controls.
+  - Category icons include an 全部 tab followed by 13 labeled category tabs (food, shopping, digital products, transport, health/home, study/work, finance, animals, plants, weather, water/fire/nature, hobbies, and general), with 176 selectable icons and Chinese accessible names. Add/edit sheets open on 全部 by default. Switching tabs preserves the selected icon, including the saved icon while editing. Existing icon keys remain supported.
   - Each group has an Eye/EyeOff toggle immediately before its delete button, enabled by default. In accounting-ledger expense/income entry, enabled groups appear as separate cards named after the group, initially collapsed; tapping the header expands/collapses the category choices. A category belongs to one group at most and never repeats in the normal list below. Disabled groups return their owned categories to the normal list; hiding a group does not release its ownership. Deleted, foreign-ledger, and opposite-type members are excluded; empty cards are omitted. Eye preferences are saved in `AppSettings.categoryGroupVisibility` and follow account settings sync and WebDAV backups. Expansion state resets when opening the entry page or changing ledger/type. Trading category pickers retain their existing behavior.
   - The filter button between income/expense tabs and the mode button shows only categories not assigned to any active group, with the current count. It respects the selected ledger/type and ignores eye visibility. Filtered dragging preserves hidden category positions. Create/edit group dialogs still show categories owned by other groups, but disable them in gray and show 所属 plus the owner name beneath. The current group's own members remain selectable. Group saves recheck ownership inside an IndexedDB transaction; concurrent saves cannot claim the same category. Legacy overlaps are resolved in group order in current views and cleaned from stored references on group save/reorder. Category transfer retains the destination's existing group; an unassigned destination inherits the source's group.
   - Entering category management starts in drag sorting mode; the mode button switches to deletion/editing mode and back. The green 添加 card is always the first grid item in either mode, shares the same grid width and row height as category cards, and is not part of the draggable category order. 删除所有分类组 first opens an in-app confirmation naming the ledger and group count; cancellation does nothing, and only 确认删除 removes the groups included in that confirmation. Categories and transactions are retained.

@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useApp } from '../contexts/AppContext';
 import { Icon } from './ui/Icon';
+import { CategoryIconPicker } from './ui/CategoryIconPicker';
 import { CloudSyncButton } from './CloudSyncButton';
 import { THEME_PRESETS, AVAILABLE_ICONS, DEFAULT_CATEGORIES, DEFAULT_TRADE_CATEGORIES, DEFAULT_CURRENCY, SUPPORTED_CURRENCIES } from '../constants';
 import { UPDATE_LOGS } from '../changelog';
@@ -189,6 +190,8 @@ export const SettingsView: React.FC = () => {
   const [onlyUngroupedCategories, setOnlyUngroupedCategories] = useState(false);
   const [isAddingCat, setIsAddingCat] = useState(false);
   const [editingCat, setEditingCat] = useState<Category | null>(null);
+  const categorySheetRef = useRef<HTMLDivElement>(null);
+  const categorySheetScrollRef = useRef<HTMLDivElement>(null);
   const [categoryTransferModal, setCategoryTransferModal] = useState<{ ledgerId: string; sourceId: string; targetId: string } | null>(null);
   const [isTransferringCategory, setIsTransferringCategory] = useState(false);
   const [categoryTransferError, setCategoryTransferError] = useState('');
@@ -313,6 +316,55 @@ export const SettingsView: React.FC = () => {
       ? groupLayoutViewportRef.current.height - keyboardHeight - Math.max(0, visualViewport.offsetTop)
       : visualViewport.height
   ));
+
+  useEffect(() => {
+    if (!isAddingCat && !editingCat) return;
+    const background = scrollRef.current;
+    const overlay = categorySheetRef.current;
+    const scroller = categorySheetScrollRef.current;
+    if (!overlay || !scroller) return;
+
+    // Lock the actual app scroller; body is already fixed, so a body lock alone is insufficient.
+    const previousOverflow = background?.style.overflowY ?? '';
+    const previousScrollTop = background?.scrollTop ?? 0;
+    const appRoot = document.getElementById('root');
+    const wasInert = appRoot?.hasAttribute('inert') ?? false;
+    if (background) background.style.overflowY = 'hidden';
+    appRoot?.setAttribute('inert', '');
+
+    let previousY = 0;
+    let gestureInScroller = false;
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length !== 1) return;
+      previousY = event.touches[0].clientY;
+      gestureInScroller = event.target instanceof Node && scroller.contains(event.target);
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      if (event.touches.length !== 1) return;
+      const currentY = event.touches[0].clientY;
+      const delta = currentY - previousY;
+      previousY = currentY;
+      // Older iOS versions do not contain overscroll reliably. Stop only boundary gestures,
+      // leaving normal scrolling, taps and input focus available inside the sheet.
+      const atTop = scroller.scrollTop <= 0;
+      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
+      if (!gestureInScroller || scroller.scrollHeight <= scroller.clientHeight
+        || (atTop && delta > 0) || (atBottom && delta < 0)) {
+        if (event.cancelable) event.preventDefault();
+      }
+    };
+    overlay.addEventListener('touchstart', onTouchStart, { passive: true });
+    overlay.addEventListener('touchmove', onTouchMove, { passive: false });
+    return () => {
+      overlay.removeEventListener('touchstart', onTouchStart);
+      overlay.removeEventListener('touchmove', onTouchMove);
+      if (background) {
+        background.style.overflowY = previousOverflow;
+        background.scrollTop = previousScrollTop;
+      }
+      if (!wasInert) appRoot?.removeAttribute('inert');
+    };
+  }, [isAddingCat, editingCat?.id]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -2580,16 +2632,17 @@ export const SettingsView: React.FC = () => {
         </div>
       )}
 
-      {isAddingCat && (
+      {isAddingCat && typeof document !== 'undefined' && createPortal(
         <div
-          className="fixed left-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm w-full"
+          ref={categorySheetRef}
+          className="category-sheet-overlay fixed left-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm w-full"
           style={{
-            height: visualViewport.height,
+            height: groupViewportHeight,
             top: visualViewport.offsetTop
           }}
         >
-          <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-5 animate-slide-up h-[78%] max-h-[680px] flex flex-col overflow-hidden">
-            <div className="flex justify-between items-center mb-6">
+          <div role="dialog" aria-modal="true" aria-label={isAddingCat ? "添加分类" : "编辑分类"} className="category-group-sheet bg-white dark:bg-zinc-900 rounded-t-3xl p-5 animate-slide-up" style={{ height: Math.min(groupViewportHeight * 0.78, 680), paddingBottom: 0 }}>
+            <div className="flex justify-between items-center mb-4 shrink-0">
               <button onClick={() => {
                 setIsAddingCat(false);
                 setNewCatName('');
@@ -2604,129 +2657,118 @@ export const SettingsView: React.FC = () => {
               <button onClick={handleAddCategory} className="text-ios-primary font-bold">完成</button>
             </div>
 
-            <div className="flex items-center gap-3 mb-4 bg-gray-50 dark:bg-zinc-800 p-3 rounded-2xl">
-              <div className="w-11 h-11 rounded-full bg-white dark:bg-zinc-700 shadow-sm flex items-center justify-center text-ios-primary shrink-0">
-                <Icon name={newCatIcon} className="w-6 h-6" />
-              </div>
-              <input
-                type="text"
-                placeholder="分类名称"
-                value={newCatName}
-                onChange={(e) => setNewCatName(e.target.value)}
-                className="flex-1 bg-transparent text-base outline-none placeholder:text-gray-400 min-w-0"
-                autoFocus
-                autoComplete="off"
-                name="categoryName"
-              />
-            </div>
-
-            {isSelectedTradingLedger && (
-              <div className="mb-4">
-                <div className="text-xs text-ios-subtext mb-2">物品类型</div>
-                <div className="flex p-1 bg-gray-100 dark:bg-zinc-800 rounded-xl">
-                  {(['normal', 'cardKey'] as TradeItemType[]).map(itemType => (
-                    <button
-                      key={itemType}
-                      type="button"
-                      onClick={() => setNewCatTradeItemType(itemType)}
-                      className={cn(
-                        'flex-1 py-2 rounded-lg text-sm font-medium transition-all',
-                        newCatTradeItemType === itemType ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext'
-                      )}
-                    >
-                      {itemType === 'cardKey' ? '卡密' : '普通物品'}
-                    </button>
-                  ))}
+            <div ref={categorySheetScrollRef} className="category-group-sheet-scroll no-scrollbar">
+              <div className="flex items-center gap-3 mb-4 bg-gray-50 dark:bg-zinc-800 p-3 rounded-2xl">
+                <div className="w-11 h-11 rounded-full bg-white dark:bg-zinc-700 shadow-sm flex items-center justify-center text-ios-primary shrink-0">
+                  <Icon name={newCatIcon} className="w-6 h-6" />
                 </div>
+                <input
+                  type="text"
+                  placeholder="分类名称"
+                  value={newCatName}
+                  onChange={(e) => setNewCatName(e.target.value)}
+                  className="flex-1 bg-transparent text-base outline-none placeholder:text-gray-400 min-w-0"
+                  autoFocus
+                  autoComplete="off"
+                  name="categoryName"
+                />
               </div>
-            )}
 
-            {isSelectedTradingLedger && (
-              <div className="grid grid-cols-2 gap-3 mb-4">
-                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
-                  买入手续费 %
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={newCatBuyFeeRate}
-                    onChange={(e) => setNewCatBuyFeeRate(e.target.value)}
-                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
-                  />
-                </label>
-                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
-                  卖出手续费 %
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={newCatSellFeeRate}
-                    onChange={(e) => setNewCatSellFeeRate(e.target.value)}
-                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
-                  />
-                </label>
-              </div>
-            )}
-
-            {isSelectedTradingLedger && (
-              <div className="grid grid-cols-2 gap-3 mb-4">
-                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
-                  买入货币
-                  <select
-                    value={newCatBuyCurrency}
-                    onChange={(event) => setNewCatBuyCurrency(event.target.value)}
-                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
-                  >
-                    {SUPPORTED_CURRENCIES.map(currency => (
-                      <option key={currency.code} value={currency.code}>{currency.code} · {currency.name}</option>
+              {isSelectedTradingLedger && (
+                <div className="mb-4">
+                  <div className="text-xs text-ios-subtext mb-2">物品类型</div>
+                  <div className="flex p-1 bg-gray-100 dark:bg-zinc-800 rounded-xl">
+                    {(['normal', 'cardKey'] as TradeItemType[]).map(itemType => (
+                      <button
+                        key={itemType}
+                        type="button"
+                        onClick={() => setNewCatTradeItemType(itemType)}
+                        className={cn(
+                          'flex-1 py-2 rounded-lg text-sm font-medium transition-all',
+                          newCatTradeItemType === itemType ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext'
+                        )}
+                      >
+                        {itemType === 'cardKey' ? '卡密' : '普通物品'}
+                      </button>
                     ))}
-                  </select>
-                </label>
-                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
-                  卖出货币
-                  <select
-                    value={newCatSellCurrency}
-                    onChange={(event) => setNewCatSellCurrency(event.target.value)}
-                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
-                  >
-                    {SUPPORTED_CURRENCIES.map(currency => (
-                      <option key={currency.code} value={currency.code}>{currency.code} · {currency.name}</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-            )}
+                  </div>
+                </div>
+              )}
 
-            <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
-              <div className="grid grid-cols-6 gap-3 pb-[calc(env(safe-area-inset-bottom)+1rem)]">
-                {AVAILABLE_ICONS.map((icon) => (
-                  <button
-                    key={icon}
-                    onClick={() => setNewCatIcon(icon)}
-                    className={cn(
-                      'min-h-[52px] rounded-2xl border border-transparent flex items-center justify-center transition-all',
-                      newCatIcon === icon ? 'bg-ios-primary text-white shadow-lg scale-105 border-ios-primary/20' : 'bg-gray-50 dark:bg-zinc-800 text-ios-subtext border-gray-100 dark:border-zinc-700/70'
-                    )}
-                  >
-                    <Icon name={icon} className="w-6 h-6" />
-                  </button>
-                ))}
-              </div>
+              {isSelectedTradingLedger && (
+                <div className="grid grid-cols-2 gap-3 mb-4">
+                  <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                    买入手续费 %
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={newCatBuyFeeRate}
+                      onChange={(e) => setNewCatBuyFeeRate(e.target.value)}
+                      className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                    卖出手续费 %
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={newCatSellFeeRate}
+                      onChange={(e) => setNewCatSellFeeRate(e.target.value)}
+                      className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                    />
+                  </label>
+                </div>
+              )}
+
+              {isSelectedTradingLedger && (
+                <div className="grid grid-cols-2 gap-3 mb-4">
+                  <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                    买入货币
+                    <select
+                      value={newCatBuyCurrency}
+                      onChange={(event) => setNewCatBuyCurrency(event.target.value)}
+                      className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                    >
+                      {SUPPORTED_CURRENCIES.map(currency => (
+                        <option key={currency.code} value={currency.code}>{currency.code} · {currency.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                    卖出货币
+                    <select
+                      value={newCatSellCurrency}
+                      onChange={(event) => setNewCatSellCurrency(event.target.value)}
+                      className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                    >
+                      {SUPPORTED_CURRENCIES.map(currency => (
+                        <option key={currency.code} value={currency.code}>{currency.code} · {currency.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              )}
+
+              <CategoryIconPicker value={newCatIcon} onChange={setNewCatIcon} />
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
-      {editingCat && (
+      {editingCat && typeof document !== 'undefined' && createPortal(
         <div
-          className="fixed left-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm w-full"
+          ref={categorySheetRef}
+          className="category-sheet-overlay fixed left-0 z-50 flex flex-col justify-end bg-black/40 backdrop-blur-sm w-full"
           style={{
-            height: visualViewport.height,
+            height: groupViewportHeight,
             top: visualViewport.offsetTop
           }}
         >
-          <div className="bg-white dark:bg-zinc-900 rounded-t-3xl p-5 animate-slide-up h-[78%] max-h-[680px] flex flex-col overflow-hidden">
-            <div className="flex justify-between items-center mb-6">
+          <div role="dialog" aria-modal="true" aria-label={isAddingCat ? "添加分类" : "编辑分类"} className="category-group-sheet bg-white dark:bg-zinc-900 rounded-t-3xl p-5 animate-slide-up" style={{ height: Math.min(groupViewportHeight * 0.78, 680), paddingBottom: 0 }}>
+            <div className="flex justify-between items-center mb-4 shrink-0">
               <button
                 onClick={() => {
                   setEditingCat(null);
@@ -2746,121 +2788,109 @@ export const SettingsView: React.FC = () => {
               <button onClick={saveEditCategory} className="text-ios-primary font-bold">保存</button>
             </div>
 
-            <div className="flex items-center gap-3 mb-4 bg-gray-50 dark:bg-zinc-800 p-3 rounded-2xl">
-              <div className="w-11 h-11 rounded-full bg-white dark:bg-zinc-700 shadow-sm flex items-center justify-center text-ios-primary shrink-0">
-                <Icon name={newCatIcon} className="w-6 h-6" />
-              </div>
-              <input
-                type="text"
-                placeholder="分类名称"
-                value={newCatName}
-                onChange={(e) => setNewCatName(e.target.value)}
-                className="flex-1 bg-transparent text-base outline-none placeholder:text-gray-400 min-w-0"
-                autoFocus
-                autoComplete="off"
-                name="editCategoryName"
-              />
-            </div>
-
-            {isSelectedTradingLedger && (
-              <div className="mb-4">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs text-ios-subtext">物品类型</span>
-                  {editingCatHasTransactions && <span className="text-[11px] text-ios-subtext">已有交易后不可切换</span>}
+            <div ref={categorySheetScrollRef} className="category-group-sheet-scroll no-scrollbar">
+              <div className="flex items-center gap-3 mb-4 bg-gray-50 dark:bg-zinc-800 p-3 rounded-2xl">
+                <div className="w-11 h-11 rounded-full bg-white dark:bg-zinc-700 shadow-sm flex items-center justify-center text-ios-primary shrink-0">
+                  <Icon name={newCatIcon} className="w-6 h-6" />
                 </div>
-                <div className="flex p-1 bg-gray-100 dark:bg-zinc-800 rounded-xl">
-                  {(['normal', 'cardKey'] as TradeItemType[]).map(itemType => (
-                    <button
-                      key={itemType}
-                      type="button"
-                      disabled={editingCatHasTransactions}
-                      onClick={() => setNewCatTradeItemType(itemType)}
-                      className={cn(
-                        'flex-1 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-60',
-                        newCatTradeItemType === itemType ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext'
-                      )}
+                <input
+                  type="text"
+                  placeholder="分类名称"
+                  value={newCatName}
+                  onChange={(e) => setNewCatName(e.target.value)}
+                  className="flex-1 bg-transparent text-base outline-none placeholder:text-gray-400 min-w-0"
+                  autoFocus
+                  autoComplete="off"
+                  name="editCategoryName"
+                />
+              </div>
+
+              {isSelectedTradingLedger && (
+                <div className="mb-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-ios-subtext">物品类型</span>
+                    {editingCatHasTransactions && <span className="text-[11px] text-ios-subtext">已有交易后不可切换</span>}
+                  </div>
+                  <div className="flex p-1 bg-gray-100 dark:bg-zinc-800 rounded-xl">
+                    {(['normal', 'cardKey'] as TradeItemType[]).map(itemType => (
+                      <button
+                        key={itemType}
+                        type="button"
+                        disabled={editingCatHasTransactions}
+                        onClick={() => setNewCatTradeItemType(itemType)}
+                        className={cn(
+                          'flex-1 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-60',
+                          newCatTradeItemType === itemType ? 'bg-white dark:bg-zinc-700 shadow-sm text-ios-text' : 'text-ios-subtext'
+                        )}
+                      >
+                        {itemType === 'cardKey' ? '卡密' : '普通物品'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {isSelectedTradingLedger && (
+                <div className="grid grid-cols-2 gap-3 mb-4">
+                  <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                    买入手续费 %
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={newCatBuyFeeRate}
+                      onChange={(e) => setNewCatBuyFeeRate(e.target.value)}
+                      className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                    卖出手续费 %
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={newCatSellFeeRate}
+                      onChange={(e) => setNewCatSellFeeRate(e.target.value)}
+                      className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                    />
+                  </label>
+                </div>
+              )}
+
+              {isSelectedTradingLedger && (
+                <div className="grid grid-cols-2 gap-3 mb-4">
+                  <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                    买入货币
+                    <select
+                      value={newCatBuyCurrency}
+                      onChange={(event) => setNewCatBuyCurrency(event.target.value)}
+                      className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
                     >
-                      {itemType === 'cardKey' ? '卡密' : '普通物品'}
-                    </button>
-                  ))}
+                      {SUPPORTED_CURRENCIES.map(currency => (
+                        <option key={currency.code} value={currency.code}>{currency.code} · {currency.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs text-ios-subtext">
+                    卖出货币
+                    <select
+                      value={newCatSellCurrency}
+                      onChange={(event) => setNewCatSellCurrency(event.target.value)}
+                      className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
+                    >
+                      {SUPPORTED_CURRENCIES.map(currency => (
+                        <option key={currency.code} value={currency.code}>{currency.code} · {currency.name}</option>
+                      ))}
+                    </select>
+                  </label>
                 </div>
-              </div>
-            )}
+              )}
 
-            {isSelectedTradingLedger && (
-              <div className="grid grid-cols-2 gap-3 mb-4">
-                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
-                  买入手续费 %
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={newCatBuyFeeRate}
-                    onChange={(e) => setNewCatBuyFeeRate(e.target.value)}
-                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
-                  />
-                </label>
-                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
-                  卖出手续费 %
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={newCatSellFeeRate}
-                    onChange={(e) => setNewCatSellFeeRate(e.target.value)}
-                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
-                  />
-                </label>
-              </div>
-            )}
-
-            {isSelectedTradingLedger && (
-              <div className="grid grid-cols-2 gap-3 mb-4">
-                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
-                  买入货币
-                  <select
-                    value={newCatBuyCurrency}
-                    onChange={(event) => setNewCatBuyCurrency(event.target.value)}
-                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
-                  >
-                    {SUPPORTED_CURRENCIES.map(currency => (
-                      <option key={currency.code} value={currency.code}>{currency.code} · {currency.name}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="flex flex-col gap-1 text-xs text-ios-subtext">
-                  卖出货币
-                  <select
-                    value={newCatSellCurrency}
-                    onChange={(event) => setNewCatSellCurrency(event.target.value)}
-                    className="bg-gray-50 dark:bg-zinc-800 p-3 rounded-xl text-sm text-ios-text outline-none"
-                  >
-                    {SUPPORTED_CURRENCIES.map(currency => (
-                      <option key={currency.code} value={currency.code}>{currency.code} · {currency.name}</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-            )}
-
-            <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
-              <div className="grid grid-cols-6 gap-3 pb-[calc(env(safe-area-inset-bottom)+1rem)]">
-                {AVAILABLE_ICONS.map((icon) => (
-                  <button
-                    key={icon}
-                    onClick={() => setNewCatIcon(icon)}
-                    className={cn(
-                      'min-h-[52px] rounded-2xl border border-transparent flex items-center justify-center transition-all',
-                      newCatIcon === icon ? 'bg-ios-primary text-white shadow-lg scale-105 border-ios-primary/20' : 'bg-gray-50 dark:bg-zinc-800 text-ios-subtext border-gray-100 dark:border-zinc-700/70'
-                    )}
-                  >
-                    <Icon name={icon} className="w-6 h-6" />
-                  </button>
-                ))}
-              </div>
+              <CategoryIconPicker value={newCatIcon} onChange={setNewCatIcon} />
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {groupModal.isOpen && groupModal.ledgerId === selectedLedgerId && typeof document !== 'undefined' && createPortal(

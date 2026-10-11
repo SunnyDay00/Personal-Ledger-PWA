@@ -97,6 +97,10 @@ select,
 }
 
 /* The group sheet is portaled out of the background momentum scroller on iOS. */
+.category-sheet-overlay {
+  overscroll-behavior: none;
+}
+
 .category-group-sheet {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
