@@ -17,6 +17,7 @@ import { Transaction, TransactionType } from '../types';
 import { LiquidFilter } from './LiquidFilter';
 import { isTradingLedger } from '../services/ledgerUtils';
 import { syncIosHomeQuickActions } from '../services/homeQuickActions';
+import { useNativeBottomBar } from './useNativeBottomBar';
 
 type HomeJumpTarget = {
     transactionId: string;
@@ -215,6 +216,33 @@ export const Layout: React.FC = () => {
         setActiveTab(tab);
     }, []);
 
+    const nativeBottomBar = useNativeBottomBar({
+        selectedTab: activeTab,
+        statsMode,
+        trading: isCurrentTradingLedger,
+        visible: !state.settings.isFirstRun && !showAdd && !showSearch && !showBudget && !hideTabBarForKeyboard,
+        themeMode: state.settings.themeMode,
+        tintColor: state.settings.customThemeColor || currentLedger?.themeColor || '#007aff',
+    }, action => {
+        if (action.type === 'add') {
+            openAdd(action.transactionType);
+        } else if (action.type === 'statsMode') {
+            selectStatsMode(action.mode);
+        } else if (action.type === 'tab') {
+            if (action.tab !== activeTab) {
+                feedback.play('click');
+                feedback.vibrate('light');
+            }
+            handleTabSelect(action.tab);
+        }
+    });
+
+    useEffect(() => {
+        if (!nativeBottomBar) return;
+        setShowAddQuickMenu(false);
+        setShowStatsQuickMenu(false);
+    }, [nativeBottomBar]);
+
     useEffect(() => {
         if (activeTab === 'stats' && statsMode === 'ai') {
             setAiViewMounted(true);
@@ -370,7 +398,7 @@ export const Layout: React.FC = () => {
 
     return (
         <div className="h-full w-full flex flex-col bg-ios-bg text-ios-text overflow-hidden font-sans relative">
-            <LiquidFilter targetRef={liquidSurfaceRef} />
+            {!nativeBottomBar && <LiquidFilter targetRef={liquidSurfaceRef} />}
 
             {/* Main Content Area */}
             {/* Main takes full height, navigation floats on top at bottom */}
@@ -449,7 +477,8 @@ export const Layout: React.FC = () => {
             )}
 
             {/* Tab Bar - Floating Capsule Design */}
-            <nav
+            {!nativeBottomBar && <nav
+                data-web-bottom-bar
                 className={clsx(
                     'absolute bottom-6 left-4 right-4 z-40 h-16 transform-gpu transition-[transform,opacity] duration-150 will-change-transform',
                     hideTabBarForKeyboard && 'pointer-events-none translate-y-24 opacity-0'
@@ -585,7 +614,7 @@ export const Layout: React.FC = () => {
                         position="last"
                     />
                 </div>
-            </nav>
+            </nav>}
         </div>
     );
 };
