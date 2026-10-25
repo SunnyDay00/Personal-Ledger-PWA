@@ -10,11 +10,14 @@ const hasBlockingWebOverlay = () => {
   return Array.from(document.querySelectorAll<HTMLElement>(
     '[aria-modal="true"], [role="dialog"], [role="alertdialog"], .fixed, .absolute'
   )).some(element => {
-    if (element.closest('[data-web-bottom-bar]') || element.getClientRects().length === 0) return false;
+    if (element.closest('[data-web-bottom-bar]')) return false;
+    const isDialog = element.matches('[aria-modal="true"], [role="dialog"], [role="alertdialog"]');
     const style = window.getComputedStyle(element);
     if (style.visibility === 'hidden' || style.display === 'none') return false;
-    if (element.matches('[aria-modal="true"], [role="dialog"], [role="alertdialog"]')) return true;
-    if (!['absolute', 'fixed'].includes(style.position) || Number(style.zIndex) < 40 || style.zIndex === 'auto') return false;
+    if (!isDialog && (!['absolute', 'fixed'].includes(style.position) || Number(style.zIndex) < 40 || style.zIndex === 'auto')) return false;
+    // Filter ordinary page decoration before requesting layout geometry.
+    if (element.getClientRects().length === 0) return false;
+    if (isDialog) return true;
     // Slide-up screens start below the viewport. They must block from mount,
     // since CSS animation progress does not produce DOM mutation records.
     if (element.classList.contains('animate-slide-up')) return true;

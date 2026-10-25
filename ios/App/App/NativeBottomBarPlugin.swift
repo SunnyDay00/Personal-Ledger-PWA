@@ -88,7 +88,10 @@ public class NativeBottomBarPlugin: CAPPlugin, CAPBridgedPlugin {
                 self.bottomBar = bar
             }
 
-            bar.update(options)
+            UIView.performWithoutAnimation {
+                bar.update(options)
+                hostView.layoutIfNeeded()
+            }
             self.requestedVisible = options.visible
             self.applyVisibility()
             call.resolve(["available": true])
@@ -110,8 +113,18 @@ public class NativeBottomBarPlugin: CAPPlugin, CAPBridgedPlugin {
 
     private func applyVisibility() {
         let visible = requestedVisible && hostVisible && !keyboardVisible
-        bottomBar?.isHidden = !visible
-        bottomBar?.isUserInteractionEnabled = visible
+        guard let bar = bottomBar else { return }
+        bar.isUserInteractionEnabled = visible
+        let shouldHide = !visible
+        guard bar.isHidden != shouldHide else { return }
+        UIView.performWithoutAnimation {
+            if visible {
+                // Resolve the final capsule bounds before the glass is presented.
+                bar.superview?.layoutIfNeeded()
+                bar.layoutIfNeeded()
+            }
+            bar.isHidden = shouldHide
+        }
     }
 
     private func resetForPageLoad() {
@@ -164,7 +177,7 @@ private final class NativeBottomBarView: UIView {
 
     init(onAction: @escaping ([String: Any]) -> Void) {
         let glassEffect = UIGlassEffect(style: .regular)
-        glassEffect.isInteractive = true
+        glassEffect.isInteractive = false
         glassView = UIVisualEffectView(effect: glassEffect)
         self.onAction = onAction
         super.init(frame: .zero)
@@ -175,7 +188,9 @@ private final class NativeBottomBarView: UIView {
         layer.shadowOffset = CGSize(width: 0, height: 4)
         layer.shadowRadius = 12
         layer.shadowOpacity = 0.12
-        glassView.layer.cornerRadius = 32
+        // Describe the material's real shape, rather than only clipping its layer.
+        // Keep container interaction off: the buttons own presses and menus.
+        glassView.cornerConfiguration = .capsule()
         glassView.clipsToBounds = true
         glassView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(glassView)
@@ -216,8 +231,15 @@ private final class NativeBottomBarView: UIView {
         }
         // UIKit owns gesture arbitration: a long press opens the menu without also switching tabs.
         statsButton.showsMenuAsPrimaryAction = false
+        statsButton.accessibilityHint = "轻点打开，长按切换统计或 AI 助手"
         addButton.showsMenuAsPrimaryAction = true
         addButton.accessibilityIdentifier = "native-bottom-bar-add"
+        var addConfiguration = UIButton.Configuration.plain()
+        addConfiguration.image = UIImage(systemName: "plus", withConfiguration: UIImage.SymbolConfiguration(pointSize: 24, weight: .semibold))
+        addConfiguration.baseForegroundColor = .white
+        addConfiguration.background.backgroundColor = .systemGreen
+        addConfiguration.cornerStyle = .capsule
+        addButton.configuration = addConfiguration
     }
 
     required init?(coder: NSCoder) {
@@ -236,23 +258,36 @@ private final class NativeBottomBarView: UIView {
             return
         }
 
-        switch options.themeMode {
-        case "light": overrideUserInterfaceStyle = .light
-        case "dark": overrideUserInterfaceStyle = .dark
-        default: overrideUserInterfaceStyle = .unspecified
+        if previous?.themeMode != options.themeMode {
+            switch options.themeMode {
+            case "light": overrideUserInterfaceStyle = .light
+            case "dark": overrideUserInterfaceStyle = .dark
+            default: overrideUserInterfaceStyle = .unspecified
+            }
         }
-        tintColor = options.tintColor
+        let tintChanged = previous?.tintColor.isEqual(options.tintColor) != true
+        if tintChanged {
+            tintColor = options.tintColor
+        }
 
-        configureNavigationButton(homeButton, title: "首页", image: "house", selected: options.selectedTab == "home", tint: options.tintColor)
-        configureNavigationButton(
-            statsButton,
-            title: options.statsMode == "ai" ? "AI" : "统计",
-            image: options.statsMode == "ai" ? "sparkles" : "chart.bar",
-            selected: options.selectedTab == "stats",
-            tint: options.tintColor
-        )
-        configureNavigationButton(ledgersButton, title: "账本", image: "books.vertical", selected: options.selectedTab == "ledgers", tint: options.tintColor)
-        configureNavigationButton(settingsButton, title: "设置", image: "gearshape", selected: options.selectedTab == "settings", tint: options.tintColor)
+        if tintChanged || (previous?.selectedTab == "home") != (options.selectedTab == "home") {
+            configureNavigationButton(homeButton, title: "首页", image: "house", selected: options.selectedTab == "home", tint: options.tintColor)
+        }
+        if tintChanged || previous?.statsMode != options.statsMode || (previous?.selectedTab == "stats") != (options.selectedTab == "stats") {
+            configureNavigationButton(
+                statsButton,
+                title: options.statsMode == "ai" ? "AI" : "统计",
+                image: options.statsMode == "ai" ? "sparkles" : "chart.bar",
+                selected: options.selectedTab == "stats",
+                tint: options.tintColor
+            )
+        }
+        if tintChanged || (previous?.selectedTab == "ledgers") != (options.selectedTab == "ledgers") {
+            configureNavigationButton(ledgersButton, title: "账本", image: "books.vertical", selected: options.selectedTab == "ledgers", tint: options.tintColor)
+        }
+        if tintChanged || (previous?.selectedTab == "settings") != (options.selectedTab == "settings") {
+            configureNavigationButton(settingsButton, title: "设置", image: "gearshape", selected: options.selectedTab == "settings", tint: options.tintColor)
+        }
 
         if previous?.statsMode != options.statsMode {
             statsButton.menu = UIMenu(children: [
@@ -264,16 +299,8 @@ private final class NativeBottomBarView: UIView {
                 }
             ])
         }
-        statsButton.accessibilityHint = "轻点打开，长按切换统计或 AI 助手"
-
-        var addConfiguration = UIButton.Configuration.plain()
-        addConfiguration.image = UIImage(systemName: "plus", withConfiguration: UIImage.SymbolConfiguration(pointSize: 24, weight: .semibold))
-        addConfiguration.baseForegroundColor = .white
-        addConfiguration.background.backgroundColor = .systemGreen
-        addConfiguration.cornerStyle = .capsule
-        addButton.configuration = addConfiguration
-        addButton.accessibilityLabel = options.trading ? "添加交易" : "添加账目"
         if previous?.trading != options.trading {
+            addButton.accessibilityLabel = options.trading ? "添加交易" : "添加账目"
             addButton.menu = UIMenu(children: [
                 UIAction(title: options.trading ? "添加买入" : "添加支出", image: UIImage(systemName: "arrow.up.circle")) { [weak self] _ in
                     self?.onAction(["type": "add", "transactionType": "expense"])
